@@ -1,0 +1,105 @@
+/* --- VARIABLES Y RESET --- */
+:root {
+    --bg-body: #f4f6f9;
+    --bg-sidebar: #222d32;
+    --sidebar-text: #b8c7ce;
+    --sidebar-hover: #1e282c;
+    --sidebar-active-text: #ffffff;
+    --color-primary: #6777ef;
+    --color-success: #47c363;
+    --color-warning: #ffa426;
+    --color-danger: #fc544b;
+    --color-dark: #191d21;
+    --text-muted: #98a6ad;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+
+body { background-color: var(--bg-body); display: flex; height: 100vh; overflow: hidden; color: #6c757d; }
+
+/* --- SIDEBAR (THUNDER STYLE) --- */
+.sidebar { width: 250px; background-color: var(--bg-sidebar); display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-brand { height: 70px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid rgba(0,0,0,0.1); }
+.sidebar-brand h2 { color: #fff; font-size: 20px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; }
+.sidebar-menu { list-style: none; overflow-y: auto; flex: 1; padding-top: 10px; }
+.sidebar-menu li a {
+    display: flex; align-items: center; padding: 12px 20px; color: var(--sidebar-text);
+    text-decoration: none; font-size: 14px; font-weight: 500; transition: all 0.3s;
+}
+.sidebar-menu li a i { width: 30px; font-size: 16px; }
+.sidebar-menu li a:hover, .sidebar-menu li a.active {
+    background-color: var(--sidebar-hover); color: var(--sidebar-active-text); border-left: 3px solid var(--color-primary);
+}
+.menu-header { padding: 15px 20px 5px; font-size: 11px; font-weight: 700; color: #4b5d67; text-transform: uppercase; letter-spacing: .5px; }
+
+/* --- MAIN CONTENT & TOPBAR --- */
+.main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.topbar {
+    height: 70px; background-color: #fff; display: flex; justify-content: space-between; align-items: center;
+    padding: 0 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); z-index: 10;
+}
+.topbar-left i { font-size: 20px; color: var(--text-muted); cursor: pointer; }
+.topbar-right { display: flex; align-items: center; gap: 15px; }
+.user-profile { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; color: var(--color-dark); }
+.user-avatar { width: 35px; height: 35px; background-color: #e3eaef; border-radius: 50%; display: flex; justify-content: center; align-items: center; color: var(--color-primary); font-size: 18px; }
+
+/* --- AREA DINÁMICA --- */
+.content-area { padding: 30px; flex: 1; overflow-y: auto; }
+
+/* --- TARJETAS MONITOR (COMO EN LA IMAGEN) --- */
+.monitor-card { background: #fff; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.03); overflow: hidden; }
+.monitor-header {
+    background-color: #212832; color: #fff; padding: 15px 20px;
+    display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 600;
+}
+.badge-live { background-color: rgba(255,255,255,0.9); color: var(--color-danger); padding: 4px 10px; border-radius: 15px; font-size: 11px; font-weight: bold; }
+.monitor-table-header { display: flex; padding: 12px 20px; border-bottom: 1px solid #f0f0f0; font-size: 13px; font-weight: bold; color: var(--color-dark); }
+.monitor-row { display: flex; padding: 20px; border-bottom: 1px solid #f4f6f9; }
+.monitor-row:last-child { border-bottom: none; }
+
+/* Izquierda: Identificador de Mesa */
+.mesa-info { width: 250px; display: flex; align-items: center; gap: 15px; }
+.mesa-circle {
+    width: 45px; height: 45px; background-color: var(--color-primary); color: #fff;
+    border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 18px; font-weight: bold;
+}
+.mesa-details strong { display: block; font-size: 15px; color: var(--color-dark); }
+.mesa-details span { font-size: 12px; color: var(--text-muted); }
+
+/* Derecha: Estado de la Orden */
+.mesa-status { flex: 1; }
+.status-empty {
+    background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 5px; padding: 20px;
+    text-align: center; color: var(--color-success); font-size: 14px; font-weight: 500;
+}
+.status-active { border: 1px solid #e9ecef; border-radius: 5px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+.status-active-header {
+    background-color: #fcfcfc; padding: 10px 15px; border-bottom: 1px solid #e9ecef;
+    display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-muted);
+}
+.badge-venta { background-color: var(--color-warning); color: #fff; padding: 3px 8px; border-radius: 3px; font-weight: bold; margin-right: 10px; }
+.btn-outline { border: 1px solid var(--color-primary); color: var(--color-primary); background: transparent; padding: 4px 15px; border-radius: 15px; font-size: 12px; cursor: pointer; transition: 0.2s; }
+.btn-outline:hover { background: var(--color-primary); color: #fff; }
+.order-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.order-table th { padding: 10px 15px; text-align: left; color: var(--text-muted); border-bottom: 1px solid #f0f0f0; }
+.order-table td { padding: 10px 15px; color: var(--color-dark); border-bottom: 1px solid #f8f9fa; }
+.order-total-row { font-weight: bold; background-color: #fcfcfc; }
+
+/* --- DROPDOWN PERFIL USUARIO --- */
+.user-dropdown { position: relative; display: inline-block; cursor: pointer; }
+.dropdown-menu {
+    display: none; position: absolute; right: 0; background-color: #fff;
+    min-width: 180px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    z-index: 100; border-radius: 5px; margin-top: 15px; overflow: hidden;
+    border: 1px solid #f0f0f0;
+}
+.dropdown-menu a {
+    color: var(--color-dark); padding: 12px 20px; text-decoration: none;
+    display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 500;
+    transition: 0.2s;
+}
+.dropdown-menu a:hover { background-color: #f8f9fa; color: var(--color-danger); }
+.user-dropdown:hover .dropdown-menu { display: block; }
+.user-dropdown::after {
+    content: ''; position: absolute; right: 0; top: 100%; width: 100%; height: 15px;
+}
