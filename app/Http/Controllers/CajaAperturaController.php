@@ -27,7 +27,7 @@ class CajaAperturaController extends Controller
 
         $apertura = CajaApertura::create([
             'fecha' => $request->input('fecha', now()),
-            'cajero' => Auth::user()->name ?? $request->input('cajero', 'Admin'),
+            'cajero' => Auth::user()->nombre ?? $request->input('cajero', 'Admin'),
             'turno' => $request->input('turno', 'Mañana'),
             'caja_id' => $request->input('caja_id', 1),
             'monto_inicial' => $request->input('monto_inicial', 0),
@@ -57,6 +57,6 @@ class CajaAperturaController extends Controller
             abort(404, "No se encontró información de apertura para imprimir.");
         }
 
-        return view('ticket_apertura', compact('caja'));
+        return view('layouts.ticket_apertura', compact('caja'));
     }
 }

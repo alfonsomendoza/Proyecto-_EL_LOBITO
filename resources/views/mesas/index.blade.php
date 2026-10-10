@@ -73,6 +73,10 @@
 </div>
 
 <script>
+    // Base del panel de subcuentas. Se construye con el ID de la MESA
+    // (no con el ID de la venta) para no confundir los parámetros.
+    const URL_CUENTAS_MESA = '{{ url('/mesas') }}';
+
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.mesa-card').forEach(mesa => {
             mesa.addEventListener('click', function () {
@@ -114,8 +118,8 @@
             });
         } else {
             if (ventaId > 0) {
-                // La ruta POS recibe el ID de la mesa, no el ID de la venta.
-                window.location.href = '/pos/' + mesaId;
+                // Abre el panel de subcuentas de la mesa (usa mesaId, no ventaId).
+                window.location.href = URL_CUENTAS_MESA + '/' + mesaId + '/cuentas';
             } else {
                 Swal.fire('Error', 'La mesa aparece ocupada pero no tiene una venta activa.', 'error');
             }
@@ -171,7 +175,8 @@
         .then(response => response.json()) 
         .then(data => {
             if (data.exito) {
-                window.location.href = '/pos/' + data.venta_id;
+                // Tras abrir la mesa, muestra su panel de subcuentas.
+                window.location.href = URL_CUENTAS_MESA + '/' + mesaId + '/cuentas';
             } else {
                 // Ahora sí mostrará el mensaje real del 409 (Ej: "La mesa ya está ocupada")
                 Swal.fire('Atención', data.error || 'No fue posible realizar la acción.', 'warning');

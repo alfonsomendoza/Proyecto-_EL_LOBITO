@@ -41,6 +41,7 @@
                         <th style="padding: 12px 15px;">Nombre del Producto</th>
                         <th style="padding: 12px 15px;">Categoría (Grupo)</th>
                         <th style="padding: 12px 15px;">Precio (C$)</th>
+                        <th style="padding: 12px 15px; text-align: center;">Cocina</th>
                         <th style="padding: 12px 15px; text-align: center;">Acciones</th>
                     </tr>
                 </thead>
@@ -54,9 +55,16 @@
                             </span>
                         </td>
                         <td style="padding: 12px 15px; color: var(--color-success); font-weight: bold;">C${{ number_format((float)$p->precio, 2) }}</td>
+                        <td style="padding: 12px 15px; text-align: center;" class="td-cocina">
+                            @if($p->requiere_cocina)
+                                <span style="background: #e6f7ea; color: #2f9e44; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;">Sí</span>
+                            @else
+                                <span style="background: #fdecea; color: #fc544b; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;">No</span>
+                            @endif
+                        </td>
                         <td style="padding: 12px 15px; text-align: center; white-space: nowrap;">
                             <div style="display: flex; justify-content: center; align-items: center; gap: 8px;">
-                                <button class="btn-editar-producto" data-id="{{ $p->id }}" data-cat="{{ $p->categoria_id }}" data-nombre="{{ $p->nombre }}" data-precio="{{ $p->precio }}" style="background: transparent; color: #36b9cc; border: 1px solid #36b9cc; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 12px;">
+                                <button class="btn-editar-producto" data-id="{{ $p->id }}" data-cat="{{ $p->categoria_id }}" data-nombre="{{ $p->nombre }}" data-precio="{{ $p->precio }}" data-rc="{{ $p->requiere_cocina }}" style="background: transparent; color: #36b9cc; border: 1px solid #36b9cc; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 12px;">
                                     <i class="fas fa-edit"></i>
                                 </button>
                                 <button class="btn-eliminar-producto" data-id="{{ $p->id }}" style="background: transparent; color: #fc544b; border: 1px solid #fc544b; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 12px;">
@@ -112,7 +120,7 @@ document.addEventListener('DOMContentLoaded', function() {
         let btnEliminar = e.target.closest('.btn-eliminar-producto');
 
         if (btnEditar) {
-            modalProducto('editar', btnEditar.getAttribute('data-id'), btnEditar.getAttribute('data-cat'), btnEditar.getAttribute('data-nombre'), btnEditar.getAttribute('data-precio'));
+            modalProducto('editar', btnEditar.getAttribute('data-id'), btnEditar.getAttribute('data-cat'), btnEditar.getAttribute('data-nombre'), btnEditar.getAttribute('data-precio'), btnEditar.getAttribute('data-rc'));
         }
         if (btnEliminar) {
             eliminarRegistro('eliminar_producto', btnEliminar.getAttribute('data-id'));
@@ -120,7 +128,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '') {
+function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '', rc = 0) {
     let options = '<option value="">-- Seleccionar Categoría --</option>';
     window.categoriasData.forEach(c => {
         options += `<option value="${c.id}" ${c.id == catId ? 'selected' : ''}>${c.nombre}</option>`;
@@ -144,6 +152,12 @@ function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '') {
                     <label style="font-weight:bold; display:block; margin-bottom: 5px;">Precio (C$):</label>
                     <input id="prod-precio" type="number" step="0.01" class="swal2-input" value="${precio}" style="width: 100%; margin: 0; height: 38px; box-sizing: border-box;">
                 </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="font-weight:bold; display:block; margin-bottom: 5px;">¿Requiere cocina?</label>
+                    <input id="prod-requiere-cocina" type="checkbox" ${Number(rc) === 1 ? 'checked' : ''} style="width: 18px; height: 18px; vertical-align: middle; cursor: pointer;">
+                    <span style="font-size: 12px; color: #6c757d; margin-left: 6px;">Marcar solo para alimentos o preparaciones que van a cocina.</span>
+                </div>
             </div>
         `,
         focusConfirm: false,
@@ -154,7 +168,8 @@ function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '') {
             return {
                 categoria_id: document.getElementById('prod-cat').value,
                 nombre: document.getElementById('prod-nombre').value,
-                precio: document.getElementById('prod-precio').value
+                precio: document.getElementById('prod-precio').value,
+                requiere_cocina: document.getElementById('prod-requiere-cocina').checked
             }
         }
     }).then((result) => {
@@ -166,6 +181,7 @@ function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '') {
             fd.append('categoria_id', result.value.categoria_id);
             fd.append('nombre', result.value.nombre);
             fd.append('precio', result.value.precio);
+            fd.append('requiere_cocina', result.value.requiere_cocina ? 1 : 0);
 
             fetch('{{ route("catalogo.api") }}', { method: 'POST', body: fd })
             .then(res => res.json())

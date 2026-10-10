@@ -92,7 +92,7 @@
                 </div>
 
                 <div>
-                    Mesa: {{ $comanda->mesa_nombre }}
+                    Mesa: {{ $venta->mesa_numero }}
                 </div>
 
                 <div>

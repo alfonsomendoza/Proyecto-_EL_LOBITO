@@ -26,7 +26,7 @@ class MesaController extends Controller
         $ventasActivas = DB::table('ventas')
             ->select('id', 'mesa_id', 'estado')
             ->whereNotNull('mesa_id')
-            ->where('estado', 'ACTIVA')
+            ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
             ->get()
             ->keyBy('mesa_id');
 
@@ -101,7 +101,7 @@ class MesaController extends Controller
 
             $ventaExistente = DB::table('ventas')
                 ->where('mesa_id', $mesaId)
-                ->where('estado', 'ACTIVA')
+                ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
                 ->lockForUpdate()
                 ->first();
 

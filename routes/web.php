@@ -65,6 +65,11 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/mesas/api', [MesaController::class, 'api'])
         ->name('mesas.api');
 
+    // Panel de subcuentas de una mesa: muestra SOLO las cuentas de su venta
+    // activa (no crea nada, es de lectura).
+    Route::get('/mesas/{mesaId}/cuentas', [VentaController::class, 'panelCuentas'])
+        ->name('mesas.cuentas');
+
     /*
     |--------------------------------------------------------------------------
     | VENTAS Y DIVISIÓN DE CUENTAS
@@ -85,18 +90,29 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/pos/cuentas/{cuentaId}/pagar', [VentaController::class, 'pagarCuenta'])
         ->name('pos.cuentas.pagar');
 
+    // Anulación lógica de un producto individual (solo ADMIN y GERENTE).
+    Route::post('/pos/detalle/{detalleId}/anular', [VentaController::class, 'anularDetalle'])
+        ->name('pos.detalle.anular');
+
     // Ruta de la Etapa 4 - División de cuentas interactiva
     /*
     |--------------------------------------------------------------------------
     | COMANDAS (Usando tu ComandaController original)
     |--------------------------------------------------------------------------
     */
-    Route::post('/pos/comanda/api', [ComandaController::class, 'api'])
-        ->name('pos.comanda.api');
+    // (Eliminada) POST /pos/comanda/api -> ComandaController@api
+    // Apuntaba a un método inexistente. El envío real va por pos.api (VentaController@api).
 
     Route::get('/pos/comanda/{id}', [ComandaController::class, 'imprimir'])
         ->name('pos.comanda.print');
 
     Route::get('/pos/comandas/{ventaId}', [ComandaController::class, 'imprimirTodas'])
         ->name('pos.comandas.print');
+
+    // Reimpresión por plato individual: recibe el id de venta_detalles.
+    Route::get('/pos/comanda-detalle/{detalleId}', [ComandaController::class, 'imprimirPlato'])
+        ->name('pos.comanda.plato');
+
+    Route::get('/pos/comanda-completa/{ventaId}', [ComandaController::class, 'imprimirCompleta'])
+        ->name('pos.comanda.completa');
 });

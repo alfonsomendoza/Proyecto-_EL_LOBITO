@@ -11,248 +11,6 @@ class ComandaController extends Controller
 {
     /**
      * ============================================================
-     * ENVIAR PEDIDO A COCINA
-     * ============================================================
-     *
-     * Recibe los productos enviados desde la mesa.
-     *
-     * IMPORTANTE:
-     * - Los productos que no requieren cocina NO se imprimen.
-     * - Se crea una comanda nueva cada vez que se envía un pedido.
-     * - La comanda anterior permanece registrada.
-     */
-    public function enviarPedido(Request $request)
-    {
-        $request->validate([
-            'mesa_id' => 'required|integer|exists:mesas,id',
-            'venta_id' => 'nullable|integer|exists:ventas,id',
-            'cliente_id' => 'nullable|integer|exists:clientes,id',
-            'productos' => 'required|array|min:1',
-            'productos.*.producto_id' => 'required|integer|exists:productos,id',
-            'productos.*.cantidad' => 'required|numeric|min:0.01',
-            'productos.*.notas' => 'nullable|string|max:500',
-        ]);
-
-        $usuario = Auth::user();
-
-        if (!$usuario) {
-            return response()->json([
-                'exito' => false,
-                'mensaje' => 'La sesión del usuario ha expirado.'
-            ], 401);
-        }
-
-        DB::beginTransaction();
-
-        try {
-
-            /*
-             * ======================================================
-             * 1. BUSCAR LA VENTA
-             * ======================================================
-             */
-
-            $venta = null;
-
-            if ($request->filled('venta_id')) {
-
-                $venta = DB::table('ventas')
-                    ->where('id', $request->venta_id)
-                    ->lockForUpdate()
-                    ->first();
-
-                if (!$venta) {
-                    throw new \Exception('La venta no existe.');
-                }
-
-            } else {
-
-                /*
-                 * Si todavía no existe una venta para la mesa,
-                 * creamos una.
-                 */
-
-                $ventaId = DB::table('ventas')->insertGetId([
-                    'mesa_id' => $request->mesa_id,
-                    'usuario_id' => Auth::id(),
-                    'cliente_id' => $request->cliente_id,
-                    'estado' => 'ABIERTA',
-                    'total' => 0,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-                $venta = DB::table('ventas')
-                    ->where('id', $ventaId)
-                    ->first();
-            }
-
-            /*
-             * ======================================================
-             * 2. CREAR NÚMERO DE COMANDA
-             * ======================================================
-             */
-
-            $ultimaComanda = DB::table('comandas')
-                ->where('venta_id', $venta->id)
-                ->orderByDesc('id')
-                ->first();
-
-            $numeroComanda = $ultimaComanda
-                ? ((int) $ultimaComanda->numero_ticket + 1)
-                : 1;
-
-            /*
-             * ======================================================
-             * 3. CREAR COMANDA
-             * ======================================================
-             */
-
-            $comandaId = DB::table('comandas')->insertGetId([
-                'mesa_id' => $request->mesa_id,
-                'venta_id' => $venta->id,
-                'usuario_id' => Auth::id(),
-                'cliente_id' => $request->cliente_id,
-                'numero_ticket' => $numeroComanda,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-
-            /*
-             * ======================================================
-             * 4. INSERTAR DETALLES
-             * ======================================================
-             */
-
-            $productosCocina = [];
-
-            foreach ($request->productos as $item) {
-
-                $producto = DB::table('productos')
-                    ->where('id', $item['producto_id'])
-                    ->first();
-
-                if (!$producto) {
-                    throw new \Exception(
-                        'El producto #' . $item['producto_id'] . ' no existe.'
-                    );
-                }
-
-                $cantidad = (float) $item['cantidad'];
-                $precio = (float) ($producto->precio ?? 0);
-                $subtotal = $cantidad * $precio;
-
-                DB::table('comanda_detalles')->insert([
-                    'comanda_id' => $comandaId,
-                    'producto_id' => $producto->id,
-                    'cantidad' => $cantidad,
-                    'precio_unitario' => $precio,
-                    'subtotal' => $subtotal,
-                    'estado' => 'PENDIENTE',
-                    'eliminado_por' => null,
-                    'eliminado_en' => null,
-                    'notas' => $item['notas'] ?? null,
-                    'impreso_cocina' => 0,
-                    'estado_pago' => 'PENDIENTE',
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-                /*
-                 * Solo mandamos a cocina los productos
-                 * que requieren cocina.
-                 */
-                if ((int) ($producto->requiere_cocina ?? 0) === 1) {
-
-                    $productosCocina[] = [
-                        'producto_id' => $producto->id,
-                        'nombre' => $producto->nombre,
-                        'cantidad' => $cantidad,
-                        'notas' => $item['notas'] ?? null,
-                    ];
-                }
-
-                /*
-                 * ==================================================
-                 * ACTUALIZAR DETALLE DE LA VENTA
-                 * ==================================================
-                 */
-
-                DB::table('venta_detalles')->insert([
-                    'venta_id' => $venta->id,
-                    'producto_id' => $producto->id,
-                    'cantidad' => $cantidad,
-                    'precio_unitario' => $precio,
-                    'subtotal' => $subtotal,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
-
-            /*
-             * ======================================================
-             * 5. RECALCULAR TOTAL
-             * ======================================================
-             */
-
-            $totalVenta = DB::table('venta_detalles')
-                ->where('venta_id', $venta->id)
-                ->sum('subtotal');
-
-            DB::table('ventas')
-                ->where('id', $venta->id)
-                ->update([
-                    'total' => $totalVenta,
-                    'updated_at' => now(),
-                ]);
-
-            /*
-             * ======================================================
-             * 6. ACTUALIZAR MESA
-             * ======================================================
-             */
-
-            DB::table('mesas')
-                ->where('id', $request->mesa_id)
-                ->update([
-                    'estado' => 'OCUPADA',
-                    'updated_at' => now(),
-                ]);
-
-            DB::commit();
-
-            return response()->json([
-                'exito' => true,
-                'mensaje' => 'Pedido enviado correctamente.',
-                'comanda_id' => $comandaId,
-                'numero_comanda' => $numeroComanda,
-                'venta_id' => $venta->id,
-                'productos_cocina' => $productosCocina,
-                'requiere_impresion_cocina' => count($productosCocina) > 0,
-            ]);
-
-        } catch (\Throwable $e) {
-
-            DB::rollBack();
-
-            Log::error('Error al enviar pedido', [
-                'usuario_id' => Auth::id(),
-                'error' => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'exito' => false,
-                'mensaje' => 'No se pudo enviar el pedido.',
-                'error' => config('app.debug')
-                    ? $e->getMessage()
-                    : null,
-            ], 500);
-        }
-    }
-
-
-    /**
-     * ============================================================
      * IMPRIMIR UNA COMANDA
      * ============================================================
      */
@@ -272,25 +30,28 @@ class ComandaController extends Controller
         }
 
         /*
-         * Solo mostramos productos que requieren cocina.
+         * Los productos de la comanda viven en venta_detalles, enlazados
+         * mediante comanda_id. Se incluyen únicamente los detalles activos.
+         * Solo se muestran los productos que requieren cocina.
          */
-        $detalles = DB::table('comanda_detalles')
+        $detalles = DB::table('venta_detalles')
             ->join(
                 'productos',
                 'productos.id',
                 '=',
-                'comanda_detalles.producto_id'
+                'venta_detalles.producto_id'
             )
-            ->where('comanda_detalles.comanda_id', $id)
-            ->whereNull('comanda_detalles.eliminado_en')
+            ->where('venta_detalles.comanda_id', $id)
+            ->where('venta_detalles.estado', 'ACTIVO')
             ->where('productos.requiere_cocina', 1)
             ->select(
-                'comanda_detalles.*',
+                'venta_detalles.cantidad',
                 'productos.nombre'
             )
+            ->orderBy('venta_detalles.id')
             ->get();
 
-        return view('comandas.imprimir', compact(
+        return view('ventas.comanda_print', compact(
             'comanda',
             'detalles'
         ));
@@ -317,36 +78,205 @@ class ComandaController extends Controller
             abort(404, 'Venta no encontrada.');
         }
 
+        // Solo comandas vigentes: se excluyen las anuladas/canceladas de la
+        // impresión global de pendientes. El historial sigue disponible para
+        // la reimpresión individual.
         $comandas = DB::table('comandas')
             ->where('venta_id', $ventaId)
+            ->whereNotIn('estado', ['ANULADA', 'CANCELADA'])
             ->orderBy('id')
             ->get();
 
         foreach ($comandas as $comanda) {
 
-            $comanda->detalles = DB::table('comanda_detalles')
+            // Los productos viven en venta_detalles, enlazados por comanda_id.
+            $comanda->detalles = DB::table('venta_detalles')
                 ->join(
                     'productos',
                     'productos.id',
                     '=',
-                    'comanda_detalles.producto_id'
+                    'venta_detalles.producto_id'
                 )
                 ->where(
-                    'comanda_detalles.comanda_id',
+                    'venta_detalles.comanda_id',
                     $comanda->id
                 )
-                ->whereNull('comanda_detalles.eliminado_en')
+                ->where('venta_detalles.estado', 'ACTIVO')
                 ->where('productos.requiere_cocina', 1)
                 ->select(
-                    'comanda_detalles.*',
+                    'venta_detalles.cantidad',
                     'productos.nombre'
                 )
+                ->orderBy('venta_detalles.id')
                 ->get();
         }
 
+        // Se omiten comandas sin productos válidos para cocina.
+        $comandas = $comandas
+            ->filter(fn ($comanda) => $comanda->detalles->isNotEmpty())
+            ->values();
+
         return view(
-            'comandas.imprimir-todas',
+            'ventas.comandas_masivas_print',
             compact('venta', 'comandas')
         );
+    }
+
+
+    /**
+     * ============================================================
+     * COMANDA COMPLETA DE COCINA
+     * ============================================================
+     *
+     * Reúne en una sola hoja todos los productos que requieren
+     * cocina de la venta actual, sumando las cantidades de las
+     * distintas órdenes (comandas) que se hayan enviado.
+     *
+     * No incluye precios ni totales monetarios. No modifica
+     * ninguna venta, comanda ni detalle: es solo de lectura.
+     */
+    public function imprimirCompleta(int $ventaId)
+    {
+        $venta = DB::table('ventas')
+            ->join('mesas', 'mesas.id', '=', 'ventas.mesa_id')
+            ->where('ventas.id', $ventaId)
+            ->select(
+                'ventas.*',
+                'mesas.numero as mesa_numero'
+            )
+            ->first();
+
+        if (!$venta) {
+            abort(404, 'Venta no encontrada.');
+        }
+
+        /*
+         * Se consolidan todos los detalles ACTIVOS (los cancelados quedan
+         * fuera porque su estado pasa a CANCELADO) cuyo producto requiere
+         * cocina. Se agrupa por producto para sumar las cantidades de las
+         * distintas órdenes sin duplicar.
+         */
+        $detalles = DB::table('venta_detalles')
+            ->join(
+                'productos',
+                'productos.id',
+                '=',
+                'venta_detalles.producto_id'
+            )
+            ->where(
+                'venta_detalles.venta_id',
+                $ventaId
+            )
+            ->where('venta_detalles.estado', 'ACTIVO')
+            ->where('productos.requiere_cocina', 1)
+            ->groupBy(
+                'venta_detalles.producto_id',
+                'productos.nombre'
+            )
+            ->select(
+                'venta_detalles.producto_id',
+                'productos.nombre',
+                DB::raw('SUM(venta_detalles.cantidad) as cantidad'),
+                DB::raw('MIN(venta_detalles.id) as primer_detalle'
+                )
+            )
+            ->orderBy('primer_detalle')
+            ->get();
+
+        return view(
+            'ventas.comanda_completa_print',
+            compact('venta', 'detalles')
+        );
+    }
+
+
+    /**
+     * ============================================================
+     * REIMPRIMIR UN PLATO INDIVIDUAL
+     * ============================================================
+     *
+     * Reimprime únicamente el plato seleccionado desde el historial
+     * de la comanda, sin imprimir los demás platos de la misma orden.
+     *
+     * Es de solo lectura: no crea comandas, no duplica detalles ni
+     * modifica estados, cantidades o contadores.
+     *
+     * Solo permite platos de cocina activos (requiere_cocina = 1).
+     */
+    public function imprimirPlato(int $detalleId)
+    {
+        /*
+         * Se enlaza el detalle con su producto, su comanda y la mesa
+         * de esa comanda para obtener los datos de identificación.
+         * Relaciones verificadas:
+         *   venta_detalles.producto_id -> productos.id
+         *   venta_detalles.comanda_id  -> comandas.id
+         *   comandas.mesa_id           -> mesas.id
+         */
+        $detalle = DB::table('venta_detalles')
+            ->join(
+                'productos',
+                'productos.id',
+                '=',
+                'venta_detalles.producto_id'
+            )
+            ->join(
+                'comandas',
+                'comandas.id',
+                '=',
+                'venta_detalles.comanda_id'
+            )
+            ->join(
+                'mesas',
+                'mesas.id',
+                '=',
+                'comandas.mesa_id'
+            )
+            ->where('venta_detalles.id', $detalleId)
+            ->select(
+                'venta_detalles.id',
+                'venta_detalles.cantidad',
+                'venta_detalles.estado',
+                'productos.nombre',
+                'productos.requiere_cocina',
+                'comandas.numero_ticket',
+                'comandas.creado_en',
+                'mesas.numero as mesa_numero'
+            )
+            ->first();
+
+        if (!$detalle) {
+            abort(404, 'Plato no encontrado.');
+        }
+
+        // Solo se reimprimen platos activos que pertenecen a cocina.
+        // Los productos de barra o cancelados no se imprimen en cocina.
+        if ($detalle->estado !== 'ACTIVO') {
+            abort(404, 'El plato ya no está activo.');
+        }
+
+        if ((int) $detalle->requiere_cocina !== 1) {
+            abort(404, 'El plato no corresponde a cocina.');
+        }
+
+        // Se arma un objeto de comanda y una colección con un único
+        // detalle para mantener el mismo estilo de impresión.
+        $comanda = (object) [
+            'numero_ticket' => $detalle->numero_ticket,
+            'mesa_numero' => $detalle->mesa_numero,
+            'creado_en' => $detalle->creado_en,
+        ];
+
+        $detalles = collect([
+            (object) [
+                'cantidad' => $detalle->cantidad,
+                'nombre' => $detalle->nombre,
+            ],
+        ]);
+
+        return view('ventas.comanda_plato_print', compact(
+            'comanda',
+            'detalles'
+        ));
     }
 }

@@ -28,22 +28,38 @@ class CatalogoController extends Controller
         try {
             // --- GESTIÓN DE CATEGORÍAS ---
             if ($request->accion === 'crear_categoria' || $request->accion === 'editar_categoria') {
+                // Validación de backend: el nombre es obligatorio.
+                $request->validate([
+                    'nombre' => 'required|string|max:100',
+                ]);
+
                 Categoria::updateOrCreate(
                     ['id' => $request->id], 
-                    ['nombre' => $request->nombre, 'activo' => 1]
+                    ['nombre' => $request->nombre, 'activa' => 1]
                 );
                 return response()->json(['exito' => true]);
             }
 
             // --- GESTIÓN DE PRODUCTOS ---
             if ($request->accion === 'crear_producto' || $request->accion === 'editar_producto') {
+                // Validación de backend de los campos existentes del producto.
+                $request->validate([
+                    'categoria_id' => 'required|exists:categorias,id',
+                    'nombre'       => 'required|string|max:100',
+                    'precio'       => 'required|numeric|min:0',
+                ]);
+
+                // updateOrCreate filtrado por 'id' garantiza que SOLO se actualiza
+                // el producto seleccionado (o se crea uno nuevo cuando no llega id).
                 Producto::updateOrCreate(
                     ['id' => $request->id],
                     [
-                        'categoria_id' => $request->categoria_id,
-                        'nombre' => $request->nombre,
-                        'precio' => $request->precio,
-                        'activo' => 1
+                        'categoria_id'    => $request->categoria_id,
+                        'nombre'          => $request->nombre,
+                        'precio'          => $request->precio,
+                        // 1 si la casilla está marcada, 0 si está desmarcada.
+                        'requiere_cocina' => $request->boolean('requiere_cocina') ? 1 : 0,
+                        'activo'          => 1
                     ]
                 );
                 return response()->json(['exito' => true]);
@@ -57,6 +73,9 @@ class CatalogoController extends Controller
 
             return response()->json(['exito' => false, 'error' => 'Acción no reconocida.']);
 
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            // Errores de validación: se devuelven legibles para el front-end.
+            return response()->json(['exito' => false, 'error' => $e->validator->errors()->first()]);
         } catch (\Exception $e) {
             Log::error('Error en CatalogoController: ' . $e->getMessage());
             return response()->json(['exito' => false, 'error' => 'Error en la base de datos al guardar.']);

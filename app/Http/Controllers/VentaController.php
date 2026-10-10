@@ -80,9 +80,9 @@ class VentaController extends Controller
                     'ventas.mesa_id',
                     $mesaId
                 )
-                ->where(
+                ->whereIn(
                     'ventas.estado',
-                    'ACTIVA'
+                    ['ACTIVA', 'ABIERTA']
                 )
                 ->select(
                     'ventas.*',
@@ -344,6 +344,9 @@ class VentaController extends Controller
                     // Producto.
                     'productos.nombre',
 
+                    // Fuente de verdad para saber si va a cocina.
+                    'productos.requiere_cocina',
+
                     // Número de ticket de la comanda.
                     'comandas.numero_ticket'
                 )
@@ -443,6 +446,17 @@ class VentaController extends Controller
 
                 // Total.
                 'total' => $total,
+
+                // Solo ADMIN y GERENTE pueden anular productos.
+                // El botón se oculta a los demás, pero la autorización real
+                // se valida en anularDetalle().
+                'puedeAnular' => in_array(
+                    strtoupper(
+                        (string) ($usuario->rol->nombre ?? '')
+                    ),
+                    ['ADMIN', 'GERENTE'],
+                    true
+                ),
             ]);
 
 
@@ -493,6 +507,12 @@ class VentaController extends Controller
     {
         if ($request->input('accion') === 'enviar_cocina') {
             return $this->enviarPedidoDesdePos($request);
+        }
+
+        // Liberar una mesa sin consumo (acción enviada desde el POS).
+        // Se reutiliza la lógica ya existente de liberarMesa().
+        if ($request->input('accion') === 'liberar_mesa_vacia') {
+            return $this->liberarMesa((int) $request->input('venta_id', 0));
         }
 
         $ventaId = (int) $request->input('venta_id', 0);
@@ -601,29 +621,70 @@ class VentaController extends Controller
 
         try {
             $comandaId = DB::transaction(function () use ($request, $carrito) {
-                $venta = DB::table('ventas')->where('id', (int) $request->input('venta_id'))->where('estado', 'ACTIVA')->lockForUpdate()->first();
+                // ORDEN GLOBAL DE BLOQUEO: venta -> cuentas (id ASC) -> venta_detalles.
+                // Primero la venta; después la cuenta abierta con bloqueo explícito
+                // para serializar contra divisiones, cobros y anulaciones.
+                $venta = DB::table('ventas')->where('id', (int) $request->input('venta_id'))->whereIn('estado', ['ACTIVA', 'ABIERTA'])->lockForUpdate()->first();
                 if (!$venta) throw new \RuntimeException('La venta ya no está activa.');
-                $cuenta = DB::table('cuentas')->where('venta_id', $venta->id)->where('estado', 'ABIERTA')->orderBy('id')->first();
+                $cuenta = DB::table('cuentas')->where('venta_id', $venta->id)->where('estado', 'ABIERTA')->orderBy('id')->lockForUpdate()->first();
                 if (!$cuenta) throw new \RuntimeException('No existe una cuenta abierta para agregar el pedido.');
-                $ultimoTicket = (int) (DB::table('comandas')->where('venta_id', $venta->id)->max('numero_ticket') ?? 0);
-                $comandaId = DB::table('comandas')->insertGetId(['mesa_id' => $venta->mesa_id, 'venta_id' => $venta->id, 'numero_ticket' => $ultimoTicket + 1, 'usuario_id' => Auth::id(), 'cliente_id' => $venta->cliente_id, 'descripcion' => null, 'estado' => 'ABIERTA', 'total' => 0, 'creado_en' => now(), 'conteo_impresiones' => 0]);
-                $totalComanda = 0;
+
+                // Primero validamos todo el carrito y separamos lo que va a cocina
+                // (productos.requiere_cocina = 1) de lo que no. La fuente de verdad
+                // es siempre la columna productos.requiere_cocina.
+                $items = [];
+                $totalCocina = 0;
+                $hayCocina = false;
                 foreach ($carrito as $item) {
                     $producto = DB::table('productos')->where('id', (int) ($item['id'] ?? 0))->where('activo', 1)->first();
                     $cantidad = (int) ($item['cantidad'] ?? 0);
                     if (!$producto || $cantidad <= 0) throw new \RuntimeException('El pedido contiene un producto inválido.');
                     $subtotal = $cantidad * (float) $producto->precio;
-                    DB::table('comanda_detalles')->insert(['comanda_id' => $comandaId, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'estado' => 'ACTIVO', 'impreso_cocina' => 0, 'estado_pago' => 'PENDIENTE']);
-                    $detalleId = DB::table('venta_detalles')->insertGetId(['venta_id' => $venta->id, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'comanda_id' => $comandaId, 'estado' => 'ACTIVO', 'created_at' => now(), 'updated_at' => now()]);
-                    DB::table('cuenta_detalles')->insert(['cuenta_id' => $cuenta->id, 'venta_id' => $venta->id, 'venta_detalle_id' => $detalleId, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'created_at' => now(), 'updated_at' => now()]);
-                    $totalComanda += $subtotal;
+                    $requiereCocina = ((int) $producto->requiere_cocina === 1);
+                    if ($requiereCocina) {
+                        $hayCocina = true;
+                        $totalCocina += $subtotal;
+                    }
+                    $items[] = ['producto' => $producto, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'cocina' => $requiereCocina];
                 }
-                DB::table('comandas')->where('id', $comandaId)->update(['total' => $totalComanda]);
-                DB::table('cuentas')->where('id', $cuenta->id)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuenta->id)->sum('subtotal'), 'updated_at' => now()]);
+
+                // La comanda de cocina solo se crea si la orden tiene al menos un
+                // producto que requiere preparación. Si es solo barra no se crea.
+                $comandaId = null;
+                if ($hayCocina) {
+                    $ultimoTicket = (int) (DB::table('comandas')->where('venta_id', $venta->id)->max('numero_ticket') ?? 0);
+                    $comandaId = DB::table('comandas')->insertGetId(['mesa_id' => $venta->mesa_id, 'venta_id' => $venta->id, 'numero_ticket' => $ultimoTicket + 1, 'usuario_id' => Auth::id(), 'cliente_id' => $venta->cliente_id, 'descripcion' => null, 'estado' => 'ABIERTA', 'total' => 0, 'creado_en' => now(), 'conteo_impresiones' => 0]);
+                }
+
+                foreach ($items as $it) {
+                    $producto = $it['producto'];
+                    $cantidad = $it['cantidad'];
+                    $subtotal = $it['subtotal'];
+
+                    // Solo los productos de cocina se enlazan a la comanda.
+                    // Los de barra quedan con comanda_id = null para no aparecer
+                    // en ninguna comanda ni reimpresión de cocina.
+                    $detalleComandaId = $it['cocina'] ? $comandaId : null;
+
+                    if ($it['cocina']) {
+                        DB::table('comanda_detalles')->insert(['comanda_id' => $comandaId, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'estado' => 'ACTIVO', 'impreso_cocina' => 0, 'estado_pago' => 'PENDIENTE']);
+                    }
+
+                    // El detalle de venta y de cuenta se registran SIEMPRE, para que
+                    // el producto siga apareciendo en la mesa, cuenta, prefactura y cobro.
+                    $detalleId = DB::table('venta_detalles')->insertGetId(['venta_id' => $venta->id, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'comanda_id' => $detalleComandaId, 'estado' => 'ACTIVO', 'created_at' => now(), 'updated_at' => now()]);
+                    DB::table('cuenta_detalles')->insert(['cuenta_id' => $cuenta->id, 'venta_id' => $venta->id, 'venta_detalle_id' => $detalleId, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'created_at' => now(), 'updated_at' => now()]);
+                }
+
+                if ($comandaId !== null) {
+                    DB::table('comandas')->where('id', $comandaId)->update(['total' => $totalCocina]);
+                }
+                DB::table('cuentas')->where('id', $cuenta->id)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuenta->id)->where('eliminado', false)->sum('subtotal'), 'updated_at' => now()]);
                 DB::table('ventas')->where('id', $venta->id)->update(['monto' => DB::table('venta_detalles')->where('venta_id', $venta->id)->where('estado', 'ACTIVO')->sum('subtotal')]);
                 return $comandaId;
             });
-            return response()->json(['exito' => true, 'mensaje' => 'Pedido guardado correctamente.', 'comanda_id' => $comandaId]);
+            $mensaje = $comandaId ? 'Pedido guardado y enviado a cocina.' : 'Pedido guardado (solo barra).';
+            return response()->json(['exito' => true, 'mensaje' => $mensaje, 'comanda_id' => $comandaId]);
         } catch (\Throwable $e) {
             Log::warning('No se pudo guardar pedido POS', ['error' => $e->getMessage(), 'venta_id' => $request->input('venta_id')]);
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
@@ -661,7 +722,7 @@ class VentaController extends Controller
             // Verificar venta.
             $venta = DB::table('ventas')
                 ->where('id', $ventaId)
-                ->where('estado', 'ACTIVA')
+                ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
                 ->first();
 
             if (!$venta) {
@@ -1015,6 +1076,43 @@ class VentaController extends Controller
             DB::transaction(
                 function () use ($cuentaId) {
 
+                    // ORDEN GLOBAL: venta -> cuentas (id ASC).
+                    // Bloquear la venta primero evita deadlocks con cobros,
+                    // divisiones, pedidos y anulaciones de la misma mesa.
+                    $cuentaNav = DB::table('cuentas')
+                        ->where('id', $cuentaId)
+                        ->first();
+
+                    if (!$cuentaNav) {
+                        throw new \RuntimeException('La cuenta no existe.');
+                    }
+
+                    DB::table('ventas')
+                        ->where('id', $cuentaNav->venta_id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    $cuentasBloqueadas = DB::table('cuentas')
+                        ->where('venta_id', $cuentaNav->venta_id)
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get();
+
+                    // Una cuenta pagada es un registro financiero intocable:
+                    // se rechaza antes de borrar asignaciones o cambiar su estado.
+                    $cuentaBloqueada = $cuentasBloqueadas
+                        ->firstWhere('id', $cuentaId);
+
+                    if (!$cuentaBloqueada) {
+                        throw new \RuntimeException('La cuenta no existe.');
+                    }
+
+                    if ($cuentaBloqueada->estado === 'PAGADA') {
+                        throw new \DomainException(
+                            'No se puede cancelar una cuenta que ya fue pagada.'
+                        );
+                    }
+
                     // cuenta_detalles es la fuente de verdad de asignaciones.
                     // La columna heredada venta_detalles.cuenta_id se conserva
                     // temporalmente solo para compatibilidad con datos viejos.
@@ -1043,6 +1141,15 @@ class VentaController extends Controller
                     'La cuenta fue cancelada correctamente.',
             ]);
 
+
+        } catch (\DomainException $e) {
+
+            // Rechazo por regla de negocio (cuenta pagada): 422, sin log
+            // de error porque no es una falla interna.
+            return response()->json([
+                'exito' => false,
+                'error' => $e->getMessage(),
+            ], 422);
 
         } catch (\Throwable $e) {
 
@@ -1112,12 +1219,15 @@ class VentaController extends Controller
             DB::transaction(
                 function () use ($ventaId) {
 
-                    // Buscar mesa.
+                    // ORDEN GLOBAL: venta -> cuentas (id ASC) -> venta_detalles
+                    // (id ASC). La venta primero evita deadlocks con cobros,
+                    // divisiones, pedidos y anulaciones concurrentes.
                     $venta = DB::table('ventas')
                         ->where(
                             'id',
                             $ventaId
                         )
+                        ->lockForUpdate()
                         ->first();
 
 
@@ -1127,6 +1237,31 @@ class VentaController extends Controller
                             'La venta no existe.'
                         );
                     }
+
+                    // No se puede cancelar una venta que ya cerró. Se valida
+                    // después del bloqueo para evitar decisiones con lecturas
+                    // obsoletas.
+                    if (in_array(
+                        $venta->estado,
+                        ['PAGADA', 'CANCELADA'],
+                        true
+                    )) {
+                        throw new \DomainException(
+                            'No se puede cancelar: la venta ya está pagada o cancelada.'
+                        );
+                    }
+
+                    DB::table('cuentas')
+                        ->where('venta_id', $ventaId)
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get();
+
+                    DB::table('venta_detalles')
+                        ->where('venta_id', $ventaId)
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get();
 
 
                     // Cancelar detalles.
@@ -1186,6 +1321,14 @@ class VentaController extends Controller
             ]);
 
 
+        } catch (\DomainException $e) {
+
+            // Rechazo por regla de negocio (venta ya pagada o cancelada).
+            return response()->json([
+                'exito' => false,
+                'error' => $e->getMessage(),
+            ], 422);
+
         } catch (\Throwable $e) {
 
             Log::error(
@@ -1221,12 +1364,14 @@ class VentaController extends Controller
             DB::transaction(
                 function () use ($ventaId) {
 
-                    // Buscar venta.
+                    // ORDEN GLOBAL: venta primero, para serializar con cobros,
+                    // divisiones, pedidos y anulaciones concurrentes.
                     $venta = DB::table('ventas')
                         ->where(
                             'id',
                             $ventaId
                         )
+                        ->lockForUpdate()
                         ->first();
 
 
@@ -1314,10 +1459,90 @@ class VentaController extends Controller
         }
     }
 
+    /**
+     * =========================================================================
+     * PANEL DE SUBCUENTAS DE UNA MESA
+     * =========================================================================
+     *
+     * Muestra las cuentas de la venta ACTIVA de la mesa seleccionada para que
+     * el usuario elija con cuál trabajar (o cree una nueva en la Fase 2).
+     *
+     * Reglas que cumple este método:
+     * - Solo lista cuentas de la venta activa de ESTA mesa (mesa_id origen).
+     * - NO crea una segunda venta: es de solo lectura.
+     * - Los totales de las cuentas abiertas se recalculan desde cuenta_detalles
+     *   (fuente de verdad), igual que en cuentas(); las pagadas conservan su
+     *   total congelado.
+     */
+    public function panelCuentas(int $mesaId)
+    {
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            abort(401, 'Usuario no autenticado.');
+        }
+
+        // 1. La mesa debe existir.
+        $mesa = DB::table('mesas')->where('id', $mesaId)->first();
+
+        if (!$mesa) {
+            abort(404, 'La mesa no existe.');
+        }
+
+        // 2. Venta activa de ESTA mesa. Aquí nunca se crea una venta.
+        $venta = DB::table('ventas')
+            ->where('mesa_id', $mesaId)
+            ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+            ->orderByDesc('id')
+            ->first();
+
+        // Si la mesa no tiene venta activa no hay subcuentas que mostrar.
+        if (!$venta) {
+            return redirect()
+                ->route('mesas.index')
+                ->with('error', 'La mesa no tiene una venta activa.');
+        }
+
+        // 3. Cuentas de la venta activa (se excluyen las canceladas).
+        $cuentas = DB::table('cuentas')
+            ->where('venta_id', $venta->id)
+            ->where('estado', '!=', 'CANCELADA')
+            ->orderBy('id')
+            ->get();
+
+        // 4. Totales reales de las cuentas abiertas agrupados por cuenta.
+        $totalesPorCuenta = DB::table('cuenta_detalles')
+            ->join('cuentas', 'cuentas.id', '=', 'cuenta_detalles.cuenta_id')
+            ->where('cuentas.venta_id', $venta->id)
+            ->where('cuenta_detalles.eliminado', false)
+            ->groupBy('cuenta_detalles.cuenta_id')
+            ->select('cuenta_detalles.cuenta_id', DB::raw('SUM(cuenta_detalles.subtotal) as total'))
+            ->pluck('total', 'cuenta_id');
+
+        $cuentas->each(function ($cuenta) use ($totalesPorCuenta) {
+            if ($cuenta->estado === 'ABIERTA') {
+                $cuenta->total = (float) ($totalesPorCuenta[$cuenta->id] ?? 0);
+            }
+        });
+
+        // Rol real del usuario autenticado para decidir qué acciones mostrar.
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        return view('mesas.cuentas', [
+            'mesa' => $mesa,
+            'venta' => $venta,
+            'cuentas' => $cuentas,
+            // Fase 2: los cuatro roles podrán crear subcuentas vacías.
+            'puedeCrear' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true),
+            // Dividir/reasignar conserva los permisos actuales.
+            'puedeDividir' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+        ]);
+    }
+
     /** Datos seguros para la pantalla de división y cobro por cuenta. */
     public function cuentas(int $mesaId)
     {
-        $venta = DB::table('ventas')->where('mesa_id', $mesaId)->where('estado', 'ACTIVA')->first();
+        $venta = DB::table('ventas')->where('mesa_id', $mesaId)->whereIn('estado', ['ACTIVA', 'ABIERTA'])->first();
 
         if (!$venta) {
             return response()->json(['exito' => false, 'error' => 'La mesa no tiene una venta activa.'], 404);
@@ -1332,9 +1557,28 @@ class VentaController extends Controller
             ->get();
 
         $cuentas = DB::table('cuentas')->where('venta_id', $venta->id)->where('estado', '!=', 'CANCELADA')->orderBy('id')->get();
+
+        // Los totales de las cuentas abiertas se calculan desde cuenta_detalles
+        // (agrupados por cuenta_id) para no depender de una columna "total" que
+        // pudo quedar desincronizada. Las cuentas ya pagadas conservan su total.
+        $totalesPorCuenta = DB::table('cuenta_detalles')
+            ->join('cuentas', 'cuentas.id', '=', 'cuenta_detalles.cuenta_id')
+            ->where('cuentas.venta_id', $venta->id)
+            ->where('cuenta_detalles.eliminado', false)
+            ->groupBy('cuenta_detalles.cuenta_id')
+            ->select('cuenta_detalles.cuenta_id', DB::raw('SUM(cuenta_detalles.subtotal) as total'))
+            ->pluck('total', 'cuenta_id');
+
+        $cuentas->each(function ($cuenta) use ($totalesPorCuenta) {
+            if ($cuenta->estado === 'ABIERTA') {
+                $cuenta->total = (float) ($totalesPorCuenta[$cuenta->id] ?? 0);
+            }
+        });
+
         $asignaciones = DB::table('cuenta_detalles')
             ->join('cuentas', 'cuentas.id', '=', 'cuenta_detalles.cuenta_id')
             ->where('cuentas.venta_id', $venta->id)
+            ->where('cuenta_detalles.eliminado', false)
             ->select('cuenta_detalles.cuenta_id', 'cuenta_detalles.venta_detalle_id', 'cuenta_detalles.cantidad')
             ->get();
 
@@ -1344,6 +1588,27 @@ class VentaController extends Controller
     /** Guarda una división completa. Las cuentas ya pagadas no se pueden modificar. */
     public function guardarDivision(Request $request, int $mesaId)
     {
+        // Autorización primero: un usuario sin permiso no debe conocer
+        // detalles de validación ni modificar cuentas o asignaciones.
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'Usuario no autenticado.',
+            ], 401);
+        }
+
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        // Solo ADMIN, GERENTE y CAJERO pueden dividir cuentas.
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'No tienes permiso para dividir cuentas.',
+            ], 403);
+        }
+
         $request->validate([
             'cuentas_nuevas' => ['array'],
             'cuentas_nuevas.*' => ['string', 'max:100'],
@@ -1355,7 +1620,7 @@ class VentaController extends Controller
 
         try {
             DB::transaction(function () use ($request, $mesaId) {
-                $venta = DB::table('ventas')->where('mesa_id', $mesaId)->where('estado', 'ACTIVA')->lockForUpdate()->first();
+                $venta = DB::table('ventas')->where('mesa_id', $mesaId)->whereIn('estado', ['ACTIVA', 'ABIERTA'])->lockForUpdate()->first();
                 if (!$venta) {
                     throw new \RuntimeException('La mesa no tiene una venta activa.');
                 }
@@ -1383,11 +1648,14 @@ class VentaController extends Controller
                 $cuentasAbiertas = DB::table('cuentas')
                     ->where('venta_id', $venta->id)
                     ->where('estado', 'ABIERTA')
+                    ->orderBy('id')
                     ->lockForUpdate()
                     ->pluck('id')
                     ->map(fn ($id) => (int) $id)
                     ->all();
-                $detalles = DB::table('venta_detalles')->where('venta_id', $venta->id)->where('estado', 'ACTIVO')->lockForUpdate()->get()->keyBy('id');
+                // Orden determinista por id para respetar el orden global
+                // venta -> cuentas -> venta_detalles y evitar deadlocks.
+                $detalles = DB::table('venta_detalles')->where('venta_id', $venta->id)->where('estado', 'ACTIVO')->orderBy('id')->lockForUpdate()->get()->keyBy('id');
 
                 // Se reemplazan solo asignaciones de cuentas abiertas; lo pagado queda congelado.
                 DB::table('cuenta_detalles')->whereIn('cuenta_id', $cuentasAbiertas)->delete();
@@ -1401,6 +1669,12 @@ class VentaController extends Controller
                     }
                     $clave = $cuentaId . ':' . $detalleId;
                     if (isset($cantidades[$clave])) throw new \RuntimeException('No repitas la misma asignación.');
+                    if ($cantidad <= 0) {
+                        throw new \RuntimeException('La cantidad debe ser un entero positivo.');
+                    }
+                    if ($cantidad > (int) $detalles[$detalleId]->cantidad) {
+                        throw new \RuntimeException('La cantidad de la línea ' . $detalleId . ' supera las unidades disponibles (' . (int) $detalles[$detalleId]->cantidad . ').');
+                    }
                     $cantidades[$clave] = $cantidad;
                     $subtotal = DB::selectOne(
                         'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
@@ -1419,11 +1693,11 @@ class VentaController extends Controller
                 }
 
                 foreach ($detalles as $detalle) {
-                    $asignado = DB::table('cuenta_detalles')->where('venta_detalle_id', $detalle->id)->sum('cantidad');
+                    $asignado = DB::table('cuenta_detalles')->where('venta_detalle_id', $detalle->id)->where('eliminado', false)->sum('cantidad');
                     if ((int) $asignado !== (int) $detalle->cantidad) throw new \RuntimeException('Debes asignar exactamente todas las unidades de ' . $detalle->id . '.');
                 }
                 foreach ($cuentasAbiertas as $cuentaId) {
-                    DB::table('cuentas')->where('id', $cuentaId)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->sum('subtotal'), 'updated_at' => now()]);
+                    DB::table('cuentas')->where('id', $cuentaId)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal'), 'updated_at' => now()]);
                 }
             });
             return response()->json(['exito' => true, 'mensaje' => 'División guardada. Ya puedes cobrar cuentas por separado.']);
@@ -1442,22 +1716,42 @@ class VentaController extends Controller
 
         try {
             $resultado = DB::transaction(function () use ($request, $cuentaId) {
-                $cuenta = DB::table('cuentas')->where('id', $cuentaId)->lockForUpdate()->first();
+                // Lectura de navegación sin bloqueo: solo para conocer la venta.
+                $cuentaNav = DB::table('cuentas')->where('id', $cuentaId)->first();
+                if (!$cuentaNav) throw new \RuntimeException('La cuenta no existe.');
+
+                // ORDEN GLOBAL DE BLOQUEO: venta -> cuentas (id ASC).
+                // Bloquear la venta primero serializa dos cobros simultáneos de
+                // las últimas cuentas y evita liberar la mesa dos veces (o ninguna).
+                $venta = DB::table('ventas')->where('id', $cuentaNav->venta_id)->lockForUpdate()->first();
+                if (!$venta) throw new \RuntimeException('La venta no existe.');
+
+                $cuentas = DB::table('cuentas')
+                    ->where('venta_id', $venta->id)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                $cuenta = $cuentas->get($cuentaId);
                 if (!$cuenta || $cuenta->estado !== 'ABIERTA') throw new \RuntimeException('La cuenta no está disponible para cobro.');
-                $total = (float) DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->sum('subtotal');
+
+                $total = (float) DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal');
                 $recibido = (float) $request->input('monto_recibido');
                 if ($total <= 0 || $recibido < $total) throw new \RuntimeException('El monto recibido no cubre el total de la cuenta.');
                 $cambio = $recibido - $total;
                 DB::table('cuentas')->where('id', $cuentaId)->update(['total' => $total, 'estado' => 'PAGADA', 'metodo_pago' => $request->input('metodo_pago'), 'banco' => $request->input('banco'), 'monto_recibido' => $recibido, 'cambio' => $cambio, 'usuario_cobro' => Auth::id(), 'updated_at' => now()]);
                 // Una cuenta vacía no debe impedir el cierre: solo importan
                 // las cuentas abiertas que todavía tienen consumo pendiente.
+                // Lectura con bloqueo para ver el último estado confirmado.
                 $abiertas = DB::table('cuentas')
-                    ->where('venta_id', $cuenta->venta_id)
+                    ->where('venta_id', $venta->id)
+                    ->where('id', '!=', $cuentaId)
                     ->where('estado', 'ABIERTA')
                     ->where('total', '>', 0)
+                    ->lockForUpdate()
                     ->exists();
                 if (!$abiertas) {
-                    $venta = DB::table('ventas')->where('id', $cuenta->venta_id)->lockForUpdate()->first();
                     DB::table('ventas')->where('id', $venta->id)->update(['estado' => 'PAGADA']);
                     DB::table('mesas')->where('id', $venta->mesa_id)->update(['estado' => 'LIBRE']);
                 }
@@ -1466,6 +1760,349 @@ class VentaController extends Controller
             return response()->json(['exito' => true, 'mensaje' => $resultado['mesa_liberada'] ? 'Todas las cuentas fueron pagadas. Mesa liberada.' : 'Cuenta pagada. La mesa sigue abierta.', ...$resultado]);
         } catch (\Throwable $e) {
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * ============================================================
+     * ANULAR DETALLE (BORRADO LÓGICO)
+     * ============================================================
+     *
+     * Anula una cantidad parcial (o total) de una línea de venta y
+     * actualiza cantidades, subtotales y totales de forma coherente.
+     * No borra físicamente ninguna fila: usa borrado lógico en las
+     * asignaciones y registra la anulación en "anulaciones".
+     *
+     * Reglas:
+     * - Solo ADMIN y GERENTE.
+     * - La cantidad y el motivo son obligatorios.
+     * - La cantidad debe estar entre 1 y lo realmente anulable.
+     * - Nunca se altera una cuenta PAGADA: si anular Q unidades exigiera
+     *   tocar unidades ya pagadas, se rechaza sin modificar datos.
+     * - La línea solo queda ANULADO cuando no quedan unidades activas.
+     * - Si todas las unidades se anulan, la venta permanece ACTIVA con
+     *   monto = 0 y la mesa NO se libera automáticamente.
+     * - No se sincroniza comanda_detalles.
+     *
+     * Bloqueos: orden global "ventas -> cuentas (id ASC) -> venta_detalles
+     * (id ASC)". La venta se bloquea primero y funciona como mutex de la
+     * mesa para cobros, divisiones, pedidos y anulaciones concurrentes.
+     */
+    public function anularDetalle(Request $request, int $detalleId)
+    {
+        // Autorización primero: nunca revelar detalles de validación a un
+        // usuario sin permiso. La seguridad se valida en backend.
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'Usuario no autenticado.',
+            ], 401);
+        }
+
+        $rol = strtoupper(
+            (string) ($usuario->rol->nombre ?? '')
+        );
+
+        // Autorización real en backend (no confiar en el botón oculto).
+        if (!in_array($rol, ['ADMIN', 'GERENTE'], true)) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'No tienes permisos para anular productos.',
+            ], 403);
+        }
+
+        // Cantidad y motivo obligatorios. La cantidad es obligatoria para
+        // evitar que omitirla anule toda la línea por accidente.
+        $request->validate([
+            'cantidad' => ['required', 'integer', 'min:1'],
+            'motivo' => ['required', 'string', 'min:3', 'max:500'],
+        ]);
+
+        $motivo = trim((string) $request->input('motivo'));
+        $cantidadAnular = (int) $request->input('cantidad');
+
+        try {
+            $resultado = DB::transaction(function () use (
+                $detalleId,
+                $usuario,
+                $motivo,
+                $cantidadAnular
+            ) {
+                // 1. Lectura de navegación sin bloqueo: solo para conocer
+                //    a qué venta pertenece el detalle.
+                $detalleNavegacion = DB::table('venta_detalles')
+                    ->where('id', $detalleId)
+                    ->first();
+
+                if (!$detalleNavegacion) {
+                    throw new \RuntimeException('El producto no existe.');
+                }
+
+                // 2. ORDEN GLOBAL: venta primero. Funciona como mutex de la
+                //    mesa frente a cobros, divisiones y pedidos concurrentes.
+                $venta = DB::table('ventas')
+                    ->where('id', $detalleNavegacion->venta_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$venta) {
+                    throw new \RuntimeException('La venta no existe.');
+                }
+
+                if (in_array($venta->estado, ['PAGADA', 'CANCELADA'], true)) {
+                    throw new \RuntimeException(
+                        'No se puede anular: la venta ya está cerrada.'
+                    );
+                }
+
+                // 3. Bloquear todas las cuentas de la venta en orden ascendente.
+                $cuentas = DB::table('cuentas')
+                    ->where('venta_id', $venta->id)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                // 4. Bloquear el detalle y revalidar su estado.
+                $detalle = DB::table('venta_detalles')
+                    ->where('id', $detalleId)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$detalle || $detalle->estado !== 'ACTIVO') {
+                    throw new \RuntimeException(
+                        'El producto ya fue anulado o cancelado.'
+                    );
+                }
+
+                $cantidadLinea = (int) $detalle->cantidad;
+                $precioUnitario = (float) $detalle->precio_unitario;
+
+                if ($cantidadAnular > $cantidadLinea) {
+                    throw new \RuntimeException(
+                        'No puedes anular más unidades de las disponibles (' .
+                        $cantidadLinea .
+                        ').'
+                    );
+                }
+
+                // 5. Asignaciones activas del detalle con el estado de su
+                //    cuenta (bloqueadas, ordenadas por cuenta_id).
+                $asignaciones = DB::table('cuenta_detalles')
+                    ->where('venta_detalle_id', $detalleId)
+                    ->where('eliminado', false)
+                    ->orderBy('cuenta_id')
+                    ->lockForUpdate()
+                    ->get();
+
+                $unidadesPagadas = 0;
+                $unidadesAbiertas = 0;
+
+                foreach ($asignaciones as $asignacion) {
+                    $cuenta = $cuentas->get((int) $asignacion->cuenta_id);
+
+                    if ($cuenta && $cuenta->estado === 'PAGADA') {
+                        $unidadesPagadas += (int) $asignacion->cantidad;
+                    } elseif ($cuenta && $cuenta->estado === 'ABIERTA') {
+                        $unidadesAbiertas += (int) $asignacion->cantidad;
+                    }
+                }
+
+                // Unidades que no están asignadas a ninguna cuenta.
+                $unidadesSinAsignar = $cantidadLinea
+                    - $unidadesPagadas
+                    - $unidadesAbiertas;
+
+                if ($unidadesSinAsignar < 0) {
+                    $unidadesSinAsignar = 0;
+                }
+
+                // Lo realmente anulable son las unidades abiertas más las
+                // que nunca fueron asignadas. Las pagadas son intocables.
+                $disponible = $unidadesAbiertas + $unidadesSinAsignar;
+
+                if ($cantidadAnular > $disponible) {
+                    throw new \RuntimeException(
+                        'No se puede anular esa cantidad: parte del producto ' .
+                        'pertenece a una cuenta ya pagada.'
+                    );
+                }
+
+                // 6. Repartir la anulación: primero unidades sin asignar y
+                //    luego asignaciones de cuentas abiertas en orden de id.
+                $restante = $cantidadAnular;
+
+                if ($unidadesSinAsignar > 0) {
+                    $restante -= min($restante, $unidadesSinAsignar);
+                }
+
+                foreach ($asignaciones as $asignacion) {
+                    if ($restante <= 0) {
+                        break;
+                    }
+
+                    $cuenta = $cuentas->get((int) $asignacion->cuenta_id);
+
+                    // Solo se reducen asignaciones de cuentas abiertas.
+                    if (!$cuenta || $cuenta->estado !== 'ABIERTA') {
+                        continue;
+                    }
+
+                    $cantidadAsignada = (int) $asignacion->cantidad;
+
+                    if ($cantidadAsignada <= $restante) {
+                        // Se anula la asignación completa (borrado lógico).
+                        DB::table('cuenta_detalles')
+                            ->where('id', $asignacion->id)
+                            ->update([
+                                'eliminado' => true,
+                                'eliminado_por' => $usuario->id,
+                                'eliminado_en' => now(),
+                                'updated_at' => now(),
+                            ]);
+
+                        $restante -= $cantidadAsignada;
+                    } else {
+                        // Se reduce parcialmente la asignación. Se calcula el
+                        // subtotal con SQL para no arrastrar errores de float.
+                        $nuevaCantidad = $cantidadAsignada - $restante;
+
+                        $nuevoSubtotal = DB::selectOne(
+                            'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                            [$nuevaCantidad, $precioUnitario]
+                        )->subtotal;
+
+                        DB::table('cuenta_detalles')
+                            ->where('id', $asignacion->id)
+                            ->update([
+                                'cantidad' => $nuevaCantidad,
+                                'subtotal' => $nuevoSubtotal,
+                                'updated_at' => now(),
+                            ]);
+
+                        $restante = 0;
+                    }
+                }
+
+                if ($restante > 0) {
+                    // Nunca debería ocurrir tras validar "disponible".
+                    throw new \RuntimeException(
+                        'No se pudo distribuir la anulación entre las cuentas.'
+                    );
+                }
+
+                // 7. Actualizar la línea de venta conservando lo que queda.
+                //    Solo pasa a ANULADO cuando no quedan unidades activas.
+                $cantidadRestante = $cantidadLinea - $cantidadAnular;
+
+                $nuevoSubtotalVenta = DB::selectOne(
+                    'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                    [$cantidadRestante, $precioUnitario]
+                )->subtotal;
+
+                DB::table('venta_detalles')
+                    ->where('id', $detalleId)
+                    ->update([
+                        'cantidad' => $cantidadRestante,
+                        'subtotal' => $nuevoSubtotalVenta,
+                        'estado' => $cantidadRestante > 0 ? 'ACTIVO' : 'ANULADO',
+                        'updated_at' => now(),
+                    ]);
+
+                // 8. Recalcular el total de las cuentas abiertas afectadas.
+                $cuentasAbiertasAfectadas = $asignaciones
+                    ->filter(function ($asignacion) use ($cuentas) {
+                        $cuenta = $cuentas->get((int) $asignacion->cuenta_id);
+
+                        return $cuenta && $cuenta->estado === 'ABIERTA';
+                    })
+                    ->pluck('cuenta_id')
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values()
+                    ->all();
+
+                foreach ($cuentasAbiertasAfectadas as $cuentaId) {
+                    DB::table('cuentas')
+                        ->where('id', $cuentaId)
+                        ->update([
+                            'total' => DB::table('cuenta_detalles')
+                                ->where('cuenta_id', $cuentaId)
+                                ->where('eliminado', false)
+                                ->sum('subtotal'),
+                            'updated_at' => now(),
+                        ]);
+                }
+
+                // 9. Recalcular el monto de la venta. Permanece ACTIVA
+                //    aunque quede en cero; la mesa no se libera aquí.
+                $monto = DB::table('venta_detalles')
+                    ->where('venta_id', $venta->id)
+                    ->where('estado', 'ACTIVO')
+                    ->sum('subtotal');
+
+                DB::table('ventas')
+                    ->where('id', $venta->id)
+                    ->update(['monto' => $monto]);
+
+                // 10. Auditoría: se registra la cantidad y el importe anulados.
+                $montoAnulado = DB::selectOne(
+                    'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                    [$cantidadAnular, $precioUnitario]
+                )->subtotal;
+
+                DB::table('anulaciones')->insert([
+                    'tipo' => 'ITEM_ANULADO',
+                    'venta_id' => $venta->id,
+                    'venta_detalle_id' => $detalle->id,
+                    'comanda_id' => $detalle->comanda_id,
+                    'producto_id' => $detalle->producto_id,
+                    'cantidad' => $cantidadAnular,
+                    'monto' => $montoAnulado,
+                    'motivo' => $motivo,
+                    'usuario_id' => $usuario->id,
+                    'estado_previo' => 'ACTIVO',
+                    'creado_en' => now(),
+                ]);
+
+                return [
+                    'venta_id' => $venta->id,
+                    'monto' => (float) $monto,
+                    'cantidad_anulada' => $cantidadAnular,
+                    'cantidad_restante' => $cantidadRestante,
+                    'estado' => $cantidadRestante > 0 ? 'ACTIVO' : 'ANULADO',
+                ];
+            });
+
+            return response()->json([
+                'exito' => true,
+                'mensaje' => $resultado['estado'] === 'ANULADO'
+                    ? 'Todas las unidades del producto fueron anuladas.'
+                    : 'Se anuló(aron) ' . $resultado['cantidad_anulada'] .
+                        ' unidad(es). Quedan ' . $resultado['cantidad_restante'] .
+                        ' activa(s).',
+                'venta_id' => $resultado['venta_id'],
+                'monto' => $resultado['monto'],
+                'cantidad_anulada' => $resultado['cantidad_anulada'],
+                'cantidad_restante' => $resultado['cantidad_restante'],
+                'estado' => $resultado['estado'],
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning(
+                'No se pudo anular detalle',
+                [
+                    'detalle_id' => $detalleId,
+                    'usuario_id' => $usuario->id,
+                    'error' => $e->getMessage(),
+                ]
+            );
+
+            return response()->json([
+                'exito' => false,
+                'error' => $e->getMessage(),
+            ], 422);
         }
     }
 }

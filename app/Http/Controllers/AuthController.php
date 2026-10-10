@@ -26,10 +26,12 @@ class AuthController extends Controller
         /*
          * El formulario utiliza "usuario",
          * pero en la base de datos el campo es "username".
+         * Además validamos que la cuenta esté activa (columna "activo").
          */
         if (Auth::attempt([
             'username' => $request->usuario,
             'password' => $request->password,
+            'activo' => 1,
         ])) {
             // Regeneramos la sesión después del login.
             $request->session()->regenerate();

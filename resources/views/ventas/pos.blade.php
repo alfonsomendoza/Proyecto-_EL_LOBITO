@@ -391,6 +391,36 @@
         margin-top: 2px;
     }
 
+    /* Solo el número de la comanda se agranda; "Barra" queda igual. */
+    .numero-comanda {
+        font-size: 15px;
+        font-weight: 800;
+        color: #34395e;
+    }
+
+    .btn-anular {
+        border: none;
+        border-radius: 5px;
+        background: #fc544b;
+        color: #ffffff;
+        padding: 8px 12px;
+        font-size: 11px;
+        font-weight: 700;
+        min-height: 32px;
+        cursor: pointer;
+        white-space: nowrap;
+    }
+
+    .btn-anular:hover {
+        background: #e04138;
+    }
+
+    .item-historial-anulado .item-historial-nombre,
+    .item-historial-anulado .item-historial-precio {
+        text-decoration: line-through;
+        opacity: 0.55;
+    }
+
     .historial-acciones {
         display: flex;
         flex-direction: column;
@@ -398,19 +428,22 @@
         flex-shrink: 0;
     }
 
-    .btn-reimprimir {
+    .btn-reimprimir,
+    .btn-reimprimir-plato {
         border: none;
         border-radius: 5px;
         background: #6777ef;
         color: #ffffff;
-        padding: 6px 8px;
-        font-size: 9px;
+        padding: 8px 12px;
+        font-size: 11px;
         font-weight: 700;
+        min-height: 32px;
         cursor: pointer;
         white-space: nowrap;
     }
 
-    .btn-reimprimir:hover {
+    .btn-reimprimir:hover,
+    .btn-reimprimir-plato:hover {
         background: #5364dc;
     }
 
@@ -521,6 +554,27 @@
         background: #ffa426;
     }
 
+    /* Botón «Dividir cuentas»: fondo azul visible y estados accesibles. */
+    #btn-dividir-cuenta {
+        background: #3a86ff;
+    }
+
+    #btn-dividir-cuenta:hover {
+        background: #2f6fdb;
+        opacity: 1;
+    }
+
+    #btn-dividir-cuenta:focus-visible {
+        outline: 2px solid #1b4fa0;
+        outline-offset: 2px;
+    }
+
+    #btn-dividir-cuenta:disabled {
+        background: #9db8e0;
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
     .btn-enviar {
         width: 100%;
         min-height: 43px;
@@ -624,6 +678,10 @@
         .btn-reimprimir {
             width: 100%;
         }
+
+        .btn-anular {
+            width: 100%;
+        }
     }
 </style>
 
@@ -640,6 +698,15 @@
 
             <div class="pos-header-actions">
 
+                @php
+                    // ¿Quedan productos de cocina activos en el historial?
+                    $hayCocina = $historial->contains(
+                        fn ($h) =>
+                            $h->estado === 'ACTIVO'
+                            && (int) $h->requiere_cocina === 1
+                    );
+                @endphp
+
                 @if(count($historial) > 0)
 
                     <button
@@ -649,6 +716,19 @@
                     >
                         <i class="fas fa-print"></i>
                         Imprimir todas
+                    </button>
+
+                @endif
+
+                @if($hayCocina)
+
+                    <button
+                        type="button"
+                        id="btn-imprimir-completa"
+                        class="pos-btn pos-btn-primary"
+                    >
+                        <i class="fas fa-layer-group"></i>
+                        Comanda completa de cocina
                     </button>
 
                 @endif
@@ -835,7 +915,7 @@
 
                     @foreach($historial as $h)
 
-                        <div class="item-historial">
+                        <div class="item-historial {{ $h->estado === 'ANULADO' ? 'item-historial-anulado' : '' }}">
 
                             <div class="item-historial-nombre">
 
@@ -861,6 +941,18 @@
                                         CANCELADO
                                     </div>
 
+                                @elseif($h->estado === 'ANULADO')
+
+                                    <div
+                                        style="
+                                            color: #fc544b;
+                                            font-weight: 800;
+                                            font-size: 10px;
+                                        "
+                                    >
+                                        ANULADO
+                                    </div>
+
                                 @else
 
                                     <div class="item-historial-precio">
@@ -871,14 +963,14 @@
 
                                 <div class="item-historial-comanda">
 
-                                    @if($h->comanda_id)
+                                    @if($h->requiere_cocina && $h->comanda_id)
 
-                                        Comanda #{{ str_pad(
+                                        Comanda #<span class="numero-comanda">{{ str_pad(
                                             $h->numero_ticket ?? 0,
                                             2,
                                             '0',
                                             STR_PAD_LEFT
-                                        ) }}
+                                        ) }}</span>
 
                                     @else
 
@@ -890,18 +982,47 @@
 
                             </div>
 
-                            @if($h->estado === 'ACTIVO' && $h->comanda_id)
+                            @if($h->estado === 'ACTIVO')
 
                                 <div class="historial-acciones">
 
-                                    <button
-                                        type="button"
-                                        class="btn-reimprimir"
-                                        data-comanda-id="{{ $h->comanda_id }}"
-                                    >
-                                        <i class="fas fa-print"></i>
-                                        Reimprimir
-                                    </button>
+                                    @if($h->requiere_cocina && $h->comanda_id)
+
+                                        <button
+                                            type="button"
+                                            class="btn-reimprimir"
+                                            data-comanda-id="{{ $h->comanda_id }}"
+                                        >
+                                            <i class="fas fa-print"></i>
+                                            Reimprimir
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            class="btn-reimprimir-plato"
+                                            data-detalle-id="{{ $h->id }}"
+                                        >
+                                            <i class="fas fa-utensils"></i>
+                                            Reimprimir plato
+                                        </button>
+
+                                    @endif
+
+                                    @if($puedeAnular)
+
+                                        <button
+                                            type="button"
+                                            class="btn-anular"
+                                            data-detalle-id="{{ $h->id }}"
+                                            data-nombre="{{ $h->nombre }}"
+                                            data-cantidad="{{ $h->cantidad }}"
+                                            data-precio="{{ $h->precio_unitario }}"
+                                        >
+                                            <i class="fas fa-ban"></i>
+                                            Anular
+                                        </button>
+
+                                    @endif
 
                                 </div>
 
@@ -1040,6 +1161,8 @@
         inicializarBusqueda();
         inicializarBotones();
         inicializarReimpresion();
+        inicializarReimpresionPlato();
+        inicializarAnulacion();
     });
 
     function inicializarProductos() {
@@ -1430,10 +1553,289 @@
         );
     }
 
+    function inicializarReimpresionPlato() {
+
+        const botones =
+            document.querySelectorAll('.btn-reimprimir-plato');
+
+        botones.forEach(function (boton) {
+
+            boton.addEventListener(
+                'click',
+                function () {
+
+                    const detalleId =
+                        Number(this.dataset.detalleId);
+
+                    reimprimirPlato(
+                        detalleId
+                    );
+                }
+            );
+        });
+    }
+
+    function reimprimirPlato(detalleId) {
+
+        if (!detalleId || detalleId <= 0) {
+
+            Swal.fire(
+                'Error',
+                'El plato no es válido.',
+                'error'
+            );
+
+            return;
+        }
+
+        const url =
+            '/pos/comanda-detalle/' +
+            detalleId +
+            '?reimpresion=1';
+
+        window.open(
+            url,
+            '_blank',
+            'width=450,height=700'
+        );
+    }
+
+    function inicializarAnulacion() {
+
+        const botones =
+            document.querySelectorAll('.btn-anular');
+
+        botones.forEach(function (boton) {
+
+            boton.addEventListener(
+                'click',
+                function () {
+
+                    anularDetalle(this);
+                }
+            );
+        });
+    }
+
+    function escapeHtml(texto) {
+
+        return String(texto)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    function anularDetalle(boton) {
+
+        const detalleId =
+            Number(boton.dataset.detalleId);
+
+        const nombre =
+            boton.dataset.nombre || 'Producto';
+
+        const cantidadMax =
+            Number(boton.dataset.cantidad) || 0;
+
+        const precio =
+            Number(boton.dataset.precio) || 0;
+
+        if (!detalleId || detalleId <= 0) {
+
+            Swal.fire(
+                'Error',
+                'El producto no es válido.',
+                'error'
+            );
+
+            return;
+        }
+
+        Swal.fire({
+
+            title: '¿Anular producto?',
+
+            // Cantidad (1..disponible), motivo obligatorio e importe que
+            // se anulará calculado con el precio unitario.
+            html:
+                '<div style="text-align:left;">' +
+                    '<p style="margin:0 0 10px;"><strong>' +
+                        escapeHtml(nombre) +
+                    '</strong></p>' +
+                    '<label for="anular-cantidad" style="font-size:12px;">' +
+                        'Cantidad a anular (1 a ' + cantidadMax + ')' +
+                    '</label>' +
+                    '<input id="anular-cantidad" type="number" ' +
+                        'min="1" max="' + cantidadMax + '" step="1" value="1" ' +
+                        'class="swal2-input" style="margin:6px 0 12px;">' +
+                    '<label for="anular-motivo" style="font-size:12px;">' +
+                        'Motivo de la anulación (obligatorio)' +
+                    '</label>' +
+                    '<textarea id="anular-motivo" class="swal2-textarea" ' +
+                        'maxlength="500" placeholder="Escribe el motivo (obligatorio)">' +
+                    '</textarea>' +
+                    '<div style="margin-top:10px;font-size:13px;">' +
+                        'Importe a anular: ' +
+                        '<strong id="anular-importe">C$0.00</strong>' +
+                    '</div>' +
+                '</div>',
+
+            focusConfirm: false,
+
+            showCancelButton: true,
+
+            confirmButtonColor: '#fc544b',
+
+            confirmButtonText: 'Sí, anular',
+
+            cancelButtonText: 'Cancelar',
+
+            didOpen: function () {
+
+                const inputCantidad =
+                    document.getElementById('anular-cantidad');
+
+                const importe =
+                    document.getElementById('anular-importe');
+
+                function actualizarImporte() {
+
+                    const cantidad =
+                        Number(inputCantidad.value) || 0;
+
+                    importe.textContent =
+                        'C$' + (cantidad * precio).toFixed(2);
+                }
+
+                inputCantidad.addEventListener(
+                    'input',
+                    actualizarImporte
+                );
+
+                actualizarImporte();
+            },
+
+            preConfirm: function () {
+
+                const inputCantidad =
+                    document.getElementById('anular-cantidad');
+
+                const inputMotivo =
+                    document.getElementById('anular-motivo');
+
+                const cantidad = Number(inputCantidad.value);
+
+                const motivo = (inputMotivo.value || '').trim();
+
+                if (
+                    !Number.isInteger(cantidad) ||
+                    cantidad < 1 ||
+                    cantidad > cantidadMax
+                ) {
+
+                    Swal.showValidationMessage(
+                        'La cantidad debe estar entre 1 y ' +
+                        cantidadMax +
+                        '.'
+                    );
+
+                    return false;
+                }
+
+                if (motivo.length < 3) {
+
+                    Swal.showValidationMessage(
+                        'Escribe un motivo de al menos 3 caracteres.'
+                    );
+
+                    return false;
+                }
+
+                return { cantidad: cantidad, motivo: motivo };
+            }
+
+        }).then(function (result) {
+
+            if (!result.isConfirmed) {
+                return;
+            }
+
+            const form = new FormData();
+
+            form.append(
+                '_token',
+                '{{ csrf_token() }}'
+            );
+
+            form.append(
+                'cantidad',
+                result.value.cantidad
+            );
+
+            form.append(
+                'motivo',
+                result.value.motivo
+            );
+
+            fetch(
+                '/pos/detalle/' + detalleId + '/anular',
+                {
+                    method: 'POST',
+                    body: form
+                }
+            )
+            .then(function (response) {
+
+                return response.json();
+            })
+            .then(function (data) {
+
+                if (!data.exito) {
+
+                    throw new Error(
+                        data.error ||
+                        'No se pudo anular el producto.'
+                    );
+                }
+
+                Swal.fire(
+                    'Producto anulado',
+                    data.mensaje ||
+                    'El producto fue anulado correctamente.',
+                    'success'
+                ).then(function () {
+
+                    location.reload();
+                });
+            })
+            .catch(function (error) {
+
+                Swal.fire(
+                    'Error',
+                    error.message,
+                    'error'
+                );
+            });
+        });
+    }
+
     function imprimirTodas() {
 
         const url =
             '/pos/comandas/{{ $venta->id }}?reimpresion=1';
+
+        window.open(
+            url,
+            '_blank',
+            'width=450,height=700'
+        );
+    }
+
+    function imprimirComandaCompleta() {
+
+        const url =
+            '/pos/comanda-completa/{{ $venta->id }}';
 
         window.open(
             url,
@@ -1465,6 +1867,18 @@
             btnImprimirTodas.addEventListener(
                 'click',
                 imprimirTodas
+            );
+        }
+
+        const btnImprimirCompleta =
+            document.getElementById(
+                'btn-imprimir-completa'
+            );
+
+        if (btnImprimirCompleta) {
+            btnImprimirCompleta.addEventListener(
+                'click',
+                imprimirComandaCompleta
             );
         }
 
@@ -1530,46 +1944,235 @@
                     Swal.fire('Sin cuentas abiertas', 'Todas las cuentas de esta mesa ya fueron pagadas.', 'info');
                     return;
                 }
+                const abiertaIds = new Set(abiertas.map(cuenta => String(cuenta.id)));
 
-                const asignadas = {};
-                data.asignaciones.forEach(item => {
-                    if (!asignadas[item.venta_detalle_id]) asignadas[item.venta_detalle_id] = item.cuenta_id;
+                // Unidades ya pagadas por línea: no son reasignables.
+                const pagadasPorLinea = {};
+                data.cuentas.forEach(cuenta => {
+                    if (cuenta.estado !== 'PAGADA') return;
+                    data.asignaciones.forEach(asig => {
+                        if (String(asig.cuenta_id) !== String(cuenta.id)) return;
+                        const clave = String(asig.venta_detalle_id);
+                        pagadasPorLinea[clave] = (pagadasPorLinea[clave] || 0) + Number(asig.cantidad);
+                    });
                 });
 
-                const opciones = abiertas.map(cuenta =>
-                    `<option value="${cuenta.id}">${escaparHtml(cuenta.nombre)}</option>`
-                ).join('');
+                // Asignaciones actuales solo de cuentas abiertas: (detalle, cuenta).
+                const previas = {};
+                data.asignaciones.forEach(asig => {
+                    if (!abiertaIds.has(String(asig.cuenta_id))) return;
+                    previas[asig.venta_detalle_id + ':' + asig.cuenta_id] = Number(asig.cantidad);
+                });
 
-                const filas = data.detalles.map(detalle => `
-                    <div style="display:grid;grid-template-columns:1fr 100px;gap:8px;align-items:center;margin:8px 0;text-align:left;">
-                        <label>${escaparHtml(detalle.nombre)} <small>(${detalle.cantidad} u.)</small></label>
-                        <select class="swal2-select asignacion-cuenta" data-detalle="${detalle.id}" style="margin:0;width:100%;">
-                            ${opciones}
-                        </select>
-                    </div>`
+                function valorEntero(inp) {
+                    // Devuelve 0 si está vacío; -1 si no es un entero >= 0; o la cantidad válida.
+                    if (inp.value.trim() === '') return 0;
+                    const n = Number(inp.value);
+                    if (!Number.isInteger(n) || n < 0) return -1;
+                    return n;
+                }
+
+                const claveCampo = inp => String(inp.dataset.detalle) + ':' + String(inp.dataset.cuenta);
+
+                // Último valor conocido de cada campo (detalle:cuenta). Sirve para
+                // saber el delta al editar y compensarlo automáticamente.
+                const previos = {};
+
+                function repartiblesDe(detalle) {
+                    return Number(detalle.cantidad) - Number(pagadasPorLinea[String(detalle.id)] || 0);
+                }
+
+                function balancear(inp) {
+                    // Al editar un campo, la línea conserva SIEMPRE el total repartible:
+                    // lo que se aumenta se quita de las demás cuentas y lo que se suelta
+                    // se devuelve a ellas. El campo editado NUNCA se modifica por su cuenta.
+                    const detalle = data.detalles.find(d => String(d.id) === String(inp.dataset.detalle));
+                    if (!detalle) return recalcular();
+                    const clave = claveCampo(inp);
+                    const nuevo = valorEntero(inp);
+                    const antes = (previos[clave] !== undefined) ? previos[clave] : nuevo;
+
+                    if (nuevo < 0) return recalcular(); // Valor inválido: solo se marca en rojo.
+
+                    if (nuevo !== antes) {
+                        const repartibles = repartiblesDe(detalle);
+                        const campos = Array.from(document.querySelectorAll('.asig-cantidad[data-detalle="' + detalle.id + '"]'));
+                        const resto = campos.filter(c => c !== inp);
+
+                        if (nuevo <= repartibles) {
+                            // Lo que deben sumar las demás cuentas para cubrir la línea.
+                            const objetivoOtros = repartibles - nuevo;
+                            const actuales = resto.map(c => ({ c: c, v: valorEntero(c) }));
+                            let dif = objetivoOtros - actuales.reduce((acc, f) => acc + Math.max(f.v, 0), 0);
+                            // Orden desc: se ajusta primero la cuenta con más unidades
+                            // (empates: la primera del DOM, normalmente la principal).
+                            const mayores = actuales.slice().sort((a, b) => b.v - a.v);
+
+                            if (dif > 0) {
+                                // Sobran unidades: se devuelven a las demás cuentas.
+                                for (const f of mayores) {
+                                    if (dif <= 0) break;
+                                    f.c.value = String(Math.max(f.v, 0) + dif);
+                                    previos[claveCampo(f.c)] = Math.max(f.v, 0) + dif;
+                                    dif = 0;
+                                }
+                            } else if (dif < 0) {
+                                // Faltan unidades: se quitan de las demás cuentas.
+                                let porQuitar = -dif;
+                                for (const f of mayores) {
+                                    if (porQuitar <= 0) break;
+                                    const disp = Math.max(f.v, 0);
+                                    const quitar = Math.min(disp, porQuitar);
+                                    if (quitar > 0) f.c.value = String(disp - quitar);
+                                    previos[claveCampo(f.c)] = disp - quitar;
+                                    porQuitar -= quitar;
+                                }
+                            }
+                        } else {
+                            // nuevo > repartibles: no hay forma de cubrirlo. No se toca
+                            // nada del campo editado; recalcular() lo marca en rojo.
+                        }
+                        previos[clave] = nuevo;
+                    }
+
+                    recalcular();
+                }
+
+                function recalcular() {
+                    // Por producto: la suma de las cuentas abiertas debe ser exactamente
+                    // repartibles (= cantidad - unidades ya pagadas).
+                    data.detalles.forEach(detalle => {
+                        const repartibles = repartiblesDe(detalle);
+                        const campos = Array.from(document.querySelectorAll('.asig-cantidad[data-detalle="' + detalle.id + '"]'));
+                        const valores = campos.map(c => valorEntero(c));
+                        const algunInvalido = valores.some(v => v < 0);
+                        const suma = valores.reduce((acc, v) => acc + Math.max(v, 0), 0);
+                        const exceso = suma - repartibles;
+
+                        const el = document.querySelector('.linea-suma[data-detalle="' + detalle.id + '"]');
+                        let texto = 'Asignadas: ' + suma + ' / ' + repartibles + ' u.';
+                        if (algunInvalido) {
+                            texto = 'Cantidad inválida (entero ≥ 0). ' + texto;
+                        } else if (exceso > 0) {
+                            texto = 'Excede en ' + exceso + ' u. ' + texto;
+                        } else if (exceso < 0) {
+                            texto = 'Faltan ' + (-exceso) + ' u. ' + texto;
+                        }
+                        el.textContent = texto;
+                        el.style.color = (!algunInvalido && exceso === 0) ? '#2e7d32' : '#c62828';
+                    });
+
+                    // Subtotales por cuenta: cantidad × precio_unitario, recalculados desde cero.
+                    const totales = {};
+                    document.querySelectorAll('.asig-cantidad').forEach(inp => {
+                        const v = valorEntero(inp);
+                        if (v <= 0) return;
+                        const detalle = data.detalles.find(d => String(d.id) === inp.dataset.detalle);
+                        if (!detalle) return;
+                        const claveCuenta = String(inp.dataset.cuenta);
+                        totales[claveCuenta] = (totales[claveCuenta] || 0) + v * Number(detalle.precio_unitario);
+                    });
+                    abiertas.forEach(cuenta => {
+                        const el = document.querySelector('.resumen-cuenta[data-cuenta="' + cuenta.id + '"]');
+                        if (el) el.textContent = 'C$ ' + (totales[String(cuenta.id)] || 0).toFixed(2);
+                    });
+                }
+
+                const filas = data.detalles.map(detalle => {
+                    const disponibles = Number(detalle.cantidad);
+                    const enPagadas = Number(pagadasPorLinea[String(detalle.id)] || 0);
+                    const inputs = abiertas.map(cuenta => {
+                        const pre = Number(previas[detalle.id + ':' + cuenta.id] || 0);
+                        return (
+                            '<div style="display:flex;align-items:center;gap:6px;margin:3px 0 0 8px;text-align:left;">' +
+                                '<label style="flex:1;font-size:12px;color:#555;">' + escaparHtml(cuenta.nombre) + '</label>' +
+                                '<input type="number" min="0" max="' + (disponibles - enPagadas) + '" step="1" value="' + pre + '" ' +
+                                    'class="swal2-input asig-cantidad" data-detalle="' + detalle.id + '" data-cuenta="' + cuenta.id + '" ' +
+                                    'style="width:80px;margin:0;padding:4px 8px;font-size:13px;">' +
+                            '</div>'
+                        );
+                    }).join('');
+                    return (
+                        '<div style="border-top:1px solid #eee;padding:8px 0;">' +
+                            '<div style="display:flex;justify-content:space-between;align-items:center;text-align:left;">' +
+                                '<strong>' + escaparHtml(detalle.nombre) + '</strong>' +
+                                '<span style="font-size:12px;color:#777;">' +
+                                    (enPagadas > 0 ? enPagadas + ' pagada(s) · ' : '') +
+                                    disponibles + ' u. · C$ ' + Number(detalle.precio_unitario).toFixed(2) + ' c/u' +
+                                '</span>' +
+                            '</div>' +
+                            inputs +
+                            '<div class="linea-suma" data-detalle="' + detalle.id + '" style="font-size:12px;margin-top:4px;text-align:left;"></div>' +
+                        '</div>'
+                    );
+                }).join('');
+
+                const resumen = abiertas.map(cuenta =>
+                    '<div style="text-align:left;font-size:13px;margin:2px 0;">' +
+                        escaparHtml(cuenta.nombre) + ': <strong class="resumen-cuenta" data-cuenta="' + cuenta.id + '">C$ 0.00</strong>' +
+                    '</div>'
                 ).join('');
 
                 Swal.fire({
                     title: 'Dividir cuentas',
-                    html: `<p style="font-size:13px">Asigna cada línea a una cuenta. Para crear otra cuenta, usa el botón inferior.</p>${filas}`,
+                    html:
+                        '<p style="font-size:13px">Indica cuántas unidades de cada producto van a cada cuenta abierta. ' +
+                        'La suma por línea debe coincidir con las unidades disponibles.</p>' +
+                        filas +
+                        '<hr style="margin:8px 0;">' + resumen,
                     showCancelButton: true,
                     showDenyButton: true,
                     denyButtonText: 'Nueva cuenta',
                     confirmButtonText: 'Guardar división',
                     cancelButtonText: 'Cancelar',
                     didOpen: () => {
-                        document.querySelectorAll('.asignacion-cuenta').forEach(select => {
-                            const cuentaId = asignadas[select.dataset.detalle];
-                            if (cuentaId && abiertas.some(cuenta => String(cuenta.id) === String(cuentaId))) select.value = cuentaId;
+                        document.querySelectorAll('.asig-cantidad').forEach(input => {
+                            previos[claveCampo(input)] = valorEntero(input);
+                            input.addEventListener('input', () => balancear(input));
                         });
+                        recalcular();
                     },
-                    preConfirm: () => ({
-                        asignaciones: [...document.querySelectorAll('.asignacion-cuenta')].map(select => ({
-                            cuenta_id: Number(select.value),
-                            venta_detalle_id: Number(select.dataset.detalle),
-                            cantidad: Number(data.detalles.find(detalle => String(detalle.id) === select.dataset.detalle).cantidad)
-                        }))
-                    })
+                    preConfirm: () => {
+                        const errores = [];
+                        const asignaciones = [];
+                        document.querySelectorAll('.asig-cantidad').forEach(inp => {
+                            const valor = inp.value.trim() === '' ? 0 : Number(inp.value);
+                            if (!Number.isInteger(valor) || valor < 0) {
+                                errores.push('Cantidad inválida en una línea.');
+                                return;
+                            }
+                            if (valor > Number(inp.max)) {
+                                errores.push('Una línea supera lo disponible.');
+                                return;
+                            }
+                            if (valor > 0) {
+                                asignaciones.push({
+                                    cuenta_id: Number(inp.dataset.cuenta),
+                                    venta_detalle_id: Number(inp.dataset.detalle),
+                                    cantidad: valor
+                                });
+                            }
+                        });
+                        data.detalles.forEach(detalle => {
+                            let suma = 0;
+                            asignaciones.forEach(asig => {
+                                if (asig.venta_detalle_id === detalle.id) suma += asig.cantidad;
+                            });
+                            const repartibles = Number(detalle.cantidad) - Number(pagadasPorLinea[String(detalle.id)] || 0);
+                            if (suma !== repartibles) {
+                                errores.push('"' + detalle.nombre + '" reparte ' + suma + ' de ' + repartibles + ' unidades.');
+                            }
+                        });
+                        if (errores.length) {
+                            Swal.showValidationMessage(errores.join(' '));
+                            return false;
+                        }
+                        if (!asignaciones.length) {
+                            Swal.showValidationMessage('Asigna al menos una unidad.');
+                            return false;
+                        }
+                        return { asignaciones: asignaciones };
+                    }
                 }).then(result => {
                     if (result.isDenied) return crearCuentaParaDivision(data);
                     if (!result.isConfirmed) return;
@@ -1583,8 +2186,39 @@
         Swal.fire({ title: 'Nueva cuenta', input: 'text', inputLabel: 'Nombre (ej. Ana)', inputValidator: valor => !valor.trim() && 'Escribe un nombre.' })
             .then(result => {
                 if (!result.isConfirmed) return;
-                const abierta = data.cuentas.find(cuenta => cuenta.estado === 'ABIERTA');
-                const asignaciones = data.detalles.map(detalle => ({ cuenta_id: abierta.id, venta_detalle_id: detalle.id, cantidad: detalle.cantidad }));
+                const abiertas = data.cuentas.filter(cuenta => cuenta.estado === 'ABIERTA');
+                if (!abiertas.length) return;
+                const abiertaIds = new Set(abiertas.map(cuenta => String(cuenta.id)));
+
+                // Se reconstruye la distribución actual SOLO entre cuentas abiertas,
+                // para que al crear la cuenta nueva no se muevan líneas por error.
+                // Las asignaciones de cuentas pagadas no se envían (no son editables).
+                const mapa = {};
+                data.asignaciones.forEach(asig => {
+                    if (!abiertaIds.has(String(asig.cuenta_id))) return;
+                    const clave = String(asig.venta_detalle_id);
+                    (mapa[clave] = mapa[clave] || []).push({
+                        cuenta_id: asig.cuenta_id,
+                        cantidad: asig.cantidad
+                    });
+                });
+
+                const asignaciones = [];
+                data.detalles.forEach(detalle => {
+                    (mapa[String(detalle.id)] || []).forEach(fila => {
+                        asignaciones.push({
+                            cuenta_id: fila.cuenta_id,
+                            venta_detalle_id: detalle.id,
+                            cantidad: fila.cantidad
+                        });
+                    });
+                });
+
+                if (!asignaciones.length) {
+                    Swal.fire('Sin asignaciones', 'No hay unidades abiertas para repartir.', 'info');
+                    return;
+                }
+
                 guardarDivision({ cuentas_nuevas: [result.value.trim()], asignaciones }, gestionarCuentas);
             });
     }

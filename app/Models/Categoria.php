@@ -9,7 +9,7 @@ class Categoria extends Model
     protected $table = 'categorias';
     public $timestamps = false;
 
-    protected $fillable = ['nombre', 'activo'];
+    protected $fillable = ['nombre', 'activa'];
 
     public function productos()
     {
