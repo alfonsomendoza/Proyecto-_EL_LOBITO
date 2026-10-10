@@ -879,11 +879,23 @@
                     ->sum('subtotal');
             @endphp
 
+            {{-- Cuenta seleccionada (?cuenta=): el POS queda acotado a ella.
+                 Vacío = vista general de la mesa (uso para dividir). --}}
+            <input
+                type="hidden"
+                id="cuenta-actual-id"
+                value="{{ $cuentaActual->id ?? '' }}"
+            >
+
             <div class="ticket-header">
 
                 <div class="ticket-header-title">
                     <i class="fas fa-receipt"></i>
-                    <span>Cuenta Actual</span>
+                    @if($cuentaActual)
+                        <span>{{ $cuentaActual->nombre }}</span>
+                    @else
+                        <span>Cuenta Actual</span>
+                    @endif
                 </div>
 
                 <span class="ticket-total">
@@ -1014,6 +1026,7 @@
                                             type="button"
                                             class="btn-anular"
                                             data-detalle-id="{{ $h->id }}"
+                                            data-cuenta-id="{{ $cuentaActual->id ?? '' }}"
                                             data-nombre="{{ $h->nombre }}"
                                             data-cantidad="{{ $h->cantidad }}"
                                             data-precio="{{ $h->precio_unitario }}"
@@ -1042,6 +1055,7 @@
                     type="button"
                     class="btn-footer"
                     id="btn-dividir-cuenta"
+                    @if(!$puedeDividirCuenta) disabled title="La cuenta no tiene consumos propios para dividir" @endif
                 >
                     <i class="fas fa-users"></i>
                     Dividir cuentas
@@ -1541,10 +1555,21 @@
             return;
         }
 
+        // Si el POS está acotado a una subcuenta, la reimpresión muestra el
+        // pedido ACTUAL de esa cuenta; sin cuenta, el histórico original.
+        const cuentaActualId =
+            document.getElementById('cuenta-actual-id');
+
+        const cuentaQuery =
+            cuentaActualId && cuentaActualId.value
+                ? '&cuenta=' + cuentaActualId.value
+                : '';
+
         const url =
             '/pos/comanda/' +
             comandaId +
-            '?reimpresion=1';
+            '?reimpresion=1' +
+            cuentaQuery;
 
         window.open(
             url,
@@ -1588,10 +1613,21 @@
             return;
         }
 
+        // Con cuenta activa, la reimpresión del plato usa sus unidades
+        // actuales; sin cuenta, la cantidad histórica original.
+        const cuentaActualId =
+            document.getElementById('cuenta-actual-id');
+
+        const cuentaQuery =
+            cuentaActualId && cuentaActualId.value
+                ? '&cuenta=' + cuentaActualId.value
+                : '';
+
         const url =
             '/pos/comanda-detalle/' +
             detalleId +
-            '?reimpresion=1';
+            '?reimpresion=1' +
+            cuentaQuery;
 
         window.open(
             url,
@@ -1778,6 +1814,19 @@
                 result.value.motivo
             );
 
+            // Cuenta desde la que se anula (?cuenta=). Sin cuenta, el backend
+            // mantiene el reparto global anterior.
+            const cuentaId =
+                boton.dataset.cuentaId;
+
+            if (cuentaId) {
+
+                form.append(
+                    'cuenta_id',
+                    cuentaId
+                );
+            }
+
             fetch(
                 '/pos/detalle/' + detalleId + '/anular',
                 {
@@ -1822,8 +1871,18 @@
 
     function imprimirTodas() {
 
+        // Si el POS está acotado a una cuenta, la impresión masiva muestra
+        // solo las comandas con productos de esa cuenta.
+        const cuentaActualId =
+            document.getElementById('cuenta-actual-id');
+
+        const cuentaQuery =
+            cuentaActualId && cuentaActualId.value
+                ? '&cuenta=' + cuentaActualId.value
+                : '';
+
         const url =
-            '/pos/comandas/{{ $venta->id }}?reimpresion=1';
+            '/pos/comandas/{{ $venta->id }}?reimpresion=1' + cuentaQuery;
 
         window.open(
             url,
@@ -1834,8 +1893,16 @@
 
     function imprimirComandaCompleta() {
 
+        const cuentaActualId =
+            document.getElementById('cuenta-actual-id');
+
+        const cuentaQuery =
+            cuentaActualId && cuentaActualId.value
+                ? '?cuenta=' + cuentaActualId.value
+                : '';
+
         const url =
-            '/pos/comanda-completa/{{ $venta->id }}';
+            '/pos/comanda-completa/{{ $venta->id }}' + cuentaQuery;
 
         window.open(
             url,
@@ -1929,15 +1996,109 @@
 
         const btnDividir = document.getElementById('btn-dividir-cuenta');
         if (btnDividir) {
-            btnDividir.addEventListener('click', gestionarCuentas);
+            btnDividir.addEventListener('click', function () {
+                // Si el POS está acotado a una cuenta (?cuenta=), la división se
+                // hace SOLO sobre esa cuenta (subdivisión). En la vista general
+                // (sin cuenta) se conserva la división a nivel de mesa.
+                const campoCuenta =
+                    document.getElementById(
+                        'cuenta-actual-id'
+                    );
+                const origen =
+                    campoCuenta && campoCuenta.value
+                        ? Number(campoCuenta.value)
+                        : null;
+
+                gestionarCuentas(origen);
+            });
         }
     }
 
-    function gestionarCuentas() {
+    // Alcance actual de la división: id de la cuenta que se está subdividiendo
+    // o null cuando se divide a nivel de mesa (vista general del POS).
+    let origenDivisionId = null;
+
+    function aplicarAlcanceSubdivision(data, origenId) {
+        // AISLAMIENTO ESTRICTO: la subdivisión trabaja SOLO con los consumos
+        // propios del origen. Las subcuentas que YA tienen consumo quedan
+        // fuera del alcance (no se muestran ni se tocan). Las subcuentas
+        // VACÍAS sí pueden recibir unidades, igual que valida el backend.
+        const conConsumo = new Set(
+            data.asignaciones
+                .filter(asig => Number(asig.cantidad) > 0)
+                .map(asig => String(asig.cuenta_id))
+        );
+
+        const alcance = data.cuentas.filter(cuenta => {
+            if (String(cuenta.id) === String(origenId)) return true;
+            const esHija = String(cuenta.cuenta_origen_id) === String(origenId);
+            return esHija && !conConsumo.has(String(cuenta.id));
+        });
+
+        const origen = alcance.find(cuenta => String(cuenta.id) === String(origenId));
+
+        if (!origen || origen.estado !== 'ABIERTA') {
+            Swal.fire('Cuenta no disponible', 'Esta cuenta no puede dividirse porque no está abierta.', 'info');
+            return false;
+        }
+
+        // Aislamiento: solo se divide una cuenta con consumos PROPIOS activos.
+        // Una cuenta vacía no puede usar los consumos de sus subcuentas.
+        const unidadesOrigen = data.asignaciones
+            .filter(asig => String(asig.cuenta_id) === String(origenId))
+            .reduce((suma, asig) => suma + Number(asig.cantidad), 0);
+
+        if (unidadesOrigen <= 0) {
+            Swal.fire('Sin consumos', 'Esta cuenta no tiene consumos propios para dividir.', 'info');
+            return false;
+        }
+
+        const ids = new Set(alcance.map(cuenta => String(cuenta.id)));
+        // Solo las asignaciones del origen y de las subcuentas vacías incluidas.
+        const asignaciones = data.asignaciones.filter(asig =>
+            ids.has(String(asig.cuenta_id)) && String(asig.cuenta_id) === String(origenId)
+        );
+
+        // Unidades por línea: solo las propias del origen (las subcuentas
+        // vacías aportan 0). Las líneas sin unidades propias no son divisibles.
+        const porLinea = {};
+        asignaciones.forEach(asig => {
+            const clave = String(asig.venta_detalle_id);
+            porLinea[clave] = porLinea[clave] || { abierta: 0, pagada: 0 };
+            if (origen.estado === 'ABIERTA') porLinea[clave].abierta += Number(asig.cantidad);
+            else if (origen.estado === 'PAGADA') porLinea[clave].pagada += Number(asig.cantidad);
+        });
+
+        // Se acota el POS al origen (y subcuentas vacías como destino).
+        data.cuentas = alcance;
+        data.asignaciones = asignaciones;
+        data.detalles = data.detalles
+            .filter(detalle => porLinea[String(detalle.id)] && porLinea[String(detalle.id)].abierta > 0)
+            .map(detalle => Object.assign({}, detalle, {
+                cantidad: porLinea[String(detalle.id)].abierta + porLinea[String(detalle.id)].pagada
+            }));
+
+        if (!data.detalles.length) {
+            Swal.fire('Sin consumos', 'Esta cuenta no tiene consumos pendientes para dividir.', 'info');
+            return false;
+        }
+
+        return true;
+    }
+
+    function gestionarCuentas(origenId) {
+        origenId = origenId || null;
+        origenDivisionId = origenId;
         fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
             .then(response => response.json())
             .then(data => {
                 if (!data.exito) throw new Error(data.error || 'No se pudieron cargar las cuentas.');
+
+                // Si el POS está acotado a una cuenta, la división solo abarca
+                // el origen y sus subcuentas: las cuentas hermanas no se tocan.
+                if (origenId && !aplicarAlcanceSubdivision(data, origenId)) {
+                    return;
+                }
 
                 const abiertas = data.cuentas.filter(cuenta => cuenta.estado === 'ABIERTA');
                 if (abiertas.length === 0) {
@@ -2219,7 +2380,11 @@
                     return;
                 }
 
-                guardarDivision({ cuentas_nuevas: [result.value.trim()], asignaciones }, gestionarCuentas);
+                guardarDivision({ cuentas_nuevas: [result.value.trim()], asignaciones }, function () {
+                    // Se reabre el mismo alcance (la subdivisión si el POS está
+                    // acotado a una cuenta, o la mesa si no lo está).
+                    gestionarCuentas(origenDivisionId);
+                });
             });
     }
 
@@ -2234,6 +2399,9 @@
             form.append(`asignaciones[${indice}][cantidad]`, item.cantidad);
         });
         (payload.cuentas_nuevas || []).forEach((nombre, indice) => form.append(`cuentas_nuevas[${indice}]`, nombre));
+        // Si estamos subdividiendo una cuenta concreta, se envía el origen para
+        // que el backend reparta SOLO esa cuenta y no toque las demás.
+        if (origenDivisionId) form.append('cuenta_origen_id', origenDivisionId);
         fetch('{{ route("pos.cuentas.dividir", ["mesaId" => $mesa->id]) }}', { method: 'POST', body: form })
             .then(response => response.json())
             .then(data => {
@@ -2341,6 +2509,22 @@
                 'venta_id',
                 '{{ $venta->id }}'
             );
+
+            // Cuenta destino: si el POS está acotado (?cuenta=) el pedido se
+            // guarda en ESA subcuenta. Sin cuenta, el backend usa la primera.
+            const cuentaActualId =
+                document.getElementById('cuenta-actual-id');
+
+            if (
+                cuentaActualId &&
+                cuentaActualId.value
+            ) {
+
+                fd.append(
+                    'cuenta_id',
+                    cuentaActualId.value
+                );
+            }
 
             fd.append(
                 'carrito',

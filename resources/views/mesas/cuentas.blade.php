@@ -36,10 +36,25 @@
     .btn-volver:hover { opacity: .88; }
     .btn-dividir { background: transparent; color: #6777ef; border: 1px solid #6777ef; padding: 6px 14px; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 12px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
     .btn-dividir:hover { background: #6777ef; color: #fff; }
+    .btn-crear { background: #47c363; color: #fff; border: none; padding: 7px 16px; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 2px 4px rgba(71,195,99,0.3); }
+    .btn-crear:hover { opacity: .88; }
+    .btn-trasladar { background: #fff; color: #ffa426; border: 1px solid #ffa426; padding: 6px 12px; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+    .btn-trasladar:hover { background: #ffa426; color: #fff; }
+    .flash { padding: 12px 20px; font-size: 13px; font-weight: bold; }
+    .flash-error { background: #fdecea; color: #fc544b; }
+    .flash-success { background: #e6f7ea; color: #2f9e44; }
     .contenido-vacio { padding: 50px 20px; text-align: center; color: #98a6ad; }
 </style>
 
 <div id="panel-cuentas" class="monitor-card" style="max-width: 1200px; margin: 0 auto;">
+
+    {{-- Avisos de acciones de la Fase 2 (crear subcuenta), si los hay. --}}
+    @if(session('success'))
+        <div class="flash flash-success"><i class="fas fa-check-circle"></i> {{ session('success') }}</div>
+    @endif
+    @if(session('error'))
+        <div class="flash flash-error"><i class="fas fa-exclamation-circle"></i> {{ session('error') }}</div>
+    @endif
 
     {{-- Encabezado del panel --}}
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: #fff; padding: 18px 20px;">
@@ -53,12 +68,41 @@
         </div>
 
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            @if($puedeCrear)
+                {{-- Fase 2: los cuatro roles pueden crear subcuentas vacías. --}}
+                <button type="button" id="btn-nueva-cuenta" class="btn-crear"
+                        title="Crear una cuenta vacía en esta venta">
+                    <i class="fas fa-plus"></i> Nueva cuenta
+                </button>
+            @endif
             @if($puedeDividir)
                 {{-- Lleva al POS general, donde ya existe el modal de dividir cuentas. --}}
                 <a href="{{ route('pos.index', $mesa->id) }}" class="btn-dividir"
                    title="Administrar la venta completa de la mesa">
                     <i class="fas fa-people-arrows"></i> Dividir cuentas
                 </a>
+            @endif
+            @if($puedeTrasladar && $cuentaTrasladoId)
+                {{--
+                    Traslado de MESA COMPLETA.
+
+                    El POS maneja UNA venta por mesa. Por eso mover una
+                    subcuenta de forma individual NO es posible con el esquema
+                    actual: no existe una venta independiente por subcuenta ni
+                    un enlace que permita reasignar líneas entre ventas sin
+                    romper totales, comandas y numeración de tickets.
+
+                    Esta acción mueve TODA la venta (todas las cuentas y
+                    subcuentas) a la mesa destino. Se etiqueta explícitamente
+                    como "Trasladar mesa" para no ofrecer un traslado
+                    individual que en realidad movería la mesa completa.
+                --}}
+                <button type="button" id="btn-trasladar-mesa" class="btn-trasladar"
+                        data-cuenta-id="{{ $cuentaTrasladoId }}"
+                        data-mesa-numero="{{ e($mesa->numero) }}"
+                        title="Mover TODO el consumo de esta mesa a otra">
+                    <i class="fas fa-right-left"></i> Trasladar mesa
+                </button>
             @endif
             <a href="{{ route('mesas.index') }}" class="btn-volver">
                 <i class="fas fa-arrow-left"></i> Volver a Mesas
@@ -93,11 +137,14 @@
                             <p class="cuenta-total">C${{ number_format((float) $cuenta->total, 2) }}</p>
                         </div>
                     </div>
-                    <div class="cuenta-footer">
+                    <div class="cuenta-footer" style="justify-content: flex-end;">
                         {{--
-                            Abre el POS para esta cuenta. En la Fase 1 el POS aún
-                            trabaja a nivel de mesa; el parámetro ?cuenta= queda
-                            listo para la Fase 3 (POS filtrado por subcuenta).
+                            Abre el POS acotado a esta subcuenta (?cuenta=).
+                            El POS general (sin ?cuenta=) sigue sirviendo para
+                            dividir y ver la mesa completa.
+
+                            El traslado NO es por cuenta: es de la mesa completa
+                            (ver el botón "Trasladar mesa" en el encabezado).
                         --}}
                         <a class="btn-abrir"
                            href="{{ route('pos.index', $mesa->id) }}?cuenta={{ $cuenta->id }}"
@@ -111,4 +158,124 @@
     @endif
 </div>
 
+<script>
+    {{-- Fase 2: crear subcuenta vacía (ADMIN, GERENTE, CAJERO y MESERO). --}}
+    const URL_CREAR_CUENTA = '{{ route("mesas.cuentas.crear", ["mesaId" => $mesa->id]) }}';
+
+    function crearSubcuenta() {
+        Swal.fire({
+            title: 'Nueva subcuenta',
+            input: 'text',
+            inputLabel: 'Nombre (ej. Ana)',
+            inputPlaceholder: 'Escribe el nombre de la subcuenta',
+            showCancelButton: true,
+            confirmButtonColor: '#47c363',
+            confirmButtonText: 'Crear cuenta',
+            cancelButtonText: 'Cancelar',
+            inputValidator: (valor) => (valor && valor.trim() !== '' ? null : 'El nombre es obligatorio.')
+        }).then((result) => {
+            if (!result.isConfirmed) return;
+
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('nombre', result.value.trim());
+
+            fetch(URL_CREAR_CUENTA, {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                body: fd
+            })
+            .then(respuesta => respuesta.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Creada!', data.mensaje, 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Atención', data.error || 'No se pudo crear la cuenta.', 'warning');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error'));
+        });
+    }
+
+    const btnNuevaCuenta = document.getElementById('btn-nueva-cuenta');
+    if (btnNuevaCuenta) {
+        btnNuevaCuenta.addEventListener('click', crearSubcuenta);
+    }
+
+    {{-- Fase 6: traslado de la MESA COMPLETA entre mesas (ADMIN, GERENTE, CAJERO).
+         El backend mueve la venta completa (todas las cuentas) porque el POS usa
+         una sola venta por mesa. --}}
+    const URL_TRASLADAR = '{{ route("pos.cuentas.trasladar", ["cuentaId" => "__ID__"]) }}';
+    const MESAS_DESTINO = @json($mesasDestino->map(fn ($m) => ['id' => $m->id, 'numero' => $m->numero])->values());
+
+    function trasladarMesaCompleta(cuentaId, numeroMesa) {
+        if (!MESAS_DESTINO.length) {
+            Swal.fire('Sin mesas libres', 'No hay otra mesa libre para recibir el consumo.', 'info');
+            return;
+        }
+
+        const opciones = MESAS_DESTINO
+            .map(m => `<option value="${m.id}">Mesa ${m.numero}</option>`)
+            .join('');
+
+        Swal.fire({
+            title: 'Trasladar mesa completa',
+            html: `
+                <div style="text-align: left; font-size: 14px;">
+                    <p style="margin-bottom: 10px;">Se moverá <strong>TODO el consumo de la mesa
+                       ${numeroMesa}</strong> (todas las cuentas y subcuentas) a la mesa seleccionada.</p>
+                    <p style="margin-bottom: 10px; color: #ffa426; font-weight: bold;">
+                       El traslado es de la mesa completa; no es posible mover una sola subcuenta.</p>
+                    <label style="display: block; margin-bottom: 5px; font-weight: bold;">Mesa destino:</label>
+                    <select id="traslado-destino" class="swal2-input" style="width: 100%; height: 40px; margin: 0;">
+                        ${opciones}
+                    </select>
+                </div>`,
+            showCancelButton: true,
+            confirmButtonColor: '#ffa426',
+            confirmButtonText: '<i class="fas fa-right-left"></i> Trasladar',
+            cancelButtonText: 'Cancelar',
+            focusConfirm: false,
+            preConfirm: () => {
+                const sel = document.getElementById('traslado-destino');
+                return sel ? sel.value : null;
+            }
+        }).then((result) => {
+            if (!result.isConfirmed || !result.value) return;
+
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('mesa_destino_id', result.value);
+
+            fetch(URL_TRASLADAR.replace('__ID__', cuentaId), {
+                method: 'POST',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json'
+                },
+                body: fd
+            })
+            .then(respuesta => respuesta.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Trasladada!', data.mensaje, 'success')
+                        .then(() => window.location.href = '{{ route("mesas.index") }}');
+                } else {
+                    Swal.fire('Atención', data.error || 'No se pudo trasladar la mesa.', 'warning');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error'));
+        });
+    }
+
+    const btnTrasladarMesa = document.getElementById('btn-trasladar-mesa');
+    if (btnTrasladarMesa) {
+        btnTrasladarMesa.addEventListener('click', function () {
+            trasladarMesaCompleta(Number(this.dataset.cuentaId), this.dataset.mesaNumero);
+        });
+    }
+</script>
 @endsection

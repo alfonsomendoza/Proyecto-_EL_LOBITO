@@ -156,14 +156,13 @@ class VentaController extends Controller
 
 
                 // ------------------------------------------------
-                // MARCAR LA MESA COMO OCUPADA
+                // LA MESA NO SE MARCA OCUPADA AQUÍ
                 // ------------------------------------------------
-
-                DB::table('mesas')
-                    ->where('id', $mesaId)
-                    ->update([
-                        'estado' => 'OCUPADA',
-                    ]);
+                //
+                // Abrir la pantalla de la mesa NO la ocupa. La mesa permanece
+                // LIBRE hasta que se agregue el primer producto/bebida real
+                // (ver enviarPedidoDesdePos). Así una venta vacía no deja la
+                // mesa como OCUPADA sin consumo.
 
                 // Toda venta necesita una cuenta inicial. Los pedidos nuevos
                 // permanecen en esta cuenta hasta que se haga una división.
@@ -415,6 +414,127 @@ class VentaController extends Controller
 
 
             // ----------------------------------------------------
+            // 12.b CUENTA SELECCIONADA (?cuenta=)
+            // ----------------------------------------------------
+            //
+            // El panel de subcuentas abre el POS con ?cuenta=ID para
+            // trabajar SOLO con esa cuenta. Se valida que la cuenta
+            // pertenezca a la venta activa de la mesa. Si la cuenta no
+            // existe, es de otra venta o está cancelada, se RECHAZA el
+            // acceso a esa cuenta (404) en lugar de mostrar la venta
+            // completa, para no filtrar consumos ni presentar la mesa como
+            // si fuera esa cuenta. La vista general (sin ?cuenta=) no cambia.
+            // ----------------------------------------------------
+
+            $cuentaIdParam = (int) request()->query('cuenta', 0);
+
+            if (
+                $cuentaIdParam > 0
+                && !$cuentas->contains(fn ($c) => (int) $c->id === $cuentaIdParam)
+            ) {
+                abort(404, 'La cuenta solicitada no está disponible.');
+            }
+
+            $cuentaActual = $cuentaIdParam > 0
+                ? $cuentas->first(fn ($c) => (int) $c->id === $cuentaIdParam)
+                : null;
+
+            // Totales reales por cuenta (fuente de verdad: cuenta_detalles).
+            // Las cuentas PAGADAS conservan el total congelado de su cobro.
+            $totalesPorCuenta = DB::table('cuenta_detalles')
+                ->where('venta_id', $venta->id)
+                ->where('eliminado', false)
+                ->groupBy('cuenta_id')
+                ->select(
+                    'cuenta_id',
+                    DB::raw('SUM(subtotal) as total')
+                )
+                ->pluck('total', 'cuenta_id');
+
+            $cuentas->each(function ($cuenta) use ($totalesPorCuenta) {
+                if ($cuenta->estado === 'ABIERTA') {
+                    $cuenta->total = (float) ($totalesPorCuenta[$cuenta->id] ?? 0);
+                }
+            });
+
+            // Total de la cuenta seleccionada. Sin cuenta seleccionada el POS
+            // funciona a nivel de mesa (total general de la venta).
+            $totalCuenta = $cuentaActual
+                ? (float) ($totalesPorCuenta[$cuentaActual->id] ?? 0)
+                : null;
+
+            // El botón "Dividir cuentas" solo se habilita cuando la cuenta
+            // seleccionada tiene consumos PROPIOS activos. Una cuenta vacía
+            // (aunque tenga subcuentas con consumo) no puede dividirse.
+            // En la vista general (sin ?cuenta=) se conserva la división a
+            // nivel de mesa.
+            $puedeDividirCuenta = true;
+
+            if ($cuentaActual) {
+                $unidadesPropiasCuenta = (int) DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuentaActual->id)
+                    ->where('eliminado', false)
+                    ->sum('cantidad');
+
+                $puedeDividirCuenta = $unidadesPropiasCuenta > 0;
+            }
+
+            if ($cuentaActual) {
+
+                // Historial SOLO de la cuenta seleccionada. La cantidad y el
+                // subtotal salen de cuenta_detalles (unidades asignadas), no
+                // de la línea completa de venta_detalles. Así, cuando dos
+                // subcuentas comparten una línea, cada una ve solo lo suyo.
+                $historial = DB::table('cuenta_detalles')
+                    ->join(
+                        'venta_detalles',
+                        'venta_detalles.id',
+                        '=',
+                        'cuenta_detalles.venta_detalle_id'
+                    )
+                    ->join(
+                        'productos',
+                        'productos.id',
+                        '=',
+                        'venta_detalles.producto_id'
+                    )
+                    ->leftJoin(
+                        'comandas',
+                        'comandas.id',
+                        '=',
+                        'venta_detalles.comanda_id'
+                    )
+                    ->where(
+                        'cuenta_detalles.cuenta_id',
+                        $cuentaActual->id
+                    )
+                    ->where(
+                        'cuenta_detalles.eliminado',
+                        false
+                    )
+                    ->where(
+                        'venta_detalles.estado',
+                        'ACTIVO'
+                    )
+                    ->select(
+                        'venta_detalles.id',
+                        'venta_detalles.venta_id',
+                        'venta_detalles.producto_id',
+                        'cuenta_detalles.cantidad',
+                        'venta_detalles.precio_unitario',
+                        'cuenta_detalles.subtotal',
+                        'venta_detalles.comanda_id',
+                        'venta_detalles.estado',
+                        'productos.nombre',
+                        'productos.requiere_cocina',
+                        'comandas.numero_ticket'
+                    )
+                    ->orderBy('venta_detalles.id')
+                    ->get();
+            }
+
+
+            // ----------------------------------------------------
             // 13. ENVIAR INFORMACIÓN AL BLADE
             // ----------------------------------------------------
 
@@ -443,6 +563,16 @@ class VentaController extends Controller
 
                 // Cuentas.
                 'cuentas' => $cuentas,
+
+                // Cuenta seleccionada con ?cuenta= (null = venta completa).
+                'cuentaActual' => $cuentaActual,
+
+                // Total de la cuenta seleccionada (null si no hay selección).
+                'totalCuenta' => $totalCuenta,
+
+                // Habilita "Dividir cuentas" solo si la cuenta seleccionada
+                // tiene consumos propios activos (true en la vista general).
+                'puedeDividirCuenta' => $puedeDividirCuenta,
 
                 // Total.
                 'total' => $total,
@@ -626,8 +756,25 @@ class VentaController extends Controller
                 // para serializar contra divisiones, cobros y anulaciones.
                 $venta = DB::table('ventas')->where('id', (int) $request->input('venta_id'))->whereIn('estado', ['ACTIVA', 'ABIERTA'])->lockForUpdate()->first();
                 if (!$venta) throw new \RuntimeException('La venta ya no está activa.');
-                $cuenta = DB::table('cuentas')->where('venta_id', $venta->id)->where('estado', 'ABIERTA')->orderBy('id')->lockForUpdate()->first();
-                if (!$cuenta) throw new \RuntimeException('No existe una cuenta abierta para agregar el pedido.');
+
+                // La cuenta destino es la seleccionada en el POS (?cuenta=). Si
+                // no se envía, se usa la primera cuenta abierta por compatibilidad.
+                // Nunca se confirma una cuenta de otra venta ni una ya cobrada.
+                $cuentaSolicitada = (int) $request->input('cuenta_id', 0);
+                $cuentaQuery = DB::table('cuentas')
+                    ->where('venta_id', $venta->id)
+                    ->where('estado', 'ABIERTA');
+
+                if ($cuentaSolicitada > 0) {
+                    $cuenta = (clone $cuentaQuery)
+                        ->where('id', $cuentaSolicitada)
+                        ->lockForUpdate()
+                        ->first();
+                    if (!$cuenta) throw new \RuntimeException('La cuenta seleccionada ya no está abierta.');
+                } else {
+                    $cuenta = $cuentaQuery->orderBy('id')->lockForUpdate()->first();
+                    if (!$cuenta) throw new \RuntimeException('No existe una cuenta abierta para agregar el pedido.');
+                }
 
                 // Primero validamos todo el carrito y separamos lo que va a cocina
                 // (productos.requiere_cocina = 1) de lo que no. La fuente de verdad
@@ -681,6 +828,13 @@ class VentaController extends Controller
                 }
                 DB::table('cuentas')->where('id', $cuenta->id)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuenta->id)->where('eliminado', false)->sum('subtotal'), 'updated_at' => now()]);
                 DB::table('ventas')->where('id', $venta->id)->update(['monto' => DB::table('venta_detalles')->where('venta_id', $venta->id)->where('estado', 'ACTIVO')->sum('subtotal')]);
+
+                // Primera venta real de la mesa: recién ahora pasa a OCUPADA.
+                // Abrir el POS o crear una venta vacía no la ocupaba.
+                if ($venta->mesa_id) {
+                    DB::table('mesas')->where('id', $venta->mesa_id)->update(['estado' => 'OCUPADA']);
+                }
+
                 return $comandaId;
             });
             $mensaje = $comandaId ? 'Pedido guardado y enviado a cocina.' : 'Pedido guardado (solo barra).';
@@ -1405,6 +1559,35 @@ class VentaController extends Controller
                     }
 
 
+                    // Segunda verificación de seguridad: ninguna cuenta de la
+                    // venta puede conservar consumos/asignaciones activos ni
+                    // saldo pendiente. Solo una venta realmente vacía se libera.
+                    $hayAsignaciones = DB::table('cuenta_detalles')
+                        ->where('venta_id', $ventaId)
+                        ->where('eliminado', false)
+                        ->count();
+
+                    if ($hayAsignaciones > 0) {
+
+                        throw new \Exception(
+                            'No se puede liberar la mesa porque hay consumos pendientes en sus cuentas.'
+                        );
+                    }
+
+                    $hayCuentasConSaldo = DB::table('cuentas')
+                        ->where('venta_id', $ventaId)
+                        ->where('estado', 'ABIERTA')
+                        ->where('total', '>', 0)
+                        ->count();
+
+                    if ($hayCuentasConSaldo > 0) {
+
+                        throw new \Exception(
+                            'No se puede liberar la mesa porque hay cuentas con saldo pendiente.'
+                        );
+                    }
+
+
                     // Marcar venta como pagada/cerrada.
                     DB::table('ventas')
                         ->where(
@@ -1525,8 +1708,63 @@ class VentaController extends Controller
             }
         });
 
+        // -----------------------------------------------------------------
+        // REGLA: la cuenta principal VACÍA deja de aparecer como activa.
+        // -----------------------------------------------------------------
+        // La cuenta original de la venta (la de menor id, creada al abrir el
+        // POS) puede quedarse sin consumos propios tras dividir, subdividir o
+        // repartir el consumo en subcuentas. En ese caso NO debe seguir
+        // mostrándose como una cuenta activa con C$0: se oculta del panel.
+        //
+        // Importante:
+        //  - Solo se oculta la PRINCIPAL. Las subcuentas (incluida una recién
+        //    creada y vacía) siguen visibles porque el usuario las necesita
+        //    para agregarles productos.
+        //  - Solo se oculta si NO tiene consumos propios activos. Un total en
+        //    cero NO es motivo suficiente: si existen cuenta_detalles activos,
+        //    la cuenta se mantiene visible (evita ocultar consumo pendiente).
+        //  - El registro NO se borra ni se cancela: sigue en la base de datos
+        //    y su historial se conserva. Si se le asigna consumo, vuelve a
+        //    listarse.
+        $principalId = (int) DB::table('cuentas')->where('venta_id', $venta->id)->min('id');
+
+        if ($principalId > 0) {
+            $cuentas = $cuentas->reject(function ($cuenta) use ($principalId) {
+                if ((int) $cuenta->id !== $principalId) {
+                    return false;
+                }
+
+                if ($cuenta->estado !== 'ABIERTA') {
+                    return false;
+                }
+
+                $consumosPropios = DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuenta->id)
+                    ->where('eliminado', false)
+                    ->count();
+
+                // Sin consumos propios activos => se oculta (monto real = 0).
+                return $consumosPropios === 0;
+            })->values();
+        }
+
+        // Cuenta representativa para el traslado de la MESA COMPLETA. El POS
+        // maneja una venta por mesa, así que mover una subcuenta de forma
+        // individual no es posible con el esquema actual; el backend mueve
+        // TODA la venta (todas las cuentas) a la mesa destino. Solo se
+        // necesita una cuenta ABIERTA válida de la venta como referencia.
+        $cuentaTrasladoId = optional($cuentas->firstWhere('estado', 'ABIERTA'))->id;
+
         // Rol real del usuario autenticado para decidir qué acciones mostrar.
         $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        // Mesas candidatas a recibir el traslado: todas menos la actual y
+        // que estén LIBRES (una mesa ocupada no puede recibir otra venta).
+        $mesasDestino = DB::table('mesas')
+            ->where('id', '!=', $mesaId)
+            ->where('estado', 'LIBRE')
+            ->orderBy('numero')
+            ->get();
 
         return view('mesas.cuentas', [
             'mesa' => $mesa,
@@ -1536,7 +1774,336 @@ class VentaController extends Controller
             'puedeCrear' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true),
             // Dividir/reasignar conserva los permisos actuales.
             'puedeDividir' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            // Traslado de mesa completa entre mesas (Fase 6).
+            'puedeTrasladar' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            'mesasDestino' => $mesasDestino,
+            // Cuenta ABIERTA de referencia para trasladar la venta completa.
+            'cuentaTrasladoId' => $cuentaTrasladoId,
         ]);
+    }
+
+    /**
+     * =========================================================================
+     * TRASLADAR CUENTAS ENTRE MESAS (FASE 6)
+     * =========================================================================
+     *
+     * Mueve el consumo de una mesa a otra SIN perder información:
+     * - No crea datos duplicados ni elimina cuentas, detalles ni comandas.
+     * - Reubica la venta activa (y sus subcuentas) en la mesa destino.
+     * - Repunta las comandas de la venta a la nueva mesa para que el POS y
+     *   las reimpresiones muestren la ubicación real; las cantidades y el
+     *   historial (números de ticket, productos, fechas) no se tocan.
+     * - Actualiza los estados de mesa: origen -> LIBRE, destino -> OCUPADA.
+     *
+     * Seguridad: solo ADMIN, GERENTE y CAJERO. La autorización se valida en
+     * backend antes de cualquier dato de validación (MESERO recibe 403).
+     * Integridad: todo ocurre dentro de una transacción con bloqueos.
+     */
+    public function trasladarCuenta(Request $request, int $cuentaId)
+    {
+        // 1. Autorización primero.
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return response()->json(['exito' => false, 'error' => 'Usuario no autenticado.'], 401);
+        }
+
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para trasladar cuentas.'], 403);
+        }
+
+        // 2. Validación de entrada.
+        $request->validate([
+            'mesa_destino_id' => ['required', 'integer', 'exists:mesas,id'],
+        ]);
+
+        try {
+            $resultado = DB::transaction(function () use ($request, $cuentaId) {
+                // Lectura de navegación (sin bloqueo): solo para conocer la venta.
+                $cuentaNav = DB::table('cuentas')->where('id', $cuentaId)->first();
+                if (!$cuentaNav) {
+                    throw new \RuntimeException('La cuenta no existe.');
+                }
+
+                // Orden global de bloqueo: ventas -> cuentas -> mesas (id ASC).
+                $venta = DB::table('ventas')->where('id', $cuentaNav->venta_id)->lockForUpdate()->first();
+                if (!$venta || !in_array($venta->estado, ['ACTIVA', 'ABIERTA'], true)) {
+                    throw new \RuntimeException('La venta no está activa.');
+                }
+
+                $cuenta = DB::table('cuentas')->where('id', $cuentaId)->lockForUpdate()->first();
+                if (!$cuenta || (int) $cuenta->venta_id !== (int) $venta->id) {
+                    throw new \RuntimeException('La cuenta no pertenece a la venta indicada.');
+                }
+
+                // Solo se traslada una cuenta ABIERTA: una PAGADA o CANCELADA
+                // ya no representa consumo por cobrar.
+                if ($cuenta->estado !== 'ABIERTA') {
+                    throw new \RuntimeException('Solo se pueden trasladar cuentas ABIERTAS.');
+                }
+
+                $mesaOrigenId = (int) $venta->mesa_id;
+                $mesaDestinoId = (int) $request->input('mesa_destino_id');
+
+                if ($mesaDestinoId === $mesaOrigenId) {
+                    throw new \RuntimeException('La cuenta ya se encuentra en esa mesa.');
+                }
+
+                // Bloquear ambas mesas en orden determinista (id ASC).
+                $mesas = DB::table('mesas')
+                    ->whereIn('id', [$mesaOrigenId, $mesaDestinoId])
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                $mesaDestino = $mesas->get($mesaDestinoId);
+                if (!$mesaDestino) {
+                    throw new \RuntimeException('La mesa destino no existe.');
+                }
+
+                if ($mesaDestino->estado !== 'LIBRE') {
+                    throw new \RuntimeException('La mesa destino no está libre.');
+                }
+
+                // Defensivo: la mesa destino no debe tener otra venta activa.
+                $destinoOcupado = DB::table('ventas')
+                    ->where('mesa_id', $mesaDestinoId)
+                    ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                    ->where('id', '!=', $venta->id)
+                    ->exists();
+
+                if ($destinoOcupado) {
+                    throw new \RuntimeException('La mesa destino ya tiene una venta activa.');
+                }
+
+                // 3. Reubicar la venta (arrastra todas sus subcuentas y detalles).
+                DB::table('ventas')->where('id', $venta->id)->update(['mesa_id' => $mesaDestinoId]);
+
+                // 4. Las comandas de esta venta apuntan a la nueva mesa.
+                //    No se alteran cantidades, tickets ni fechas: solo la mesa.
+                DB::table('comandas')->where('venta_id', $venta->id)->update(['mesa_id' => $mesaDestinoId]);
+
+                // 5. Estados de mesa coherentes con el consumo REAL de la venta
+                //    trasladada, no por el mero hecho de moverla.
+                $tieneConsumos = DB::table('venta_detalles')
+                    ->where('venta_id', $venta->id)
+                    ->where('estado', 'ACTIVO')
+                    ->exists();
+
+                // El destino solo se ocupa si la venta trasladada trae consumos.
+                DB::table('mesas')->where('id', $mesaDestinoId)->update([
+                    'estado' => $tieneConsumos ? 'OCUPADA' : 'LIBRE',
+                ]);
+
+                // El origen queda LIBRE solo si ya no tiene otra venta activa ni
+                // consumos pendientes en cuentas de la mesa.
+                $origenOcupado = DB::table('ventas')
+                    ->where('mesa_id', $mesaOrigenId)
+                    ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                    ->where('id', '!=', $venta->id)
+                    ->exists();
+
+                $origenConPendientes = DB::table('cuenta_detalles')
+                    ->whereIn('venta_id', function ($query) use ($mesaOrigenId) {
+                        $query->select('id')->from('ventas')
+                            ->where('mesa_id', $mesaOrigenId)
+                            ->whereIn('estado', ['ACTIVA', 'ABIERTA']);
+                    })
+                    ->where('eliminado', false)
+                    ->exists();
+
+                if (!$origenOcupado && !$origenConPendientes) {
+                    DB::table('mesas')->where('id', $mesaOrigenId)->update(['estado' => 'LIBRE']);
+                }
+
+                return [
+                    'venta_id' => (int) $venta->id,
+                    'mesa_origen_id' => $mesaOrigenId,
+                    'mesa_destino_id' => $mesaDestinoId,
+                    'numero_destino' => $mesaDestino->numero,
+                ];
+            });
+
+            return response()->json([
+                'exito' => true,
+                'mensaje' => 'Cuenta trasladada a la mesa ' . $resultado['numero_destino'] . '.',
+                ...$resultado,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('No se pudo trasladar la cuenta', ['cuenta_id' => $cuentaId, 'error' => $e->getMessage()]);
+
+            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * =========================================================================
+     * CREAR SUBCUENTA VACÍA EN UNA MESA (FASE 2)
+     * =========================================================================
+     *
+     * Crea una cuenta nueva vinculada a la VENTA ACTIVA de la mesa.
+     *
+     * Reglas que cumple:
+     * - Autorizan SOLO para CREAR: ADMIN, GERENTE, CAJERO y MESERO. No amplía
+     *   los permisos actuales de dividir, reasignar, anular ni cobrar.
+     * - Nunca crea una segunda venta: si la mesa no tiene venta activa rechaza.
+     * - La cuenta nace VACÍA (total 0 y sin cuenta_detalles): no mueve productos
+     *   ni modifica los totales de otras cuentas.
+     * - Transacción con orden global de bloqueo venta -> cuentas (id ASC).
+     *
+     * Responde JSON cuando la petición es AJAX; en otro caso redirige al panel
+     * de subcuentas (mesas.cuentas).
+     */
+    public function crearSubcuenta(Request $request, int $mesaId)
+    {
+        // 1. Usuario autenticado.
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            abort(401, 'Usuario no autenticado.');
+        }
+
+        // 2. Autorización en backend: los cuatro roles pueden crear subcuentas
+        //    vacías. La autorización no depende de botones ni validaciones de
+        //    JavaScript.
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            abort(403, 'No tienes permiso para crear cuentas.');
+        }
+
+        // 3. El nombre es obligatorio.
+        $request->validate([
+            'nombre' => ['required', 'string', 'max:100'],
+        ]);
+
+        $nombre = trim((string) $request->input('nombre'));
+
+        if ($nombre === '') {
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'El nombre de la cuenta es obligatorio.',
+                ], 422);
+            }
+
+            return back()->with('error', 'El nombre de la cuenta es obligatorio.');
+        }
+
+        // 4. La mesa debe existir.
+        $mesa = DB::table('mesas')->where('id', $mesaId)->first();
+
+        if (!$mesa) {
+            abort(404, 'La mesa no existe.');
+        }
+
+        try {
+            $creada = DB::transaction(function () use ($mesa, $nombre) {
+                // ORDEN GLOBAL DE BLOQUEO: venta -> cuentas (id ASC).
+                // La venta activa de ESTA mesa se bloquea primero. Si la mesa
+                // no tiene venta activa se rechaza: NUNCA se crea una segunda.
+                $venta = DB::table('ventas')
+                    ->where('mesa_id', $mesa->id)
+                    ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                    ->orderByDesc('id')
+                    ->lockForUpdate()
+                    ->first();
+
+                if (!$venta) {
+                    throw new \RuntimeException('La mesa no tiene una venta activa.');
+                }
+
+                // Se bloquean las cuentas de la venta (en orden de id) para
+                // serializar contra divisiones, cobros y anulaciones concurrentes.
+                DB::table('cuentas')
+                    ->where('venta_id', $venta->id)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
+
+                // No se permiten dos cuentas VISIBLES con el mismo nombre
+                // (comparación insensible a mayúsculas/minúsculas). Las cuentas
+                // canceladas quedan ocultas, así que su nombre puede reutilizarse.
+                $existeNombre = DB::table('cuentas')
+                    ->where('venta_id', $venta->id)
+                    ->where('estado', '!=', 'CANCELADA')
+                    ->whereRaw('LOWER(nombre) = ?', [mb_strtolower($nombre)])
+                    ->exists();
+
+                if ($existeNombre) {
+                    throw new \RuntimeException('Ya existe una cuenta con el nombre "' . $nombre . '".');
+                }
+
+                // Cuenta nueva y vacía: sin asignaciones ni totales. No mueve
+                // productos y no toca los totales de las demás cuentas.
+                $cuentaId = DB::table('cuentas')
+                    ->insertGetId([
+                        'venta_id' => $venta->id,
+                        'nombre' => $nombre,
+                        'total' => 0,
+                        'estado' => 'ABIERTA',
+                        'apertura_id' => $venta->apertura_id,
+                        'metodo_pago' => null,
+                        'banco' => null,
+                        'monto_recibido' => null,
+                        'cambio' => null,
+                        'usuario_cobro' => null,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                return [
+                    'cuenta_id' => $cuentaId,
+                    'venta_id' => $venta->id,
+                ];
+            });
+
+            // Respuesta para la interfaz (SweetAlert) y para una redirección
+            // normal del panel de subcuentas.
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'exito' => true,
+                    'mensaje' => 'Subcuenta creada correctamente.',
+                    'cuenta_id' => $creada['cuenta_id'],
+                    'venta_id' => $creada['venta_id'],
+                    'redirect' => route('mesas.cuentas', ['mesaId' => $mesa->id]),
+                ]);
+            }
+
+            return redirect()
+                ->route('mesas.cuentas', ['mesaId' => $mesa->id])
+                ->with('success', 'Subcuenta creada correctamente.');
+
+        } catch (\RuntimeException $e) {
+            // Rechazo por regla de negocio (mesa sin venta activa).
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => $e->getMessage(),
+                ], 422);
+            }
+
+            return back()->with('error', $e->getMessage());
+        } catch (\Throwable $e) {
+            Log::error('No se pudo crear subcuenta', [
+                'mesa_id' => $mesa->id,
+                'usuario_id' => $usuario->id,
+                'error' => $e->getMessage(),
+                'linea' => $e->getLine(),
+            ]);
+
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'No se pudo crear la subcuenta.',
+                ], 500);
+            }
+
+            return back()->with('error', 'No se pudo crear la subcuenta.');
+        }
     }
 
     /** Datos seguros para la pantalla de división y cobro por cuenta. */
@@ -1610,6 +2177,7 @@ class VentaController extends Controller
         }
 
         $request->validate([
+            'cuenta_origen_id' => ['nullable', 'integer'],
             'cuentas_nuevas' => ['array'],
             'cuentas_nuevas.*' => ['string', 'max:100'],
             'asignaciones' => ['required', 'array', 'min:1'],
@@ -1625,7 +2193,18 @@ class VentaController extends Controller
                     throw new \RuntimeException('La mesa no tiene una venta activa.');
                 }
 
+                // Subdivisión ACOTADA: cuando llega cuenta_origen_id se reparte
+                // solo esa cuenta hacia cuentas nuevas derivadas de ella. Las
+                // demás cuentas de la mesa quedan intactas.
+                $origenId = (int) $request->input('cuenta_origen_id', 0);
+                if ($origenId > 0) {
+                    $this->aplicarSubdivision($request, $venta, $origenId);
+
+                    return;
+                }
+
                 $nombresNuevos = [];
+                $idsNuevas = [];
                 foreach ($request->input('cuentas_nuevas', []) as $nombre) {
                     $nombre = trim($nombre);
                     $claveNombre = mb_strtolower($nombre);
@@ -1640,7 +2219,7 @@ class VentaController extends Controller
                             throw new \RuntimeException('Ya existe una cuenta con el nombre "' . $nombre . '".');
                         }
 
-                        DB::table('cuentas')->insert(['venta_id' => $venta->id, 'nombre' => $nombre, 'total' => 0, 'estado' => 'ABIERTA', 'created_at' => now(), 'updated_at' => now()]);
+                        $idsNuevas[] = DB::table('cuentas')->insertGetId(['venta_id' => $venta->id, 'nombre' => $nombre, 'total' => 0, 'estado' => 'ABIERTA', 'created_at' => now(), 'updated_at' => now()]);
                         $nombresNuevos[] = $claveNombre;
                     }
                 }
@@ -1657,8 +2236,28 @@ class VentaController extends Controller
                 // venta -> cuentas -> venta_detalles y evitar deadlocks.
                 $detalles = DB::table('venta_detalles')->where('venta_id', $venta->id)->where('estado', 'ACTIVO')->orderBy('id')->lockForUpdate()->get()->keyBy('id');
 
-                // Se reemplazan solo asignaciones de cuentas abiertas; lo pagado queda congelado.
-                DB::table('cuenta_detalles')->whereIn('cuenta_id', $cuentasAbiertas)->delete();
+                // Cuentas que YA tenían consumo antes de reemplazar la
+                // división. Sirve para detectar cuentas que quedan vacías y
+                // que, por lo tanto, deben ocultarse (no eliminarse).
+                $cuentasConConsumoPrevio = DB::table('cuenta_detalles')
+                    ->whereIn('cuenta_id', $cuentasAbiertas)
+                    ->where('eliminado', false)
+                    ->distinct()
+                    ->pluck('cuenta_id')
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
+
+                // Se reemplazan solo las asignaciones ACTIVAS de las cuentas
+                // abiertas; lo pagado queda congelado. Las filas con
+                // eliminado = true (historial de anulaciones) NO se borran:
+                // si una asignación vuelve a usar ese par cuenta/línea, más
+                // abajo se reactiva la misma fila en lugar de insertar una
+                // nueva. Así no se destruye historial y se respeta la
+                // restricción UNIQUE(cuenta_id, venta_detalle_id).
+                DB::table('cuenta_detalles')
+                    ->whereIn('cuenta_id', $cuentasAbiertas)
+                    ->where('eliminado', false)
+                    ->delete();
                 $cantidades = [];
                 foreach ($request->input('asignaciones') as $asignacion) {
                     $cuentaId = (int) $asignacion['cuenta_id'];
@@ -1681,6 +2280,270 @@ class VentaController extends Controller
                         [$cantidad, $detalles[$detalleId]->precio_unitario]
                     )->subtotal;
 
+                    // Si el par (cuenta, línea) conserva una fila con
+                    // eliminado = true (fue anulada antes), se reactiva esa
+                    // misma fila en vez de insertar, para no violar la UNIQUE
+                    // y para no perder la trazabilidad. Si no existe, se crea.
+                    $filaExistente = DB::table('cuenta_detalles')
+                        ->where('cuenta_id', $cuentaId)
+                        ->where('venta_detalle_id', $detalleId)
+                        ->first();
+
+                    if ($filaExistente) {
+                        DB::table('cuenta_detalles')->where('id', $filaExistente->id)->update([
+                            'venta_id' => $venta->id,
+                            'cantidad' => $cantidad,
+                            'subtotal' => $subtotal,
+                            'eliminado' => false,
+                            'eliminado_por' => null,
+                            'eliminado_en' => null,
+                            'updated_at' => now(),
+                        ]);
+                    } else {
+                        DB::table('cuenta_detalles')->insert([
+                            'cuenta_id' => $cuentaId,
+                            'venta_id' => $venta->id,
+                            'venta_detalle_id' => $detalleId,
+                            'cantidad' => $cantidad,
+                            'subtotal' => $subtotal,
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                    }
+                }
+
+                foreach ($detalles as $detalle) {
+                    $asignado = DB::table('cuenta_detalles')->where('venta_detalle_id', $detalle->id)->where('eliminado', false)->sum('cantidad');
+                    if ((int) $asignado !== (int) $detalle->cantidad) throw new \RuntimeException('Debes asignar exactamente todas las unidades de ' . $detalle->id . '.');
+                }
+                foreach ($cuentasAbiertas as $cuentaId) {
+                    DB::table('cuentas')->where('id', $cuentaId)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal'), 'updated_at' => now()]);
+                }
+
+                // PROBLEMA 1: si al dividir una cuenta queda sin unidades, se
+                // marca CANCELADA (borrado lógico) para que deje de mostrarse,
+                // sin borrar su historial. Nunca se toca una cuenta recién
+                // creada en esta operación ni una cuenta que no tenía consumo.
+                foreach ($cuentasAbiertas as $cuentaId) {
+                    if (in_array($cuentaId, $idsNuevas, true)) {
+                        continue;
+                    }
+                    if (!in_array($cuentaId, $cuentasConConsumoPrevio, true)) {
+                        continue;
+                    }
+                    $unidadesRestantes = DB::table('cuenta_detalles')
+                        ->where('cuenta_id', $cuentaId)
+                        ->where('eliminado', false)
+                        ->count();
+                    if ($unidadesRestantes === 0) {
+                        DB::table('cuentas')->where('id', $cuentaId)->update(['estado' => 'CANCELADA', 'total' => 0, 'updated_at' => now()]);
+                    }
+                }
+            });
+            return response()->json(['exito' => true, 'mensaje' => 'División guardada. Ya puedes cobrar cuentas por separado.']);
+        } catch (\Throwable $e) {
+            Log::warning('No se pudo dividir la cuenta', ['mesa_id' => $mesaId, 'error' => $e->getMessage()]);
+            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * Subdivide UNA cuenta (origen) en cuentas derivadas de ella.
+     *
+     * A diferencia de la división a nivel de mesa (guardarDivision), aquí:
+     *  - SOLO se reasignan los consumos propios de la cuenta de origen;
+     *  - los destinos permitidos son la propia cuenta de origen, las cuentas
+     *    nuevas creadas en esta operación y las hijas directas VACÍAS (sin
+     *    consumo activo). Nunca se tocan las hijas con consumo ni las hermanas;
+     *  - no se permite superar, duplicar ni perder unidades del origen;
+     *  - si el origen queda vacío se marca CANCELADA conservando historial.
+     */
+    private function aplicarSubdivision(Request $request, object $venta, int $origenId): void
+    {
+        // El origen debe pertenecer a la venta y estar ABIERTA. Una cuenta
+        // cancelada o pagada no es divisible.
+        $origen = DB::table('cuentas')
+            ->where('id', $origenId)
+            ->where('venta_id', $venta->id)
+            ->where('estado', 'ABIERTA')
+            ->lockForUpdate()
+            ->first();
+
+        if (!$origen) {
+            throw new \RuntimeException('La cuenta de origen no está disponible para dividir.');
+        }
+
+        // Aislamiento: solo se puede dividir una cuenta con consumos PROPIOS
+        // activos. Una cuenta vacía no puede usar los consumos de sus
+        // subcuentas para completar su propia división.
+        $unidadesPropias = (int) DB::table('cuenta_detalles')
+            ->where('cuenta_id', $origen->id)
+            ->where('eliminado', false)
+            ->sum('cantidad');
+
+        if ($unidadesPropias <= 0) {
+            throw new \RuntimeException('La cuenta de origen no tiene consumos propios para dividir.');
+        }
+
+        // Cuentas nuevas: todas se registran como hijas del origen.
+        $idsNuevas = [];
+        $nombresNuevos = [];
+        foreach ($request->input('cuentas_nuevas', []) as $nombre) {
+            $nombre = trim($nombre);
+            $claveNombre = mb_strtolower($nombre);
+
+            if ($nombre === '' || in_array($claveNombre, $nombresNuevos, true)) {
+                continue;
+            }
+
+            $existe = DB::table('cuentas')
+                ->where('venta_id', $venta->id)
+                ->whereRaw('LOWER(nombre) = ?', [$claveNombre])
+                ->exists();
+
+            if ($existe) {
+                throw new \RuntimeException('Ya existe una cuenta con el nombre "' . $nombre . '".');
+            }
+
+            $idsNuevas[] = DB::table('cuentas')->insertGetId([
+                'venta_id' => $venta->id,
+                'cuenta_origen_id' => $origen->id,
+                'nombre' => $nombre,
+                'total' => 0,
+                'estado' => 'ABIERTA',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            $nombresNuevos[] = $claveNombre;
+        }
+
+        // AISLAMIENTO ESTRICTO: la subdivisión trabaja SOLO con los consumos
+        // propios del origen. Nunca toma, borra, reasigna ni cancela consumos
+        // de las cuentas hijas (aunque ya tengan consumo) ni de las hermanas.
+        //
+        // Destinos permitidos:
+        //  - el propio origen (para conservar su saldo);
+        //  - las cuentas nuevas creadas en esta operación;
+        //  - las hijas directas existentes que estén VACÍAS (sin consumo
+        //    activo), que pueden recibir unidades sin alterar nada previo.
+        // Una hija que YA tiene consumo propio queda excluida: no se toca.
+        $hijasVacias = DB::table('cuentas')
+            ->where('venta_id', $venta->id)
+            ->where('cuenta_origen_id', $origen->id)
+            ->where('estado', 'ABIERTA')
+            ->whereNotExists(function ($sub) {
+                $sub->select(DB::raw(1))
+                    ->from('cuenta_detalles')
+                    ->whereColumn('cuenta_detalles.cuenta_id', 'cuentas.id')
+                    ->where('cuenta_detalles.eliminado', false);
+            })
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+
+        $destinos = array_values(array_unique(array_merge(
+            [(int) $origen->id],
+            $hijasVacias,
+            $idsNuevas
+        )));
+
+        // Unidades disponibles por línea: SOLO las del origen (sus propios
+        // consumos activos). Las hijas y hermanas no aportan unidades.
+        $disponibles = DB::table('cuenta_detalles')
+            ->where('cuenta_id', $origen->id)
+            ->where('eliminado', false)
+            ->lockForUpdate()
+            ->get()
+            ->groupBy('venta_detalle_id')
+            ->map(fn ($filas) => (int) $filas->sum('cantidad'));
+
+        if ($disponibles->isEmpty()) {
+            throw new \RuntimeException('La cuenta de origen no tiene consumos para dividir.');
+        }
+
+        $detalles = DB::table('venta_detalles')
+            ->where('venta_id', $venta->id)
+            ->where('estado', 'ACTIVO')
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
+
+        // Agrupar y validar el reparto. Solo se admiten líneas propias del
+        // origen y destinos válidos (origen, hijas vacías y cuentas nuevas).
+        $reparto = [];
+        $vistos = [];
+        foreach ($request->input('asignaciones') as $asignacion) {
+            $cuentaId = (int) $asignacion['cuenta_id'];
+            $detalleId = (int) $asignacion['venta_detalle_id'];
+            $cantidad = (int) $asignacion['cantidad'];
+
+            if (!in_array($cuentaId, $destinos, true)) {
+                throw new \RuntimeException('Solo se puede repartir la cuenta de origen entre ella misma, sus subcuentas vacías o cuentas nuevas.');
+            }
+            if (!isset($disponibles[$detalleId])) {
+                throw new \RuntimeException('La línea indicada no pertenece a la cuenta de origen.');
+            }
+            if ($cantidad <= 0) {
+                throw new \RuntimeException('La cantidad debe ser un entero positivo.');
+            }
+
+            $clave = $cuentaId . ':' . $detalleId;
+            if (isset($vistos[$clave])) {
+                throw new \RuntimeException('No repitas la misma asignación.');
+            }
+            $vistos[$clave] = true;
+
+            $reparto[$detalleId][$cuentaId] = $cantidad;
+        }
+
+        // Cada línea tocada debe repartir EXACTAMENTE las unidades propias del
+        // origen: no se puede superar ni perder consumo del origen.
+        foreach ($reparto as $detalleId => $porCuenta) {
+            if (array_sum($porCuenta) !== (int) $disponibles[$detalleId]) {
+                throw new \RuntimeException('Debes repartir exactamente las unidades de la cuenta de origen en cada línea.');
+            }
+        }
+
+        // Aplicar: se reemplazan SOLO las asignaciones activas del ORIGEN,
+        // por línea, hacia el origen (resto), las hijas vacías y las nuevas.
+        // Los consumos de las hijas con consumo y de las hermanas no se tocan.
+        foreach ($reparto as $detalleId => $porCuenta) {
+            if (!$detalles->has($detalleId)) {
+                throw new \RuntimeException('La línea indicada no pertenece a esta venta.');
+            }
+            $precio = $detalles[$detalleId]->precio_unitario;
+
+            DB::table('cuenta_detalles')
+                ->where('cuenta_id', $origen->id)
+                ->where('venta_detalle_id', $detalleId)
+                ->where('eliminado', false)
+                ->delete();
+
+            foreach ($porCuenta as $cuentaId => $cantidad) {
+                $subtotal = DB::selectOne(
+                    'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                    [$cantidad, $precio]
+                )->subtotal;
+
+                $filaExistente = DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuentaId)
+                    ->where('venta_detalle_id', $detalleId)
+                    ->first();
+
+                if ($filaExistente) {
+                    DB::table('cuenta_detalles')->where('id', $filaExistente->id)->update([
+                        'venta_id' => $venta->id,
+                        'cantidad' => $cantidad,
+                        'subtotal' => $subtotal,
+                        'eliminado' => false,
+                        'eliminado_por' => null,
+                        'eliminado_en' => null,
+                        'updated_at' => now(),
+                    ]);
+                } else {
                     DB::table('cuenta_detalles')->insert([
                         'cuenta_id' => $cuentaId,
                         'venta_id' => $venta->id,
@@ -1691,19 +2554,33 @@ class VentaController extends Controller
                         'updated_at' => now(),
                     ]);
                 }
+            }
+        }
 
-                foreach ($detalles as $detalle) {
-                    $asignado = DB::table('cuenta_detalles')->where('venta_detalle_id', $detalle->id)->where('eliminado', false)->sum('cantidad');
-                    if ((int) $asignado !== (int) $detalle->cantidad) throw new \RuntimeException('Debes asignar exactamente todas las unidades de ' . $detalle->id . '.');
-                }
-                foreach ($cuentasAbiertas as $cuentaId) {
-                    DB::table('cuentas')->where('id', $cuentaId)->update(['total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal'), 'updated_at' => now()]);
-                }
-            });
-            return response()->json(['exito' => true, 'mensaje' => 'División guardada. Ya puedes cobrar cuentas por separado.']);
-        } catch (\Throwable $e) {
-            Log::warning('No se pudo dividir la cuenta', ['mesa_id' => $mesaId, 'error' => $e->getMessage()]);
-            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        // Recalcular totales de las cuentas que participaron (origen, hijas
+        // vacías usadas y cuentas nuevas). Las hijas con consumo no se tocaron.
+        foreach ($destinos as $cuentaId) {
+            DB::table('cuentas')->where('id', $cuentaId)->update([
+                'total' => DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal'),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // El único origen que puede quedar vacío es la cuenta de origen (solo
+        // se repartieron sus propios consumos). Si queda sin unidades, se
+        // oculta (CANCELADA) conservando su registro e historial. Las hijas
+        // vacías usadas como destino y las cuentas nuevas permanecen ABIERTAS.
+        $restantesOrigen = DB::table('cuenta_detalles')
+            ->where('cuenta_id', $origen->id)
+            ->where('eliminado', false)
+            ->count();
+
+        if ($restantesOrigen === 0) {
+            DB::table('cuentas')->where('id', $origen->id)->update([
+                'estado' => 'CANCELADA',
+                'total' => 0,
+                'updated_at' => now(),
+            ]);
         }
     }
 
@@ -1823,12 +2700,18 @@ class VentaController extends Controller
         $motivo = trim((string) $request->input('motivo'));
         $cantidadAnular = (int) $request->input('cantidad');
 
+        // Cuenta sobre la que se anula (opcional). El POS abre ?cuenta=ID y el
+        // ADMIN/GERENTE anula SOLO las unidades de esa cuenta. Sin el parámetro
+        // se conserva exactamente el comportamiento global anterior.
+        $cuentaIdScope = (int) $request->input('cuenta_id', 0);
+
         try {
             $resultado = DB::transaction(function () use (
                 $detalleId,
                 $usuario,
                 $motivo,
-                $cantidadAnular
+                $cantidadAnular,
+                $cuentaIdScope
             ) {
                 // 1. Lectura de navegación sin bloqueo: solo para conocer
                 //    a qué venta pertenece el detalle.
@@ -1865,6 +2748,26 @@ class VentaController extends Controller
                     ->get()
                     ->keyBy('id');
 
+                // Si la anulación está acotada a una cuenta, ésta debe existir
+                // y estar ABIERTA: nunca se anula sobre una cuenta pagada.
+                $cuentaScope = null;
+
+                if ($cuentaIdScope > 0) {
+                    $cuentaScope = $cuentas->get($cuentaIdScope);
+
+                    if (!$cuentaScope) {
+                        throw new \RuntimeException(
+                            'La cuenta indicada no pertenece a esta venta.'
+                        );
+                    }
+
+                    if ($cuentaScope->estado !== 'ABIERTA') {
+                        throw new \RuntimeException(
+                            'No se puede anular en una cuenta que no está abierta.'
+                        );
+                    }
+                }
+
                 // 4. Bloquear el detalle y revalidar su estado.
                 $detalle = DB::table('venta_detalles')
                     ->where('id', $detalleId)
@@ -1889,10 +2792,17 @@ class VentaController extends Controller
                 }
 
                 // 5. Asignaciones activas del detalle con el estado de su
-                //    cuenta (bloqueadas, ordenadas por cuenta_id).
-                $asignaciones = DB::table('cuenta_detalles')
+                //    cuenta (bloqueadas, ordenadas por cuenta_id). Cuando se
+                //    anula en una cuenta concreta, solo se cargan sus unidades.
+                $asignacionesQuery = DB::table('cuenta_detalles')
                     ->where('venta_detalle_id', $detalleId)
-                    ->where('eliminado', false)
+                    ->where('eliminado', false);
+
+                if ($cuentaScope) {
+                    $asignacionesQuery->where('cuenta_id', $cuentaScope->id);
+                }
+
+                $asignaciones = $asignacionesQuery
                     ->orderBy('cuenta_id')
                     ->lockForUpdate()
                     ->get();
@@ -1910,10 +2820,12 @@ class VentaController extends Controller
                     }
                 }
 
-                // Unidades que no están asignadas a ninguna cuenta.
-                $unidadesSinAsignar = $cantidadLinea
-                    - $unidadesPagadas
-                    - $unidadesAbiertas;
+                // Unidades que no están asignadas a ninguna cuenta. Cuando la
+                // anulación está acotada a una cuenta, las unidades sin asignar
+                // no forman parte de ella y no se tocan.
+                $unidadesSinAsignar = $cuentaScope
+                    ? 0
+                    : $cantidadLinea - $unidadesPagadas - $unidadesAbiertas;
 
                 if ($unidadesSinAsignar < 0) {
                     $unidadesSinAsignar = 0;

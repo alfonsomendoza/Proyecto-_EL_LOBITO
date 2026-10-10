@@ -30,11 +30,28 @@ class ComandaController extends Controller
         }
 
         /*
+         * Subcuenta opcional (?cuenta=):
+         * - Sin el parámetro: reimpresión HISTÓRICA. Muestra la cantidad
+         *   completa que tenía la línea cuando se envió la comanda.
+         * - Con una cuenta válida de la misma venta: PEDIDO ACTUAL de esa
+         *   subcuenta. Muestra solo las unidades asignadas a ella (según
+         *   cuenta_detalles), no la línea completa.
+         */
+        $cuentaId = (int) request()->query('cuenta', 0);
+        $cuentaValida = $cuentaId > 0
+            && DB::table('cuentas')
+                ->where('id', $cuentaId)
+                ->where('venta_id', $comanda->venta_id)
+                ->where('estado', '!=', 'CANCELADA')
+                ->exists();
+        $cuentaId = $cuentaValida ? $cuentaId : 0;
+
+        /*
          * Los productos de la comanda viven en venta_detalles, enlazados
          * mediante comanda_id. Se incluyen únicamente los detalles activos.
          * Solo se muestran los productos que requieren cocina.
          */
-        $detalles = DB::table('venta_detalles')
+        $detallesQuery = DB::table('venta_detalles')
             ->join(
                 'productos',
                 'productos.id',
@@ -43,11 +60,31 @@ class ComandaController extends Controller
             )
             ->where('venta_detalles.comanda_id', $id)
             ->where('venta_detalles.estado', 'ACTIVO')
-            ->where('productos.requiere_cocina', 1)
-            ->select(
+            ->where('productos.requiere_cocina', 1);
+
+        if ($cuentaId > 0) {
+            $detallesQuery
+                ->join('cuenta_detalles', function ($join) use ($cuentaId) {
+                    $join->on(
+                        'cuenta_detalles.venta_detalle_id',
+                        '=',
+                        'venta_detalles.id'
+                    )
+                        ->where('cuenta_detalles.cuenta_id', '=', $cuentaId)
+                        ->where('cuenta_detalles.eliminado', '=', false);
+                })
+                ->select(
+                    'cuenta_detalles.cantidad',
+                    'productos.nombre'
+                );
+        } else {
+            $detallesQuery->select(
                 'venta_detalles.cantidad',
                 'productos.nombre'
-            )
+            );
+        }
+
+        $detalles = $detallesQuery
             ->orderBy('venta_detalles.id')
             ->get();
 
@@ -78,6 +115,18 @@ class ComandaController extends Controller
             abort(404, 'Venta no encontrada.');
         }
 
+        // Subcuenta opcional (?cuenta=): cuando el POS está acotado a una
+        // cuenta, la impresión masiva solo incluye platos asignados a ella y
+        // con sus unidades (no la cantidad completa de la línea).
+        $cuentaId = (int) request()->query('cuenta', 0);
+        $cuentaValida = $cuentaId > 0
+            && DB::table('cuentas')
+                ->where('id', $cuentaId)
+                ->where('venta_id', $ventaId)
+                ->where('estado', '!=', 'CANCELADA')
+                ->exists();
+        $cuentaId = $cuentaValida ? $cuentaId : 0;
+
         // Solo comandas vigentes: se excluyen las anuladas/canceladas de la
         // impresión global de pendientes. El historial sigue disponible para
         // la reimpresión individual.
@@ -90,7 +139,7 @@ class ComandaController extends Controller
         foreach ($comandas as $comanda) {
 
             // Los productos viven en venta_detalles, enlazados por comanda_id.
-            $comanda->detalles = DB::table('venta_detalles')
+            $detallesQuery = DB::table('venta_detalles')
                 ->join(
                     'productos',
                     'productos.id',
@@ -102,11 +151,31 @@ class ComandaController extends Controller
                     $comanda->id
                 )
                 ->where('venta_detalles.estado', 'ACTIVO')
-                ->where('productos.requiere_cocina', 1)
-                ->select(
+                ->where('productos.requiere_cocina', 1);
+
+            if ($cuentaId > 0) {
+                $detallesQuery
+                    ->join('cuenta_detalles', function ($join) use ($cuentaId) {
+                        $join->on(
+                            'cuenta_detalles.venta_detalle_id',
+                            '=',
+                            'venta_detalles.id'
+                        )
+                            ->where('cuenta_detalles.cuenta_id', '=', $cuentaId)
+                            ->where('cuenta_detalles.eliminado', '=', false);
+                    })
+                    ->select(
+                        'cuenta_detalles.cantidad',
+                        'productos.nombre'
+                    );
+            } else {
+                $detallesQuery->select(
                     'venta_detalles.cantidad',
                     'productos.nombre'
-                )
+                );
+            }
+
+            $comanda->detalles = $detallesQuery
                 ->orderBy('venta_detalles.id')
                 ->get();
         }
@@ -150,13 +219,24 @@ class ComandaController extends Controller
             abort(404, 'Venta no encontrada.');
         }
 
+        // Subcuenta opcional (?cuenta=): la comanda completa consolidada se
+        // limita a los platos asignados a esa cuenta, con sus unidades.
+        $cuentaId = (int) request()->query('cuenta', 0);
+        $cuentaValida = $cuentaId > 0
+            && DB::table('cuentas')
+                ->where('id', $cuentaId)
+                ->where('venta_id', $ventaId)
+                ->where('estado', '!=', 'CANCELADA')
+                ->exists();
+        $cuentaId = $cuentaValida ? $cuentaId : 0;
+
         /*
          * Se consolidan todos los detalles ACTIVOS (los cancelados quedan
          * fuera porque su estado pasa a CANCELADO) cuyo producto requiere
          * cocina. Se agrupa por producto para sumar las cantidades de las
          * distintas órdenes sin duplicar.
          */
-        $detalles = DB::table('venta_detalles')
+        $detallesQuery = DB::table('venta_detalles')
             ->join(
                 'productos',
                 'productos.id',
@@ -168,18 +248,44 @@ class ComandaController extends Controller
                 $ventaId
             )
             ->where('venta_detalles.estado', 'ACTIVO')
-            ->where('productos.requiere_cocina', 1)
-            ->groupBy(
-                'venta_detalles.producto_id',
-                'productos.nombre'
-            )
-            ->select(
-                'venta_detalles.producto_id',
-                'productos.nombre',
-                DB::raw('SUM(venta_detalles.cantidad) as cantidad'),
-                DB::raw('MIN(venta_detalles.id) as primer_detalle'
+            ->where('productos.requiere_cocina', 1);
+
+        if ($cuentaId > 0) {
+            $detallesQuery
+                ->join('cuenta_detalles', function ($join) use ($cuentaId) {
+                    $join->on(
+                        'cuenta_detalles.venta_detalle_id',
+                        '=',
+                        'venta_detalles.id'
+                    )
+                        ->where('cuenta_detalles.cuenta_id', '=', $cuentaId)
+                        ->where('cuenta_detalles.eliminado', '=', false);
+                })
+                ->groupBy(
+                    'venta_detalles.producto_id',
+                    'productos.nombre'
                 )
-            )
+                ->select(
+                    'venta_detalles.producto_id',
+                    'productos.nombre',
+                    DB::raw('SUM(cuenta_detalles.cantidad) as cantidad'),
+                    DB::raw('MIN(venta_detalles.id) as primer_detalle')
+                );
+        } else {
+            $detallesQuery
+                ->groupBy(
+                    'venta_detalles.producto_id',
+                    'productos.nombre'
+                )
+                ->select(
+                    'venta_detalles.producto_id',
+                    'productos.nombre',
+                    DB::raw('SUM(venta_detalles.cantidad) as cantidad'),
+                    DB::raw('MIN(venta_detalles.id) as primer_detalle')
+                );
+        }
+
+        $detalles = $detallesQuery
             ->orderBy('primer_detalle')
             ->get();
 
@@ -235,6 +341,7 @@ class ComandaController extends Controller
             ->where('venta_detalles.id', $detalleId)
             ->select(
                 'venta_detalles.id',
+                'venta_detalles.venta_id',
                 'venta_detalles.cantidad',
                 'venta_detalles.estado',
                 'productos.nombre',
@@ -259,6 +366,37 @@ class ComandaController extends Controller
             abort(404, 'El plato no corresponde a cocina.');
         }
 
+        /*
+         * Subcuenta opcional (?cuenta=):
+         * - Sin el parámetro: reimpresión HISTÓRICA (cantidad original).
+         * - Con una cuenta válida de la misma venta: muestra las unidades
+         *   ACTUALES asignadas a esa cuenta. Si el plato no pertenece a la
+         *   cuenta, se rechaza para no imprimir información incorrecta.
+         */
+        $cantidad = (int) $detalle->cantidad;
+        $cuentaId = (int) request()->query('cuenta', 0);
+        if ($cuentaId > 0) {
+            $cuentaValida = DB::table('cuentas')
+                ->where('id', $cuentaId)
+                ->where('venta_id', $detalle->venta_id)
+                ->where('estado', '!=', 'CANCELADA')
+                ->exists();
+
+            if ($cuentaValida) {
+                $asignacion = DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuentaId)
+                    ->where('venta_detalle_id', $detalleId)
+                    ->where('eliminado', false)
+                    ->first();
+
+                if (!$asignacion) {
+                    abort(404, 'El plato no pertenece a la cuenta indicada.');
+                }
+
+                $cantidad = (int) $asignacion->cantidad;
+            }
+        }
+
         // Se arma un objeto de comanda y una colección con un único
         // detalle para mantener el mismo estilo de impresión.
         $comanda = (object) [
@@ -269,7 +407,7 @@ class ComandaController extends Controller
 
         $detalles = collect([
             (object) [
-                'cantidad' => $detalle->cantidad,
+                'cantidad' => $cantidad,
                 'nombre' => $detalle->nombre,
             ],
         ]);

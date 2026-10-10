@@ -70,6 +70,11 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/mesas/{mesaId}/cuentas', [VentaController::class, 'panelCuentas'])
         ->name('mesas.cuentas');
 
+    // Crear una subcuenta vacía en la venta activa de la mesa.
+    // Autorizan ADMIN, GERENTE, CAJERO y MESERO (solo CREAR).
+    Route::post('/mesas/{mesaId}/cuentas', [VentaController::class, 'crearSubcuenta'])
+        ->name('mesas.cuentas.crear');
+
     /*
     |--------------------------------------------------------------------------
     | VENTAS Y DIVISIÓN DE CUENTAS
@@ -89,6 +94,10 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/pos/cuentas/{cuentaId}/pagar', [VentaController::class, 'pagarCuenta'])
         ->name('pos.cuentas.pagar');
+
+    // Traslado de cuentas entre mesas (ADMIN, GERENTE y CAJERO).
+    Route::post('/pos/cuentas/{cuentaId}/trasladar', [VentaController::class, 'trasladarCuenta'])
+        ->name('pos.cuentas.trasladar');
 
     // Anulación lógica de un producto individual (solo ADMIN y GERENTE).
     Route::post('/pos/detalle/{detalleId}/anular', [VentaController::class, 'anularDetalle'])
