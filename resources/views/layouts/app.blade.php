@@ -88,6 +88,11 @@
                         <i class="fas fa-users"></i> Usuarios
                     </a>
                 </li>
+                <li>
+                    <a href="{{ route('backups.index') }}" class="{{ request()->routeIs('backups.index') ? 'active' : '' }}">
+                        <i class="fas fa-database"></i> Copias de Seguridad
+                    </a>
+                </li>
             @endif
         </ul>
     </aside>

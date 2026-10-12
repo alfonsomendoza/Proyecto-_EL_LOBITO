@@ -10,6 +10,7 @@ use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
+use App\Http\Controllers\BackupController;
 
 Route::middleware(['guest'])->group(function () {
     Route::get('/login', [AuthController::class, 'showLoginForm'])
@@ -124,4 +125,21 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/pos/comanda-completa/{ventaId}', [ComandaController::class, 'imprimirCompleta'])
         ->name('pos.comanda.completa');
+
+    // ------------------------------------------------------------------
+    // MÓDULO DE COPIAS DE SEGURIDAD (solo ADMIN y GERENTE).
+    // No hay restauración operativa en producción: se documenta y se prueba
+    // únicamente en un entorno aislado.
+    // ------------------------------------------------------------------
+    Route::get('/backups', [BackupController::class, 'index'])
+        ->name('backups.index');
+
+    Route::post('/backups', [BackupController::class, 'crear'])
+        ->name('backups.crear');
+
+    Route::get('/backups/{id}/descargar', [BackupController::class, 'descargar'])
+        ->name('backups.descargar');
+
+    Route::delete('/backups/{id}', [BackupController::class, 'eliminar'])
+        ->name('backups.eliminar');
 });
