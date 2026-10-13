@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use App\Services\Backup\DatabaseDumper;
+use App\Services\BackupService;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
@@ -453,6 +454,121 @@ class BackupModuleTest extends TestCase
 
         $this->deleteJson(route('backups.eliminar', $copia['id']))->assertStatus(403);
         $this->assertTrue(Storage::disk('local')->exists('backups/' . $copia['nombre']));
+    }
+
+    public function test_gerente_tambien_puede_eliminar_copia_no_reciente(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('GERENTE'));
+
+        $antigua = $this->backupCompletoEnDisco(1);
+        $reciente = $this->backupCompletoEnDisco(2);
+
+        $this->deleteJson(route('backups.eliminar', $antigua['id']))
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertFalse(Storage::disk('local')->exists('backups/' . $antigua['nombre']));
+        $this->assertSame('ELIMINADO', DB::table('backup_registros')->where('id', $antigua['id'])->value('estado'));
+
+        // El GERENTE no elimina la copia más reciente ni la de otro usuario por error.
+        $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $reciente['id'])->value('estado'));
+    }
+
+    public function test_mesero_no_puede_eliminar(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $copia = $this->backupCompletoEnDisco(1);
+
+        $this->actingAs($this->usuarioConRol('MESERO'));
+
+        $this->deleteJson(route('backups.eliminar', $copia['id']))->assertStatus(403);
+        $this->assertTrue(Storage::disk('local')->exists('backups/' . $copia['nombre']));
+    }
+
+    public function test_eliminar_id_inexistente_responde_404(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        // Se genera una copia válida para que el más reciente de la consulta
+        // interna no interfiera, pero se pide eliminar un id inexistente.
+        $this->backupCompletoEnDisco(1);
+
+        $this->deleteJson(route('backups.eliminar', 99999))
+            ->assertStatus(404)
+            ->assertJson(['exito' => false]);
+    }
+
+    public function test_nombre_manipulado_no_se_elimina(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        // Registro con nombre que escapa al patrón del módulo (traversal).
+        $id = DB::table('backup_registros')->insertGetId([
+            'usuario_id' => 1,
+            'tipo' => 'CREACION',
+            'estado' => 'COMPLETADO',
+            'nombre_archivo' => 'backup_../../../.env',
+            'mensaje' => 'Registro manipulado de prueba.',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->deleteJson(route('backups.eliminar', $id))
+            ->assertStatus(422)
+            ->assertJson(['exito' => false]);
+
+        // No se marca como eliminado ni se crea auditoría de borrado.
+        $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $id)->value('estado'));
+        $this->assertNull(DB::table('backup_registros')->where('tipo', 'ELIMINACION')->where('estado', 'ELIMINADO')->first());
+    }
+
+    public function test_la_interfaz_envia_la_peticion_de_eliminacion_con_token_csrf(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $copia = $this->backupCompletoEnDisco(1);
+
+        $html = $this->get(route('backups.index'))->assertStatus(200)->getContent();
+
+        // El botón de borrado existe y usa la ruta DELETE del backend.
+        $this->assertStringContainsString('btn-eliminar-backup', $html);
+        $this->assertStringContainsString(route('backups.eliminar', 'ID'), $html);
+
+        // El token CSRF se envía por cabecera (no solo en el cuerpo FormData),
+        // que es lo que Laravel puede leer en una petición DELETE.
+        $this->assertStringContainsString('X-CSRF-TOKEN', $html);
+    }
+
+    public function test_error_al_eliminar_el_archivo_no_se_presenta_como_exito(): void
+    {
+        // Servicio que simula un fallo del sistema de archivos (unlink false).
+        $servicioFallido = new class($this->dumperExitoso()) extends BackupService
+        {
+            protected function eliminarArchivo(string $ruta): bool
+            {
+                return false;
+            }
+        };
+
+        $this->app->instance(BackupService::class, $servicioFallido);
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $antigua = $this->backupCompletoEnDisco(1);
+        $reciente = $this->backupCompletoEnDisco(2);
+
+        $this->deleteJson(route('backups.eliminar', $antigua['id']))
+            ->assertStatus(500)
+            ->assertJson(['exito' => false]);
+
+        // Sí el archivo no se pudo borrar, el historial NO se marca ELIMINADO
+        // y no se crea un registro de auditoría de éxito.
+        $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $antigua['id'])->value('estado'));
+        $this->assertTrue(Storage::disk('local')->exists('backups/' . $antigua['nombre']));
+        $this->assertNull(DB::table('backup_registros')->where('tipo', 'ELIMINACION')->where('estado', 'ELIMINADO')->first());
     }
 
     /* ------------------------------------------------------------------

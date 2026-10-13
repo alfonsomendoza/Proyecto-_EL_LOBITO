@@ -17,13 +17,16 @@
                 <strong>Base de datos:</strong> {{ $baseDatos }}
             </div>
             <div style="flex: 1; min-width: 220px; background: #f8f9fa; border: 1px solid #e3e6f0; border-radius: 6px; padding: 12px 15px; font-size: 13px;">
-                <strong>Herramienta mysqldump:</strong>
+                <strong>Generación de respaldos:</strong>
                 @if ($herramientaDisponible)
                     <span style="color: var(--color-success); font-weight: bold;">Disponible</span>
-                @else
-                    <span style="color: #fc544b; font-weight: bold;">No configurada</span>
                     <div style="font-size: 12px; color: #888; margin-top: 4px;">
-                        Define <code>BACKUP_MYSQLDUMP_PATH</code> en el archivo <code>.env</code>. Consulta <code>docs/BACKUP.md</code>.
+                        Se usa <code>mysqldump</code> cuando está instalado y, si no, el generador PHP/PDO integrado.
+                    </div>
+                @else
+                    <span style="color: #fc544b; font-weight: bold;">No disponible</span>
+                    <div style="font-size: 12px; color: #888; margin-top: 4px;">
+                        Comprueba la conexión de base de datos configurada. <code>mysqldump</code> es opcional: el generador PHP/PDO integrado no requiere herramientas externas.
                     </div>
                 @endif
             </div>
@@ -184,10 +187,17 @@ document.addEventListener('DOMContentLoaded', function () {
         }).then((res) => {
             if (!res.isConfirmed) return;
 
-            const fd = new FormData();
-            fd.append('_token', '{{ csrf_token() }}');
-
-            fetch('{{ route("backups.eliminar", "ID") }}'.replace('ID', id), { method: 'DELETE', body: fd })
+            // El token CSRF se envía en la cabecera X-CSRF-TOKEN: para una
+            // petición DELETE con multipart/form-data, PHP no rellena $_POST,
+            // por lo que un token colocado solo en el cuerpo nunca lo recibe
+            // Laravel y el middleware responde 419. La cabecera sí se lee.
+            fetch('{{ route("backups.eliminar", "ID") }}'.replace('ID', id), {
+                method: 'DELETE',
+                headers: {
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
                 .then(r => r.json())
                 .then(d => {
                     mostrarMensaje(d.exito, d.exito ? d.mensaje : d.error);

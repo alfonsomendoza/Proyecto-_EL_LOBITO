@@ -198,14 +198,24 @@ class BackupService
                 return $this->respuesta(422, 'El archivo no pertenece al directorio de respaldos.');
             }
 
-            if (is_file($ruta)) {
-                @unlink($ruta);
+            $archivoExistia = is_file($ruta);
+
+            if ($archivoExistia && !$this->eliminarArchivo($ruta)) {
+                // La copia más reciente y el historial permanecen intactos:
+                // un fallo de borrado NUNCA debe presentarse como éxito.
+                return $this->respuesta(500, 'No fue posible eliminar el archivo de la copia.');
             }
+
+            // Si el archivo ya no existía en disco no hay nada que borrar,
+            // pero el historial se actualiza igual y se audita la operación.
+            $mensaje = $archivoExistia
+                ? 'Copia eliminada manualmente.'
+                : 'Copia eliminada: el archivo ya no existía en disco.';
 
             // Se registra la eliminación y se marca el historial original.
             $registro->update([
                 'estado' => 'ELIMINADO',
-                'mensaje' => 'Copia eliminada manualmente.',
+                'mensaje' => $mensaje,
                 'finalizado_en' => now()->toDateTimeString(),
             ]);
 
@@ -226,6 +236,21 @@ class BackupService
         } finally {
             $lock->release();
         }
+    }
+
+    /**
+     * Elimina físicamente el archivo del respaldo.
+     *
+     * Está separado para poder simular fallos de borrado en las pruebas
+     * sobrescribiendo este método sin tocar la lógica de negocio.
+     */
+    protected function eliminarArchivo(string $ruta): bool
+    {
+        if (!is_file($ruta)) {
+            return true;
+        }
+
+        return unlink($ruta);
     }
 
     /* ------------------------------------------------------------------
