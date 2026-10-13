@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Categoria;
 use App\Models\Producto;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 
 class CatalogoController extends Controller
@@ -25,6 +26,13 @@ class CatalogoController extends Controller
     // Método para manejar Crear, Editar y Eliminar del catálogo
     public function storeOrUpdate(Request $request)
     {
+        // Seguridad en backend: solo ADMIN y GERENTE pueden crear, editar o
+        // desactivar productos y categorías. CAJERO y MESERO solo consultan.
+        // El guard se ejecuta ANTES de validar o escribir cualquier registro.
+        if (!$this->autorizado()) {
+            return $this->noAutorizado();
+        }
+
         try {
             // --- GESTIÓN DE CATEGORÍAS ---
             if ($request->accion === 'crear_categoria' || $request->accion === 'editar_categoria') {
@@ -80,5 +88,30 @@ class CatalogoController extends Controller
             Log::error('Error en CatalogoController: ' . $e->getMessage());
             return response()->json(['exito' => false, 'error' => 'Error en la base de datos al guardar.']);
         }
+    }
+
+    /**
+     * Solo ADMIN y GERENTE modifican el catálogo. El resto de roles
+     * autenticados (CAJERO, MESERO) conservan la consulta de solo lectura.
+     */
+    private function autorizado(): bool
+    {
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return false;
+        }
+
+        $rol = $usuario->rol->nombre ?? '';
+
+        return in_array($rol, ['ADMIN', 'GERENTE'], true);
+    }
+
+    private function noAutorizado()
+    {
+        return response()->json([
+            'exito' => false,
+            'error' => 'No tienes permiso para modificar el catálogo.',
+        ], 403);
     }
 }

@@ -5,12 +5,14 @@
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center;">
         <span><i class="fas fa-utensils"></i> Menú y Catálogo</span>
         <div>
-            <button onclick="modalCategoria('crear')" style="background-color: #6777ef; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; margin-right: 10px;">
-                <i class="fas fa-tags"></i> + Categoría
-            </button>
-            <button onclick="modalProducto('crear')" style="background-color: var(--color-success); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px;">
-                <i class="fas fa-hamburger"></i> + Producto
-            </button>
+            @if(in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE'], true))
+                <button onclick="modalCategoria('crear')" style="background-color: #6777ef; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; margin-right: 10px;">
+                    <i class="fas fa-tags"></i> + Categoría
+                </button>
+                <button onclick="modalProducto('crear')" style="background-color: var(--color-success); color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px;">
+                    <i class="fas fa-hamburger"></i> + Producto
+                </button>
+            @endif
         </div>
     </div>
 
@@ -42,7 +44,9 @@
                         <th style="padding: 12px 15px;">Categoría (Grupo)</th>
                         <th style="padding: 12px 15px;">Precio (C$)</th>
                         <th style="padding: 12px 15px; text-align: center;">Cocina</th>
-                        <th style="padding: 12px 15px; text-align: center;">Acciones</th>
+                        @if(in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE'], true))
+                            <th style="padding: 12px 15px; text-align: center;">Acciones</th>
+                        @endif
                     </tr>
                 </thead>
                 <tbody id="tabla-catalogo">
@@ -62,6 +66,7 @@
                                 <span style="background: #fdecea; color: #fc544b; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;">No</span>
                             @endif
                         </td>
+                        @if(in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE'], true))
                         <td style="padding: 12px 15px; text-align: center; white-space: nowrap;">
                             <div style="display: flex; justify-content: center; align-items: center; gap: 8px;">
                                 <button class="btn-editar-producto" data-id="{{ $p->id }}" data-cat="{{ $p->categoria_id }}" data-nombre="{{ $p->nombre }}" data-precio="{{ $p->precio }}" data-rc="{{ $p->requiere_cocina }}" style="background: transparent; color: #36b9cc; border: 1px solid #36b9cc; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 5px; font-size: 12px;">
@@ -72,6 +77,7 @@
                                 </button>
                             </div>
                         </td>
+                    @endif
                     </tr>
                     @endforeach
                 </tbody>
