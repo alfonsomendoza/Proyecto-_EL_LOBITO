@@ -60,7 +60,7 @@
 
             @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO']))
                 <li>
-                    <a href="#">
+                    <a href="{{ route('gastos.index') }}" class="{{ request()->routeIs('gastos.index') ? 'active' : '' }}">
                         <i class="fas fa-file-invoice-dollar"></i> Gastos
                     </a>
                 </li>

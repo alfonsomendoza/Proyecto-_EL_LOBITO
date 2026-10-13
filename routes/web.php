@@ -11,6 +11,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\GastoController;
 
 Route::middleware(['guest'])->group(function () {
     Route::get('/login', [AuthController::class, 'showLoginForm'])
@@ -142,4 +143,21 @@ Route::middleware(['auth'])->group(function () {
 
     Route::delete('/backups/{id}', [BackupController::class, 'eliminar'])
         ->name('backups.eliminar');
+
+    // ------------------------------------------------------------------
+    // MÓDULO DE GASTOS (salidas de dinero).
+    // ADMIN, GERENTE y CAJERO registran, consultan e imprimen.
+    // Solo ADMIN y GERENTE anulan; el rol se valida en el backend.
+    // ------------------------------------------------------------------
+    Route::get('/gastos', [GastoController::class, 'index'])
+        ->name('gastos.index');
+
+    Route::post('/gastos', [GastoController::class, 'store'])
+        ->name('gastos.store');
+
+    Route::post('/gastos/{id}/anular', [GastoController::class, 'anular'])
+        ->name('gastos.anular');
+
+    Route::get('/gastos/ticket', [GastoController::class, 'ticket'])
+        ->name('gastos.ticket');
 });
