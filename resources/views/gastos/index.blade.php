@@ -5,10 +5,22 @@
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <span><i class="fas fa-file-invoice-dollar"></i> Gastos — Salidas de Dinero</span>
         @if ($apertura)
-            <button type="button" id="btn-imprimir-gastos"
-                    style="background-color:#5a6268; color:white; border:none; padding:6px 15px; border-radius:4px; cursor:pointer; font-weight:bold; font-size:13px;">
-                <i class="fas fa-print"></i> Imprimir Gastos del Turno
-            </button>
+            {{-- Tres impresiones independientes: cada botón aplica su propio
+                 criterio de estado, sin depender del filtro en pantalla. --}}
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a href="{{ route('gastos.ticket', ['estado' => 'todos']) }}" target="_blank"
+                   style="background-color:#5a6268; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
+                    <i class="fas fa-print"></i> Imprimir todos los gastos
+                </a>
+                <a href="{{ route('gastos.ticket', ['estado' => 'activos']) }}" target="_blank"
+                   style="background-color:#28a745; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
+                    <i class="fas fa-print"></i> Imprimir gastos activos
+                </a>
+                <a href="{{ route('gastos.ticket', ['estado' => 'anulados']) }}" target="_blank"
+                   style="background-color:#c0392b; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
+                    <i class="fas fa-print"></i> Imprimir gastos anulados
+                </a>
+            </div>
         @endif
     </div>
 
@@ -72,6 +84,17 @@
                 <i class="fas fa-list-alt"></i> Gastos Registrados en este Turno
             </div>
 
+            {{-- Filtros por estado. El comportamiento predeterminado es "Activos". --}}
+            <div style="padding:10px 16px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-bottom:1px solid #f1f1f1;">
+                <span style="font-size:12px; color:#6c757d; font-weight:600;">Mostrar:</span>
+                @foreach (['activos' => 'Activos', 'anulados' => 'Anulados', 'todos' => 'Todos'] as $clave => $etiqueta)
+                    <a href="{{ route('gastos.index', ['estado' => $clave]) }}"
+                       style="text-decoration:none; font-size:12px; font-weight:600; padding:5px 12px; border-radius:14px; border:1px solid {{ $filtro === $clave ? '#6777ef' : '#ced4da' }}; background:{{ $filtro === $clave ? '#6777ef' : '#fff' }}; color:{{ $filtro === $clave ? '#fff' : '#495057' }};">
+                        {{ $etiqueta }}
+                    </a>
+                @endforeach
+            </div>
+
             <table style="width:100%; border-collapse:collapse; font-size:13px;">
                 <thead>
                     <tr style="background:#f4f6f9; color:#495057; text-align:left;">
@@ -91,23 +114,36 @@
                             <td style="padding:10px 12px;">{{ $gasto->usuario->nombre ?? 'Cajero' }}</td>
                             <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format((float) $gasto->monto, 2) }}</td>
                             <td style="padding:10px 12px; text-align:center;">
-                                <span style="background:#d4edda; color:#155724; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">ACTIVO</span>
+                                @if ($gasto->estado === 'ANULADO')
+                                    <span style="background:#f8d7da; color:#721c24; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">ANULADO</span>
+                                @else
+                                    <span style="background:#d4edda; color:#155724; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">ACTIVO</span>
+                                @endif
                             </td>
-                            <td style="padding:10px 12px; text-align:center;">
-                                @if ($puedeAnular)
+                            <td style="padding:10px 12px; text-align:center; white-space:nowrap;">
+                                <a href="{{ route('gastos.ticket.gasto', $gasto->id) }}" target="_blank"
+                                   style="display:inline-block; background:transparent; color:#5a6268; border:1px solid #5a6268; padding:4px 10px; border-radius:4px; font-size:12px; text-decoration:none;"
+                                   title="Imprimir este gasto">
+                                    <i class="fas fa-print"></i> Imprimir
+                                </a>
+                                @if ($puedeAnular && $gasto->estado === 'ACTIVO')
                                     <button type="button" class="btn-anular-gasto" data-id="{{ $gasto->id }}"
                                             style="background:transparent; color:#fc544b; border:1px solid #fc544b; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:12px;">
                                         <i class="fas fa-ban"></i> Anular
                                     </button>
-                                @else
-                                    <span style="font-size:11px; color:#aaa;">—</span>
                                 @endif
                             </td>
                         </tr>
                     @empty
                         <tr>
                             <td colspan="6" style="text-align:center; padding:20px; color:#888;">
-                                No hay gastos activos registrados en este turno.
+                                @if ($filtro === 'anulados')
+                                    No hay gastos anulados en este turno.
+                                @elseif ($filtro === 'todos')
+                                    No hay gastos registrados en este turno.
+                                @else
+                                    No hay gastos activos en este turno.
+                                @endif
                             </td>
                         </tr>
                     @endforelse
@@ -119,6 +155,13 @@
                             <td style="padding:10px 12px; text-align:right; color:#c0392b;">C$ {{ number_format($totalActivos, 2) }}</td>
                             <td colspan="2"></td>
                         </tr>
+                        @if ($filtro !== 'activos')
+                            <tr style="background:#fdf2f2; font-weight:bold;">
+                                <td colspan="3" style="padding:10px 12px; text-align:right; color:#721c24;">SUBTOTAL ANULADOS (informativo, no afecta caja):</td>
+                                <td style="padding:10px 12px; text-align:right; color:#721c24;">C$ {{ number_format($totalAnulados, 2) }}</td>
+                                <td colspan="2"></td>
+                            </tr>
+                        @endif
                     </tfoot>
                 @endif
             </table>
@@ -208,14 +251,6 @@ document.addEventListener('DOMContentLoaded', function () {
                     }
                 })
                 .catch(() => Swal.fire('Error', 'Error de conexión con el servidor.', 'error'));
-        });
-    }
-
-    // Imprimir ticket del turno.
-    const btnImprimir = document.getElementById('btn-imprimir-gastos');
-    if (btnImprimir) {
-        btnImprimir.addEventListener('click', function () {
-            window.open('{{ route("gastos.ticket") }}', '_blank', 'width=400,height=650');
         });
     }
 

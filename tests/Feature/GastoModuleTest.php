@@ -402,4 +402,244 @@ class GastoModuleTest extends TestCase
             ->get(route('gastos.ticket'))
             ->assertStatus(403);
     }
+
+    /* ------------------------------------------------------------------
+     | 5. Filtros del listado (activos / anulados / todos)
+     | ------------------------------------------------------------------ */
+
+    public function test_filtro_anulados_muestra_solo_anulados(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'GastoActivoFiltro', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'GastoAnuladoFiltro', 200, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'anulados']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GastoAnuladoFiltro');
+        $respuesta->assertDontSee('GastoActivoFiltro');
+    }
+
+    public function test_filtro_todos_muestra_activos_y_anulados(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'GastoActivoTodos', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'GastoAnuladoTodos', 200, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'todos']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GastoActivoTodos');
+        $respuesta->assertSee('GastoAnuladoTodos');
+        $respuesta->assertSee('ANULADO');
+    }
+
+    public function test_filtro_invalido_vuelve_a_activos(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'GastoActivoInvalido', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'GastoAnuladoInvalido', 200, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'basura']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GastoActivoInvalido');
+        $respuesta->assertDontSee('GastoAnuladoInvalido');
+    }
+
+    public function test_totales_no_incluyen_anulados_bajo_filtro_todos(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoTotal', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoTotal', 999, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'todos']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('SUBTOTAL ANULADOS');
+        // El total activo y el subtotal anulado aparecen por separado; nunca sumados.
+        $respuesta->assertSee('C$ 100.00');
+        $respuesta->assertSee('C$ 999.00');
+        $respuesta->assertDontSee('1,099.00');
+    }
+
+    /* ------------------------------------------------------------------
+     | 6. Impresión individual y de listado con filtros
+     | ------------------------------------------------------------------ */
+
+    public function test_imprimir_gasto_anulado_individual(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $gastoId = $this->gasto($aperturaId, 'GastoAnuladoImpreso', 500, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GastoAnuladoImpreso');
+        $respuesta->assertSee('ANULADO');
+        $respuesta->assertSee('C$ 500.00');
+    }
+
+    public function test_comprobante_individual_identifica_el_gasto_correcto(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $gastoId = $this->gasto($aperturaId, 'GastoSeleccionado', 120, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'GastoAjenoNoDebeSalir', 999, 'ACTIVO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GastoSeleccionado');
+        $respuesta->assertDontSee('GastoAjenoNoDebeSalir');
+    }
+
+    public function test_imprimir_listado_anulados(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoListadoImpreso', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoListadoImpreso', 200, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('AnuladoListadoImpreso');
+        $respuesta->assertDontSee('ActivoListadoImpreso');
+        $respuesta->assertSee('SUBTOTAL ANULADOS');
+    }
+
+    public function test_impresion_todos_distingue_estados(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoImpresoMixto', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoImpresoMixto', 200, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'todos']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('ActivoImpresoMixto');
+        $respuesta->assertSee('AnuladoImpresoMixto');
+        $respuesta->assertSee('ACTIVO');
+        $respuesta->assertSee('ANULADO');
+        $respuesta->assertSee('SUBTOTAL ANULADOS');
+    }
+
+    public function test_impresion_no_modifica_el_estado(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $gastoId = $this->gasto($aperturaId, 'GastoNoCambia', 300, 'ANULADO', $usuario->id);
+
+        $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId))->assertStatus(200);
+        $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']))->assertStatus(200);
+
+        $this->assertDatabaseHas('caja_gastos', ['id' => $gastoId, 'estado' => 'ANULADO']);
+        $this->assertDatabaseCount('caja_gastos', 1);
+    }
+
+    public function test_imprimir_gasto_inexistente_devuelve_404(): void
+    {
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('gastos.ticket.gasto', 9999))
+            ->assertStatus(404);
+    }
+
+    public function test_mesero_no_puede_imprimir_gasto_individual(): void
+    {
+        $aperturaId = $this->apertura('ABIERTA');
+        $gastoId = $this->gasto($aperturaId, 'GastoProtegido', 100, 'ANULADO');
+
+        $this->actingAs($this->usuario('MESERO'))
+            ->get(route('gastos.ticket.gasto', $gastoId))
+            ->assertStatus(403);
+    }
+
+    public function test_admin_puede_imprimir_gasto_individual(): void
+    {
+        $aperturaId = $this->apertura('ABIERTA');
+        $gastoId = $this->gasto($aperturaId, 'GastoAdminImpreso', 100, 'ACTIVO');
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('gastos.ticket.gasto', $gastoId))
+            ->assertStatus(200);
+    }
+
+    /* ------------------------------------------------------------------
+     | 7. Los tres botones de impresión (independientes del filtro)
+     | ------------------------------------------------------------------ */
+
+    public function test_pantalla_tiene_tres_botones_de_impresion(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'GastoParaBotones', 100, 'ACTIVO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index'));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee(route('gastos.ticket', ['estado' => 'todos']), false);
+        $respuesta->assertSee(route('gastos.ticket', ['estado' => 'activos']), false);
+        $respuesta->assertSee(route('gastos.ticket', ['estado' => 'anulados']), false);
+    }
+
+    public function test_botones_son_independientes_del_filtro_de_pantalla(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoBoton', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoBoton', 200, 'ANULADO', $usuario->id);
+
+        // Aunque la pantalla esté filtrada en "anulados", el botón de activos
+        // sigue imprimiendo solo activos, y viceversa.
+        $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'anulados']))->assertStatus(200);
+
+        $activos = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'activos']));
+        $activos->assertStatus(200);
+        $activos->assertSee('ActivoBoton');
+        $activos->assertDontSee('AnuladoBoton');
+
+        $anulados = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']));
+        $anulados->assertStatus(200);
+        $anulados->assertSee('AnuladoBoton');
+        $anulados->assertDontSee('ActivoBoton');
+    }
+
+    public function test_imprimir_todos_muestra_secciones_y_subtotales_separados(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoSeccion', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoSeccion', 999, 'ANULADO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'todos']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('GASTOS ACTIVOS');
+        $respuesta->assertSee('GASTOS ANULADOS');
+        $respuesta->assertSee('TOTAL EGRESOS (activos)');
+        $respuesta->assertSee('SUBTOTAL ANULADOS');
+        $respuesta->assertSee('C$ 100.00');
+        $respuesta->assertSee('C$ 999.00');
+        $respuesta->assertDontSee('1,099.00');
+    }
+
+    public function test_imprimir_anulados_sin_registros_muestra_mensaje(): void
+    {
+        $usuario = $this->usuario('CAJERO');
+        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
+        $this->gasto($aperturaId, 'SoloActivo', 100, 'ACTIVO', $usuario->id);
+
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']));
+
+        $respuesta->assertStatus(200);
+        $respuesta->assertSee('No se registran salidas de dinero anuladas');
+        $respuesta->assertDontSee('SoloActivo');
+    }
 }

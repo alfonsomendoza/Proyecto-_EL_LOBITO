@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Services\GastoService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 
 /**
@@ -24,7 +25,7 @@ class GastoController extends Controller
      | Panel del módulo: formulario + gastos del turno activo
      | ------------------------------------------------------------------ */
 
-    public function index()
+    public function index(Request $request)
     {
         if (!$this->puedeOperar()) {
             abort(403, 'No tienes permiso para acceder al módulo de gastos.');
@@ -32,14 +33,29 @@ class GastoController extends Controller
 
         $apertura = $this->service->aperturaActiva();
 
-        $gastos = $apertura
-            ? $this->service->gastosActivosDeApertura((int) $apertura->id)
+        // Filtro del listado: activos (por defecto), anulados o todos.
+        $filtro = $this->filtroEstado($request);
+
+        $todos = $apertura
+            ? $this->service->gastosDeApertura((int) $apertura->id)
             : collect();
 
-        $totalActivos = $this->service->totalActivos($gastos);
+        $gastos = $this->filtrarPorEstado($todos, $filtro);
+
+        // Los totales se calculan SIEMPRE sobre el turno completo: los anulados
+        // nunca se suman al total activo; se muestran aparte como informativos.
+        $totalActivos = $this->service->totalActivos($todos);
+        $totalAnulados = $this->service->totalAnulados($todos);
         $puedeAnular = $this->puedeAnular();
 
-        return view('gastos.index', compact('apertura', 'gastos', 'totalActivos', 'puedeAnular'));
+        return view('gastos.index', compact(
+            'apertura',
+            'gastos',
+            'totalActivos',
+            'totalAnulados',
+            'filtro',
+            'puedeAnular'
+        ));
     }
 
     /* ------------------------------------------------------------------
@@ -108,10 +124,10 @@ class GastoController extends Controller
     }
 
     /* ------------------------------------------------------------------
-     | Ticket imprimible del turno (solo gastos ACTIVOS)
+     | Ticket imprimible del turno (respeta el filtro seleccionado)
      | ------------------------------------------------------------------ */
 
-    public function ticket()
+    public function ticket(Request $request)
     {
         if (!$this->puedeOperar()) {
             abort(403, 'No tienes permiso para imprimir gastos.');
@@ -119,15 +135,76 @@ class GastoController extends Controller
 
         $apertura = $this->service->aperturaActiva();
 
-        $gastos = $apertura
+        // El listado impreso usa el MISMO criterio de filtrado que la pantalla.
+        $filtro = $this->filtroEstado($request);
+
+        $todos = $apertura
             ? $this->service->gastosDeApertura((int) $apertura->id)
-                ->where('estado', 'ACTIVO')
-                ->values()
             : collect();
 
-        $totalActivos = $this->service->totalActivos($gastos);
+        $gastos = $this->filtrarPorEstado($todos, $filtro);
 
-        return view('gastos.ticket', compact('apertura', 'gastos', 'totalActivos'));
+        // Totales sobre el turno completo, separados por estado.
+        $totalActivos = $this->service->totalActivos($todos);
+        $totalAnulados = $this->service->totalAnulados($todos);
+
+        return view('gastos.ticket', compact(
+            'apertura',
+            'gastos',
+            'totalActivos',
+            'totalAnulados',
+            'filtro'
+        ));
+    }
+
+    /* ------------------------------------------------------------------
+     | Ticket imprimible de un gasto individual (activo o anulado)
+     | ------------------------------------------------------------------ */
+
+    public function ticketGasto(int $id)
+    {
+        if (!$this->puedeOperar()) {
+            abort(403, 'No tienes permiso para imprimir gastos.');
+        }
+
+        $gasto = $this->service->gasto($id);
+
+        if (!$gasto) {
+            abort(404, 'El gasto no existe.');
+        }
+
+        $apertura = $this->service->aperturaActiva();
+
+        return view('gastos.ticket_gasto', compact('gasto', 'apertura'));
+    }
+
+    /* ------------------------------------------------------------------
+     | Filtrado por estado
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Normaliza el parámetro ?estado= a activos|anulados|todos.
+     * Cualquier valor inválido o ausente cae en "activos".
+     */
+    private function filtroEstado(Request $request): string
+    {
+        $filtro = (string) $request->query('estado', 'activos');
+
+        return in_array($filtro, ['activos', 'anulados', 'todos'], true)
+            ? $filtro
+            : 'activos';
+    }
+
+    /**
+     * Devuelve la colección filtrada por estado, conservando el orden original.
+     */
+    private function filtrarPorEstado(Collection $gastos, string $filtro): Collection
+    {
+        return match ($filtro) {
+            'anulados' => $gastos->where('estado', 'ANULADO')->values(),
+            'todos' => $gastos->values(),
+            default => $gastos->where('estado', 'ACTIVO')->values(),
+        };
     }
 
     /* ------------------------------------------------------------------

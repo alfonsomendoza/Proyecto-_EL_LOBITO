@@ -70,6 +70,28 @@ class GastoService
     }
 
     /**
+     * Suma de los egresos ANULADOS de la colección. Es solo informativa:
+     * nunca forma parte del total activo de caja.
+     */
+    public function totalAnulados(Collection $gastos): float
+    {
+        return (float) $gastos
+            ->where('estado', 'ANULADO')
+            ->sum('monto');
+    }
+
+    /**
+     * Devuelve un gasto por id (con su usuario registrador), o null si no existe.
+     * Se usa para la impresión individual; no modifica datos.
+     */
+    public function gasto(int $gastoId): ?CajaGasto
+    {
+        return CajaGasto::query()
+            ->with('usuario')
+            ->find($gastoId);
+    }
+
+    /**
      * Registra varias filas de gasto en una sola transacción.
      *
      * @param  array<int, string> $conceptos

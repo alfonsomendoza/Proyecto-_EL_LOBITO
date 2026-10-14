@@ -160,4 +160,9 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/gastos/ticket', [GastoController::class, 'ticket'])
         ->name('gastos.ticket');
+
+    // Ticket imprimible de un gasto individual (activo o anulado).
+    Route::get('/gastos/ticket/{id}', [GastoController::class, 'ticketGasto'])
+        ->whereNumber('id')
+        ->name('gastos.ticket.gasto');
 });
