@@ -93,6 +93,13 @@
                         <i class="fas fa-database"></i> Copias de Seguridad
                     </a>
                 </li>
+                @if ($rol === 'ADMIN')
+                <li>
+                    <a href="{{ route('roles.index') }}" class="{{ request()->routeIs('roles.index') ? 'active' : '' }}">
+                        <i class="fas fa-user-shield"></i> Roles
+                    </a>
+                </li>
+                @endif
             @endif
         </ul>
     </aside>

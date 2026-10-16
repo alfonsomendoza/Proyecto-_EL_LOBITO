@@ -7,6 +7,7 @@ use App\Http\Controllers\CajaAperturaController;
 use App\Http\Controllers\ClienteController;
 use App\Http\Controllers\CatalogoController;
 use App\Http\Controllers\UsuarioController;
+use App\Http\Controllers\RolController;
 use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
@@ -59,6 +60,13 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/usuarios/api', [UsuarioController::class, 'api'])
         ->name('usuarios.api');
+
+    // Catálogo oficial de roles: solo ADMIN consulta y crea roles faltantes.
+    Route::get('/roles', [RolController::class, 'index'])
+        ->name('roles.index');
+
+    Route::post('/roles/api', [RolController::class, 'api'])
+        ->name('roles.api');
 
     Route::get('/mesas', [MesaController::class, 'index'])
         ->name('mesas.index');
