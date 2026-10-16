@@ -445,6 +445,80 @@ class BackupModuleTest extends TestCase
         $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $unica['id'])->value('estado'));
     }
 
+    public function test_se_puede_eliminar_una_copia_antigua_y_queda_protegida_solo_la_mas_reciente(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $antigua = $this->backupCompletoEnDisco(1);
+        $reciente = $this->backupCompletoEnDisco(1);
+
+        // La copia ANTIGUA sí puede eliminarse.
+        $this->deleteJson(route('backups.eliminar', $antigua['id']))
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertSame('ELIMINADO', DB::table('backup_registros')->where('id', $antigua['id'])->value('estado'));
+
+        // La copia más reciente VALIDA (su archivo existe en disco) se mantiene protegida.
+        $this->deleteJson(route('backups.eliminar', $reciente['id']))
+            ->assertStatus(409)
+            ->assertJson(['exito' => false]);
+
+        $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $reciente['id'])->value('estado'));
+        $this->assertTrue(Storage::disk('local')->exists('backups/' . $reciente['nombre']));
+    }
+
+    public function test_un_registro_reciente_cuyo_archivo_ya_no_existe_puede_limpiarse(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $antigua = $this->backupCompletoEnDisco(1);
+
+        // Registro más reciente cuyo archivo desapareció del disco (sin pasar
+        // por el módulo). Solo queda la copia antigua como disponible.
+        $huérfano = $this->backupCompletoEnDisco(1);
+        Storage::disk('local')->delete('backups/' . $huérfano['nombre']);
+        $this->assertFalse(Storage::disk('local')->exists('backups/' . $huérfano['nombre']));
+
+        // El huérfano ya no es una copia disponible: puede eliminarse para
+        // limpiar el historial y queda auditado.
+        $respuesta = $this->deleteJson(route('backups.eliminar', $huérfano['id']));
+        $respuesta->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertSame('ELIMINADO', DB::table('backup_registros')->where('id', $huérfano['id'])->value('estado'));
+        $this->assertStringContainsString('ya no existía', (string) DB::table('backup_registros')->where('id', $huérfano['id'])->value('mensaje'));
+
+        // La copia antigua (ahora la única disponible) sigue protegida.
+        $this->deleteJson(route('backups.eliminar', $antigua['id']))
+            ->assertStatus(409)
+            ->assertJson(['exito' => false]);
+
+        $this->assertSame('COMPLETADO', DB::table('backup_registros')->where('id', $antigua['id'])->value('estado'));
+    }
+
+    public function test_gerente_respeta_la_proteccion_de_la_copia_mas_reciente(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('GERENTE'));
+
+        $antigua = $this->backupCompletoEnDisco(1);
+        $reciente = $this->backupCompletoEnDisco(1);
+
+        $this->deleteJson(route('backups.eliminar', $antigua['id']))
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        // GERENTE tampoco puede eliminar la última copia disponible.
+        $this->deleteJson(route('backups.eliminar', $reciente['id']))
+            ->assertStatus(409)
+            ->assertJson(['exito' => false]);
+
+        $this->assertTrue(Storage::disk('local')->exists('backups/' . $reciente['nombre']));
+    }
+
     public function test_cajero_no_puede_eliminar(): void
     {
         $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
@@ -541,6 +615,47 @@ class BackupModuleTest extends TestCase
         // El token CSRF se envía por cabecera (no solo en el cuerpo FormData),
         // que es lo que Laravel puede leer en una petición DELETE.
         $this->assertStringContainsString('X-CSRF-TOKEN', $html);
+    }
+
+    public function test_la_tabla_del_historial_queda_dentro_de_un_contenedor_con_scroll(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $this->backupCompletoEnDisco(1);
+
+        $html = $this->get(route('backups.index'))->assertStatus(200)->getContent();
+
+        // La tabla está envuelta para que el desbordamiento horizontal quede
+        // limitado a ella y no se desborde toda la página en móviles.
+        $this->assertStringContainsString('class="backups-tabla-scroll"', $html);
+    }
+
+    public function test_el_script_de_eliminacion_avisa_si_el_servidor_no_responde_json(): void
+    {
+        $this->app->instance(DatabaseDumper::class, $this->dumperExitoso());
+        $this->actingAs($this->usuarioConRol('ADMIN'));
+
+        $this->backupCompletoEnDisco(1);
+
+        $html = $this->get(route('backups.index'))->assertStatus(200)->getContent();
+
+        // Una respuesta 419/500 en HTML no es JSON: si r.json() falla, el catch
+        // muestra un mensaje claro en lugar de dejar el botón mudo. El mensaje
+        // debe aparecer después del fetch DELETE del módulo.
+        $this->assertGreaterThan(
+            strpos($html, route('backups.eliminar', 'ID')),
+            strpos($html, 'No fue posible eliminar la copia.')
+        );
+    }
+
+    public function test_el_estilo_publico_incluye_reglas_responsive_para_la_vista(): void
+    {
+        $css = (string) file_get_contents(public_path('style.css'));
+
+        $this->assertStringContainsString('backups-tabla-scroll', $css);
+        $this->assertStringContainsString('@media (max-width: 768px)', $css);
+        $this->assertStringContainsString('.backups-contenido', $css);
     }
 
     public function test_error_al_eliminar_el_archivo_no_se_presenta_como_exito(): void

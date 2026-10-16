@@ -161,7 +161,11 @@ class BackupService
      *
      * Reglas:
      *  - Solo archivos registrados en el módulo y cuyo nombre cumpla el patrón.
-     *  - La copia más reciente NO puede eliminarse con este flujo.
+     *  - La copia más reciente "disponible" (COMPLETADA y con archivo real en
+     *    disco) NO puede eliminarse con este flujo: protege la última copia
+     *    que realmente sirve para recuperar datos.
+     *  - Un registro COMPLETADO cuyo archivo ya no exista en disco NO cuenta
+     *    como copia disponible: puede eliminarse para limpiar el historial.
      *  - La operación queda auditada.
      */
     public function eliminar(int $registroId, int $usuarioId, ?string $ip): array
@@ -183,16 +187,28 @@ class BackupService
                 return $this->respuesta(422, 'El registro no corresponde a un archivo gestionado por el módulo.');
             }
 
-            $masReciente = BackupRegistro::query()
+            // La copia protegida es la más reciente COMPLETADA cuyo archivo
+            // existe de verdad en disco (la "última copia disponible"). Se usa
+            // el id (orden de inserción) y no una fecha ni el nombre del
+            // archivo: así se evita depender de zonas horarias o del formato
+            // del nombre, y se excluyen automáticamente las copias incompletas
+            // (EN_PROCESO) y fallidas (FALLIDO) del filtro de estado.
+            $copiaProtegida = BackupRegistro::query()
                 ->where('estado', 'COMPLETADO')
                 ->orderByDesc('id')
-                ->value('id');
+                ->get()
+                ->first(function (BackupRegistro $c) {
+                    $ruta = $this->rutaAbsolutaPermitida((string) $c->nombre_archivo);
 
-            if ((int) $masReciente === (int) $registro->id) {
+                    return $ruta !== null && is_file($ruta);
+                });
+
+            if ($copiaProtegida !== null && (int) $copiaProtegida->id === (int) $registro->id) {
                 return $this->respuesta(409, 'No se puede eliminar la copia más reciente. Genera una nueva copia antes de eliminar esta.');
             }
 
-            $ruta = $this->rutaAbsolutaValidada((string) $registro->nombre_archivo);
+            // Ruta segura dentro del directorio, sin exigir que el archivo exista.
+            $ruta = $this->rutaAbsolutaPermitida((string) $registro->nombre_archivo);
 
             if ($ruta === null) {
                 return $this->respuesta(422, 'El archivo no pertenece al directorio de respaldos.');
@@ -412,6 +428,27 @@ class BackupService
      */
     private function rutaAbsolutaValidada(string $nombre): ?string
     {
+        $permitida = $this->rutaAbsolutaPermitida($nombre);
+
+        if ($permitida === null || !is_file($permitida)) {
+            return null;
+        }
+
+        return $permitida;
+    }
+
+    /**
+     * Devuelve la ruta absoluta de un archivo dentro del directorio de
+     * respaldos, sin exigir que el archivo exista (a diferencia de
+     * rutaAbsolutaValidada). Requiere:
+     *  - nombre válido según el patrón del módulo;
+     *  - que la ruta resuelta quede dentro del directorio de respaldos.
+     *
+     * Permite distinguir "el archivo ya no existe en disco" (ruta válida pero
+     * is_file(...) === false) de "el archivo no pertenece al directorio".
+     */
+    private function rutaAbsolutaPermitida(string $nombre): ?string
+    {
         if (!self::nombreValido($nombre)) {
             return null;
         }
@@ -420,24 +457,53 @@ class BackupService
         $directorio = (string) config('backup.path', 'backups');
         $absoluto = Storage::disk($disk)->path($directorio . '/' . $nombre);
 
-        if (!is_file($absoluto)) {
-            return null;
-        }
-
-        $real = realpath($absoluto);
+        // Si el directorio no existe todavía, no hay contra qué normalizar la
+        // ruta; nombreValido ya bloquea cualquier intento de salida del patrón.
         $realDirectorio = realpath(Storage::disk($disk)->path($directorio));
 
-        if ($real === false || $realDirectorio === false) {
+        if ($realDirectorio === false) {
+            return $absoluto;
+        }
+
+        $realArchivo = realpath($absoluto);
+        $candidata = $realArchivo === false
+            ? $this->rutaHijaDeDirectorio($absoluto, $realDirectorio)
+            : $realArchivo;
+
+        if ($candidata === null) {
             return null;
         }
 
         $separador = DIRECTORY_SEPARATOR;
 
-        if ($real !== $realDirectorio && !str_starts_with($real, rtrim($realDirectorio, $separador) . $separador)) {
+        if ($candidata !== $realDirectorio && !str_starts_with($candidata, rtrim($realDirectorio, $separador) . $separador)) {
             return null;
         }
 
-        return $real;
+        return $candidata;
+    }
+
+    /**
+     * Para un archivo que no existe todavía, deriva su ruta desde el directorio
+     * padre REAL (normalizado) reuniendo el nombre, de modo que la comparación
+     * contra realpath del directorio sea consistente en cualquier sistema.
+     */
+    private function rutaHijaDeDirectorio(string $absoluto, string $realDirectorio): ?string
+    {
+        $realPadre = realpath(dirname($absoluto));
+
+        if ($realPadre === false) {
+            return null;
+        }
+
+        $separador = DIRECTORY_SEPARATOR;
+        $prefijo = rtrim($realDirectorio, $separador) . $separador;
+
+        if ($realPadre !== rtrim($realDirectorio, $separador) && !str_starts_with($realPadre, $prefijo)) {
+            return null;
+        }
+
+        return $realPadre . $separador . basename($absoluto);
     }
 
     /**

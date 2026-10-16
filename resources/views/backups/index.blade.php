@@ -9,7 +9,7 @@
         </button>
     </div>
 
-    <div style="padding: 30px;">
+    <div class="backups-contenido" style="padding: 30px;">
 
         {{-- Estado de la herramienta y configuración --}}
         <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px;">
@@ -55,6 +55,7 @@
                     Todavía no hay respaldos registrados. Crea la primera copia con el botón superior.
                 </div>
             @else
+                <div class="backups-tabla-scroll">
                 <table style="width: 100%; border-collapse: collapse; font-size: 12.5px; text-align: left;">
                     <thead style="background-color: #f4f6f9; border-bottom: 1px solid #ddd;">
                         <tr>
@@ -117,6 +118,7 @@
                         @endforeach
                     </tbody>
                 </table>
+                </div>
             @endif
         </div>
     </div>
@@ -202,6 +204,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 .then(d => {
                     mostrarMensaje(d.exito, d.exito ? d.mensaje : d.error);
                     if (d.exito) setTimeout(() => location.reload(), 1200);
+                })
+                .catch(() => {
+                    mostrarMensaje(false, 'No fue posible eliminar la copia. Comprueba tu sesión e inténtalo de nuevo.');
                 });
         });
     });
