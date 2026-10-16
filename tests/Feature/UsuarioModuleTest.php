@@ -115,9 +115,9 @@ class UsuarioModuleTest extends TestCase
 
     public function test_roles_no_admin_no_pueden_ver_el_listado(): void
     {
-        // El módulo está reservado a ADMIN: GERENTE, CAJERO y MESERO son
-        // redirigidos a inicio (comportamiento actual, no se amplían permisos).
-        foreach (['GERENTE', 'CAJERO', 'MESERO'] as $rol) {
+        // El módulo está reservado a ADMIN y GERENTE ahora
+        // CAJERO, MESERO y COCINERO son redirigidos a inicio
+        foreach (['CAJERO', 'MESERO', 'COCINERO'] as $rol) {
             $this->actingAs($this->usuario($rol))
                 ->get(route('usuarios.index'))
                 ->assertRedirect(route('inicio'));
@@ -614,7 +614,7 @@ class UsuarioModuleTest extends TestCase
         $objetivo = $this->usuario('CAJERO', 'victima', 'Víctima');
         $hashOriginal = DB::table('usuarios')->where('id', $objetivo->id)->value('password_hash');
 
-        foreach (['GERENTE', 'CAJERO', 'MESERO'] as $rol) {
+        foreach (['CAJERO', 'MESERO', 'COCINERO'] as $rol) {
             $actor = $this->usuario($rol);
 
             // Eliminar

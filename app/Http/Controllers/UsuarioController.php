@@ -28,8 +28,8 @@ class UsuarioController extends Controller
         // Rol del usuario autenticado (se resuelve en servidor).
         $rol = strtoupper((string) (Auth::user()->rol->nombre ?? ''));
 
-        // Solamente ADMIN puede acceder.
-        if ($rol !== 'ADMIN') {
+        // ADMIN y GERENTE pueden acceder. Otros roles son rechazados.
+        if (! in_array($rol, ['ADMIN', 'GERENTE'], true)) {
             return redirect()
                 ->route('inicio')
                 ->with('error', 'Acceso denegado.');
@@ -48,7 +48,7 @@ class UsuarioController extends Controller
         // La separación es funcional: una consulta para los usuarios activos y
         // otra para los eliminados, aplicando a ambas la misma búsqueda y el
         // mismo filtro de rol. Nunca se mezclan en la misma sección.
-        $aplicarFiltros = function ($query) use ($busqueda, $rolFiltro) {
+        $aplicarFiltros = function ($query) use ($busqueda, $rolFiltro, $rol) {
             if ($busqueda !== '') {
                 $like = '%'.$busqueda.'%';
                 $query->where(function ($q) use ($like) {
@@ -59,6 +59,11 @@ class UsuarioController extends Controller
 
             if ($rolFiltro !== '') {
                 $query->where('roles.nombre', $rolFiltro);
+            }
+
+            // Restricción para GERENTE: solo puede ver CAJERO, MESERO y COCINERO
+            if ($rol === 'GERENTE') {
+                $query->whereIn('roles.nombre', ['CAJERO', 'MESERO', 'COCINERO']);
             }
 
             return $query;
@@ -100,8 +105,15 @@ class UsuarioController extends Controller
                 ->get();
         }
 
-        // Roles reales del sistema (ADMIN, GERENTE, CAJERO, MESERO).
-        $roles = DB::table('roles')->orderBy('id')->get();
+        // Roles reales del sistema
+        if ($rol === 'GERENTE') {
+            $roles = DB::table('roles')
+                ->whereIn('nombre', ['CAJERO', 'MESERO', 'COCINERO'])
+                ->orderBy('id')
+                ->get();
+        } else {
+            $roles = DB::table('roles')->orderBy('id')->get();
+        }
 
         // Filtros actuales, para repintar el formulario.
         $filtros = [
@@ -131,10 +143,8 @@ class UsuarioController extends Controller
         // Obtenemos el rol del usuario actual (nunca desde el request).
         $rolActual = strtoupper((string) (Auth::user()->rol->nombre ?? ''));
 
-        // El módulo de administración de usuarios está reservado a ADMIN.
-        // Se conserva este comportamiento aunque el menú muestre la opción a
-        // GERENTE; ver nota en index().
-        if ($rolActual !== 'ADMIN') {
+        // Solo ADMIN y GERENTE pueden acceder a la API
+        if (! in_array($rolActual, ['ADMIN', 'GERENTE'], true)) {
             return response()->json([
                 'exito' => false,
                 'error' => 'No autorizado',
@@ -151,6 +161,13 @@ class UsuarioController extends Controller
         */
 
         if ($accion === 'crear') {
+            // Solo ADMIN puede crear usuarios
+            if ($rolActual !== 'ADMIN') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'No autorizado',
+                ], 403);
+            }
 
             $nombre = trim((string) $request->input('nombre'));
             $username = trim((string) $request->input('username'));
@@ -223,6 +240,13 @@ class UsuarioController extends Controller
         */
 
         if ($accion === 'eliminar') {
+            // Solo ADMIN puede desactivar usuarios
+            if ($rolActual !== 'ADMIN') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'No autorizado',
+                ], 403);
+            }
 
             $id = (int) $request->input('id');
 
@@ -280,6 +304,13 @@ class UsuarioController extends Controller
         */
 
         if ($accion === 'reactivar') {
+            // Solo ADMIN puede reactivar usuarios
+            if ($rolActual !== 'ADMIN') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'No autorizado',
+                ], 403);
+            }
 
             $id = (int) $request->input('id');
 
@@ -383,18 +414,25 @@ class UsuarioController extends Controller
                     ], 404);
                 }
 
-                // Matriz de referencia para GERENTE (CAJERO y MESERO).
-                // Hoy es inalcanzable porque el gate superior solo deja pasar a
-                // ADMIN; se conserva documentada por si se autoriza el acceso de
-                // GERENTE en el futuro.
+                // Para GERENTE, solo puede cambiar contraseñas de CAJERO, MESERO y COCINERO
                 if ($rolActual === 'GERENTE') {
                     $rolTarget = strtoupper((string) ($target->rol ?? ''));
-                    if (! in_array($rolTarget, ['CAJERO', 'MESERO'], true)) {
+                    if (! in_array($rolTarget, ['CAJERO', 'MESERO', 'COCINERO'], true)) {
                         return response()->json([
                             'exito' => false,
                             'error' => 'No autorizado para cambiar la contraseña de este usuario.',
                         ], 403);
                     }
+                }
+
+                // Verificar que el objetivo no es ADMIN ni GERENTE cuando cambia un GERENTE
+                // (ya cubierto arriba, pero aseguramos también para ADMIN? ADMIN puede cambiar cualquiera)
+                $rolTargetFinal = strtoupper((string) ($target->rol ?? ''));
+                if ($rolActual === 'GERENTE' && in_array($rolTargetFinal, ['ADMIN', 'GERENTE'], true)) {
+                    return response()->json([
+                        'exito' => false,
+                        'error' => 'No autorizado para cambiar la contraseña de este usuario.',
+                    ], 403);
                 }
 
                 // Actualizamos únicamente la contraseña, siempre hasheada.
@@ -415,6 +453,90 @@ class UsuarioController extends Controller
                 return response()->json([
                     'exito' => false,
                     'error' => 'Error al actualizar la contraseña.',
+                ]);
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | EDITAR USUARIO (nombre y username)
+        |--------------------------------------------------------------------------
+        */
+
+        if ($accion === 'editar') {
+            $usuarioId = (int) $request->input('usuario_id');
+            $nombre = trim((string) $request->input('nombre'));
+            $username = trim((string) $request->input('username'));
+
+            if ($usuarioId <= 0 || $nombre === '' || $username === '') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'Todos los campos son obligatorios.',
+                ]);
+            }
+
+            try {
+                $target = DB::table('usuarios')
+                    ->join('roles', 'usuarios.rol_id', '=', 'roles.id')
+                    ->select('usuarios.id', 'usuarios.username', 'roles.nombre as rol')
+                    ->where('usuarios.id', $usuarioId)
+                    ->first();
+
+                if (! $target) {
+                    return response()->json([
+                        'exito' => false,
+                        'error' => 'Usuario no encontrado.',
+                    ], 404);
+                }
+
+                // Solo ADMIN y GERENTE pueden editar
+                if ($rolActual !== 'ADMIN' && $rolActual !== 'GERENTE') {
+                    return response()->json([
+                        'exito' => false,
+                        'error' => 'No autorizado',
+                    ], 403);
+                }
+
+                // Restricciones para GERENTE
+                if ($rolActual === 'GERENTE') {
+                    $rolTarget = strtoupper((string) ($target->rol ?? ''));
+                    if (! in_array($rolTarget, ['CAJERO', 'MESERO', 'COCINERO'], true)) {
+                        return response()->json([
+                            'exito' => false,
+                            'error' => 'No autorizado para editar este usuario.',
+                        ], 403);
+                    }
+                }
+
+                // Verificar duplicado de username (permitir el mismo del usuario objetivo)
+                $existeDuplicado = DB::table('usuarios')
+                    ->where('username', $username)
+                    ->where('id', '!=', $usuarioId)
+                    ->exists();
+
+                if ($existeDuplicado) {
+                    return response()->json([
+                        'exito' => false,
+                        'error' => 'El usuario (login) ya está en uso.',
+                    ], 422);
+                }
+
+                // Actualizar solo nombre y username
+                DB::table('usuarios')
+                    ->where('id', $usuarioId)
+                    ->update([
+                        'nombre' => $nombre,
+                        'username' => $username,
+                    ]);
+
+                return response()->json([
+                    'exito' => true,
+                    'mensaje' => 'Usuario actualizado correctamente.',
+                ]);
+            } catch (\Exception $e) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'Error al actualizar el usuario.',
                 ]);
             }
         }

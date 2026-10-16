@@ -4,9 +4,13 @@
 <div class="monitor-card" style="max-width: 1000px; margin: 0 auto;">
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center;">
         <span><i class="fas fa-users"></i> Gestión de Usuarios del Sistema</span>
+        @if (strtoupper(auth()->user()->rol->nombre ?? '') === 'ADMIN')
+        @if (strtoupper(auth()->user()->rol->nombre ?? '') === 'ADMIN')
         <button onclick="modalUsuario()" style="background-color: var(--color-success); color: white; border: none; padding: 6px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px;">
             <i class="fas fa-user-plus"></i> Nuevo Usuario
         </button>
+        @endif
+        @endif
     </div>
 
     <div style="padding: 30px;">
@@ -82,22 +86,32 @@
                                     $rolAuth = strtoupper(auth()->user()->rol->nombre ?? '');
                                     $rolTarget = strtoupper($u->rol ?? '');
                                     $puedeCambiarPass = false;
+                                    $puedeEditar = false;
                                     if ($rolAuth === 'ADMIN') {
                                         $puedeCambiarPass = true;
+                                        $puedeEditar = true;
                                     } elseif ($rolAuth === 'GERENTE') {
-                                        if (in_array($rolTarget, ['CAJERO', 'MESERO'], true)) {
+                                        if (in_array($rolTarget, ['CAJERO', 'MESERO', 'COCINERO'], true)) {
                                             $puedeCambiarPass = true;
+                                            $puedeEditar = true;
                                         }
                                     }
                                 @endphp
+                                @if ($puedeEditar)
+                                    <button class="btn-editar-usuario" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" data-username="{{ $u->username }}" style="background: transparent; color: #6c5ce7; border: 1px solid #6c5ce7; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 4px;">
+                                        <i class="fas fa-edit"></i> Editar
+                                    </button>
+                                @endif
                                 @if ($puedeCambiarPass)
                                     <button class="btn-reset-pass" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" style="background: transparent; color: #3f9ce8; border: 1px solid #3f9ce8; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 4px;">
                                         <i class="fas fa-key"></i> Cambiar contraseña
                                     </button>
                                 @endif
+                                @if (strtoupper(auth()->user()->rol->nombre ?? '') === 'ADMIN')
                                 <button class="btn-eliminar-usuario" data-id="{{ $u->id }}" style="background: transparent; color: #fc544b; border: 1px solid #fc544b; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">
                                     <i class="fas fa-trash-alt"></i> Eliminar
                                 </button>
+                                @endif
                             @else
                                 <span style="font-size: 11px; color: #aaa; font-weight: bold;">Tu Sesión</span>
                             @endif
@@ -154,9 +168,11 @@
                                 </span>
                             </td>
                             <td style="padding: 12px 15px; text-align: center; white-space: nowrap;">
+                                @if (strtoupper(auth()->user()->rol->nombre ?? '') === 'ADMIN')
                                 <button class="btn-reactivar-usuario" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" style="background: transparent; color: #1e7e46; border: 1px solid #1e7e46; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;">
                                     <i class="fas fa-undo"></i> Restablecer usuario
                                 </button>
+                                @endif
                             </td>
                         </tr>
                         @empty
@@ -235,6 +251,14 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!btn) return;
 
         modalResetPass(btn.getAttribute('data-id'), btn.getAttribute('data-nombre'));
+    });
+
+    // Botón editar usuario
+    document.body.addEventListener('click', function(e) {
+        let btn = e.target.closest('.btn-editar-usuario');
+        if (!btn) return;
+
+        modalEditarUsuario(btn.getAttribute('data-id'), btn.getAttribute('data-nombre'), btn.getAttribute('data-username'));
     });
 });
 
@@ -415,6 +439,61 @@ function modalUsuario() {
  * coloca con textContent en didOpen(), de modo que caracteres HTML se muestran
  * como texto y no se ejecutan.
  */
+function modalEditarUsuario(usuarioId, nombreUsuario, usernameUsuario) {
+    Swal.fire({
+        title: 'Editar usuario',
+        html: `
+            <div style="text-align: left; font-size: 13px; padding: 10px 0;">
+                <div style="margin-bottom: 15px;">
+                    <label style="font-weight:bold; display:block; margin-bottom: 5px;">Nombre Completo:</label>
+                    <input id="edit-nombre" class="swal2-input" value="${escaparHtml(nombreUsuario || '')}" style="width: 100%; margin: 0; height: 38px; box-sizing: border-box;">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="font-weight:bold; display:block; margin-bottom: 5px;">Usuario (Login):</label>
+                    <input id="edit-username" class="swal2-input" value="${escaparHtml(usernameUsuario || '')}" style="width: 100%; margin: 0; height: 38px; box-sizing: border-box;">
+                </div>
+            </div>
+        `,
+        focusConfirm: false,
+        showCancelButton: true,
+        confirmButtonColor: '#6c5ce7',
+        confirmButtonText: 'Guardar',
+        cancelButtonText: 'Cancelar',
+        preConfirm: () => {
+            return {
+                nombre: document.getElementById('edit-nombre').value.trim(),
+                username: document.getElementById('edit-username').value.trim()
+            }
+        }
+    }).then((result) => {
+        if (result.isConfirmed) {
+            const val = result.value;
+            if (!val.nombre || !val.username) {
+                Swal.showValidationMessage('Todos los campos son obligatorios');
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('accion', 'editar');
+            fd.append('usuario_id', usuarioId);
+            fd.append('nombre', val.nombre);
+            fd.append('username', val.username);
+
+            fetch('{{ route("usuarios.api") }}', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.exito) {
+                        Swal.fire('¡Listo!', d.mensaje || 'Usuario actualizado correctamente.', 'success').then(() => location.reload());
+                    } else {
+                        Swal.fire('Error', d.error || 'No se pudo completar la operación.', 'error');
+                    }
+                })
+                .catch(() => Swal.fire('Error', 'No se pudo conectar con el servidor.', 'error'));
+        }
+    });
+}
+
 function modalResetPass(usuarioId, nombreUsuario) {
     Swal.fire({
         title: 'Cambiar contraseña',
