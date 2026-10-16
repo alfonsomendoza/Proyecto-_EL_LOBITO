@@ -83,6 +83,51 @@
                 </tbody>
             </table>
         </div>
+
+        {{-- PRODUCTOS ELIMINADOS (activo=0): se consultan aparte y se reactivan --}}
+        @php $puedeGestionar = in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE'], true); @endphp
+        <div style="margin-top: 25px;">
+            <button type="button" onclick="toggleEliminados()" style="background: #f8f9fa; color: #34395e; border: 1px solid #e3e6f0; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px;">
+                <i class="fas fa-trash-restore"></i> Ver productos eliminados ({{ $productosEliminados->count() }})
+            </button>
+
+            <div id="panel-eliminados" style="display: none; margin-top: 15px; border-radius: 8px; border: 1px solid #f5c2c7; overflow: hidden;">
+                <div style="background: #fdecea; padding: 10px 15px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #f5c2c7;">
+                    <i class="fas fa-search" style="color: #aeb4be; font-size: 15px;"></i>
+                    <input type="text" id="buscador-eliminados" placeholder="Buscar producto eliminado por nombre..." style="width: 100%; border: none; background: transparent; outline: none; font-size: 14px; color: #34395e;">
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+                    <thead style="background-color: #f4f6f9; border-bottom: 1px solid #ddd;">
+                        <tr>
+                            <th style="padding: 12px 15px;">Nombre del Producto</th>
+                            <th style="padding: 12px 15px;">Categoría (Grupo)</th>
+                            <th style="padding: 12px 15px;">Precio (C$)</th>
+                            @if($puedeGestionar)
+                                <th style="padding: 12px 15px; text-align: center;">Acciones</th>
+                            @endif
+                        </tr>
+                    </thead>
+                    <tbody id="tabla-eliminados">
+                        @forelse($productosEliminados as $p)
+                        <tr style="border-bottom: 1px solid #f0f0f0; background: #fffdfd;">
+                            <td style="padding: 12px 15px; font-weight: 600;" class="td-nombre-eliminado">{{ $p->nombre }}</td>
+                            <td style="padding: 12px 15px;">{{ $p->categoria->nombre ?? 'Sin categoría' }}</td>
+                            <td style="padding: 12px 15px; color: var(--color-success); font-weight: bold;">C${{ number_format((float)$p->precio, 2) }}</td>
+                            @if($puedeGestionar)
+                            <td style="padding: 12px 15px; text-align: center; white-space: nowrap;">
+                                <button class="btn-reactivar-producto" data-id="{{ $p->id }}" style="background: transparent; color: #47c363; border: 1px solid #47c363; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; font-size: 12px;">
+                                    <i class="fas fa-undo"></i> Reactivar
+                                </button>
+                            </td>
+                            @endif
+                        </tr>
+                        @empty
+                        <tr><td colspan="{{ $puedeGestionar ? 4 : 3 }}" style="padding: 15px; text-align: center; color: #aaa;">No hay productos eliminados.</td></tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -121,9 +166,23 @@ document.addEventListener('DOMContentLoaded', function() {
     buscador.addEventListener('input', filtrarTabla);
     filtroCategoria.addEventListener('change', filtrarTabla);
 
+    // Buscador del listado de productos eliminados.
+    const buscadorEliminados = document.getElementById('buscador-eliminados');
+    if (buscadorEliminados) {
+        buscadorEliminados.addEventListener('input', function() {
+            const texto = this.value.toLowerCase().trim();
+            document.querySelectorAll('#tabla-eliminados tr').forEach(fila => {
+                const celda = fila.querySelector('.td-nombre-eliminado');
+                if (!celda) return; // fila de "no hay eliminados"
+                fila.style.display = celda.textContent.toLowerCase().includes(texto) ? '' : 'none';
+            });
+        });
+    }
+
     document.body.addEventListener('click', function(e) {
         let btnEditar = e.target.closest('.btn-editar-producto');
         let btnEliminar = e.target.closest('.btn-eliminar-producto');
+        let btnReactivar = e.target.closest('.btn-reactivar-producto');
 
         if (btnEditar) {
             modalProducto('editar', btnEditar.getAttribute('data-id'), btnEditar.getAttribute('data-cat'), btnEditar.getAttribute('data-nombre'), btnEditar.getAttribute('data-precio'), btnEditar.getAttribute('data-rc'));
@@ -131,8 +190,19 @@ document.addEventListener('DOMContentLoaded', function() {
         if (btnEliminar) {
             eliminarRegistro('eliminar_producto', btnEliminar.getAttribute('data-id'));
         }
+        if (btnReactivar) {
+            reactivarProducto(btnReactivar.getAttribute('data-id'));
+        }
     });
 });
+
+// Muestra u oculta el panel de productos eliminados.
+function toggleEliminados() {
+    const panel = document.getElementById('panel-eliminados');
+    if (panel) {
+        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+    }
+}
 
 function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '', rc = 0) {
     let options = '<option value="">-- Seleccionar Categoría --</option>';
@@ -232,7 +302,43 @@ function eliminarRegistro(accion, id) {
             fd.append('id', id);
             fetch('{{ route("catalogo.api") }}', { method: 'POST', body: fd })
             .then(res => res.json())
-            .then(data => data.exito ? location.reload() : Swal.fire('Error', data.error, 'error'));
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Listo!', data.mensaje || 'Producto eliminado.', 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Error', data.error, 'error');
+                }
+            });
+        }
+    });
+}
+
+// Reactiva un producto eliminado (mismo registro, sin duplicar).
+function reactivarProducto(id) {
+    Swal.fire({
+        title: '¿Reactivar producto?',
+        text: 'El producto volverá a aparecer en el catálogo normal.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#47c363',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Sí, reactivar',
+        cancelButtonText: 'Cancelar'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('accion', 'reactivar_producto');
+            fd.append('id', id);
+            fetch('{{ route("catalogo.api") }}', { method: 'POST', body: fd })
+            .then(res => res.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Listo!', data.mensaje || 'Producto reactivado.', 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Error', data.error, 'error');
+                }
+            });
         }
     });
 }

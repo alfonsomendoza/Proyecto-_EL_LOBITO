@@ -11,16 +11,26 @@ use Illuminate\Support\Facades\Log;
 class CatalogoController extends Controller
 {
     // Método para mostrar la vista con categorías y productos
-   public function index()
+    public function index()
     {
-        // Traemos todas las categorías (sin filtrar por 'activo')
+        // Todas las categorías (las categorías sí pueden quedar inactivas).
         $categorias = Categoria::all();
-        
-        // Traemos los productos con su categoría (asumiendo que productos tampoco tiene 'activo')
-        // Si productos SÍ tiene la columna 'activo', vuelve a poner ->where('activo', 1) antes de ->get()
-        $productos = Producto::with('categoria')->get();
-        
-        return view('catalogo.index', compact('categorias', 'productos'));
+
+        // Catálogo normal: SOLO productos activos. Un producto eliminado
+        // (activo=0) no debe seguir apareciendo en la lista principal.
+        $productos = Producto::with('categoria')
+            ->where('activo', 1)
+            ->orderBy('nombre')
+            ->get();
+
+        // Listado aparte de productos eliminados (activo=0), para consultarlos
+        // y poder reactivarlos. No se mezclan con los activos.
+        $productosEliminados = Producto::with('categoria')
+            ->where('activo', 0)
+            ->orderBy('nombre')
+            ->get();
+
+        return view('catalogo.index', compact('categorias', 'productos', 'productosEliminados'));
     }
 
     // Método para manejar Crear, Editar y Eliminar del catálogo
@@ -57,36 +67,71 @@ class CatalogoController extends Controller
                     'precio'       => 'required|numeric|min:0',
                 ]);
 
-                // updateOrCreate filtrado por 'id' garantiza que SOLO se actualiza
-                // el producto seleccionado (o se crea uno nuevo cuando no llega id).
-                Producto::updateOrCreate(
-                    ['id' => $request->id],
-                    [
-                        'categoria_id'    => $request->categoria_id,
-                        'nombre'          => $request->nombre,
-                        'precio'          => $request->precio,
-                        // 1 si la casilla está marcada, 0 si está desmarcada.
-                        'requiere_cocina' => $request->boolean('requiere_cocina') ? 1 : 0,
-                        'activo'          => 1
-                    ]
-                );
+                // Datos comunes. NO se incluye 'activo' aquí: editar nunca debe
+                // reactivar un producto eliminado de forma silenciosa.
+                $datos = [
+                    'categoria_id'    => $request->categoria_id,
+                    'nombre'          => $request->nombre,
+                    'precio'          => $request->precio,
+                    // 1 si la casilla está marcada, 0 si está desmarcada.
+                    'requiere_cocina' => $request->boolean('requiere_cocina') ? 1 : 0,
+                ];
+
+                if ($request->accion === 'editar_producto' && (int) $request->id > 0) {
+                    // Se actualiza SOLO el producto indicado (mismo ID, sin duplicar).
+                    $producto = Producto::find((int) $request->id);
+                    if (!$producto) {
+                        return response()->json(['exito' => false, 'error' => 'El producto no existe.'], 404);
+                    }
+                    // update() no toca la columna 'activo': un producto eliminado
+                    // permanece eliminado hasta que se use "reactivar".
+                    $producto->update($datos);
+                } else {
+                    // Producto nuevo: siempre nace activo.
+                    Producto::create($datos + ['activo' => 1]);
+                }
+
                 return response()->json(['exito' => true]);
             }
 
-            // --- ELIMINACIÓN DE PRODUCTOS ---
+            // --- ELIMINACIÓN LÓGICA DE PRODUCTOS ---
             if ($request->accion === 'eliminar_producto') {
-                Producto::where('id', $request->id)->update(['activo' => 0]);
-                return response()->json(['exito' => true]);
+                $producto = Producto::find((int) $request->id);
+
+                // No se reporta éxito si el producto no existe o la fila no cambió.
+                if (!$producto) {
+                    return response()->json(['exito' => false, 'error' => 'El producto no existe.'], 404);
+                }
+
+                // Eliminación lógica: conserva ID, nombre, categoría e historial.
+                // No borra la fila ni toca el stock.
+                $producto->update(['activo' => 0]);
+
+                return response()->json(['exito' => true, 'mensaje' => 'Producto eliminado.']);
             }
 
-            return response()->json(['exito' => false, 'error' => 'Acción no reconocida.']);
+            // --- REACTIVACIÓN DE PRODUCTOS ---
+            if ($request->accion === 'reactivar_producto') {
+                $producto = Producto::find((int) $request->id);
+
+                if (!$producto) {
+                    return response()->json(['exito' => false, 'error' => 'El producto no existe.'], 404);
+                }
+
+                // Reactiva el MISMO registro: no se crea otro ni se toca el stock.
+                $producto->update(['activo' => 1]);
+
+                return response()->json(['exito' => true, 'mensaje' => 'Producto reactivado.']);
+            }
+
+            return response()->json(['exito' => false, 'error' => 'Acción no reconocida.'], 422);
 
         } catch (\Illuminate\Validation\ValidationException $e) {
             // Errores de validación: se devuelven legibles para el front-end.
-            return response()->json(['exito' => false, 'error' => $e->validator->errors()->first()]);
+            return response()->json(['exito' => false, 'error' => $e->validator->errors()->first()], 422);
         } catch (\Exception $e) {
             Log::error('Error en CatalogoController: ' . $e->getMessage());
-            return response()->json(['exito' => false, 'error' => 'Error en la base de datos al guardar.']);
+            return response()->json(['exito' => false, 'error' => 'Error en la base de datos al guardar.'], 500);
         }
     }
 
