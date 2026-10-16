@@ -4,9 +4,11 @@
 <div class="monitor-card" style="max-width: 1000px; margin: 0 auto;">
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center;">
         <span><i class="fas fa-address-book"></i> Directorio de Clientes</span>
+        @if (in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true))
         <button onclick="modalCliente('crear')" style="background-color: var(--color-success); color: white; border: none; padding: 6px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px;">
             <i class="fas fa-plus"></i> Nuevo Cliente
         </button>
+        @endif
     </div>
     <div style="padding: 30px;">
         
@@ -59,6 +61,53 @@
                 </tbody>
             </table>
         </div>
+
+        {{-- CLIENTES ELIMINADOS (activo=0): se consultan aparte y se reactivan --}}
+        @php $puedeGestionarClientes = in_array(auth()->user()->rol->nombre ?? '', ['ADMIN', 'GERENTE'], true); @endphp
+        <div style="margin-top: 25px;">
+            <button type="button" onclick="toggleEliminadosClientes()" style="background: #f8f9fa; color: #34395e; border: 1px solid #e3e6f0; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px;">
+                <i class="fas fa-trash-restore"></i> Ver clientes eliminados ({{ $clientesEliminados->count() }})
+            </button>
+
+            <div id="panel-eliminados-clientes" style="display: none; margin-top: 15px; border-radius: 8px; border: 1px solid #f5c2c7; overflow: hidden;">
+                <div style="background: #fdecea; padding: 10px 15px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #f5c2c7;">
+                    <i class="fas fa-search" style="color: #aeb4be; font-size: 15px;"></i>
+                    <input type="text" id="buscador-eliminados-clientes" placeholder="Buscar cliente eliminado por nombre, teléfono o identificación..." style="width: 100%; border: none; background: transparent; outline: none; font-size: 14px; color: #34395e;">
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 13px; text-align: left;">
+                    <thead style="background-color: #f4f6f9; border-bottom: 1px solid #ddd;">
+                        <tr>
+                            <th style="padding: 12px 15px;">Nombre</th>
+                            <th style="padding: 12px 15px;">Teléfono</th>
+                            <th style="padding: 12px 15px;">RUC / Cédula</th>
+                            <th style="padding: 12px 15px;">Dirección</th>
+                            @if ($puedeGestionarClientes)
+                                <th style="padding: 12px 15px; text-align: center;">Acciones</th>
+                            @endif
+                        </tr>
+                    </thead>
+                    <tbody id="tabla-eliminados-clientes">
+                        @forelse($clientesEliminados as $c)
+                        <tr style="border-bottom: 1px solid #f0f0f0; background: #fffdfd;">
+                            <td style="padding: 12px 15px; font-weight: 600;">{{ $c->nombre }}</td>
+                            <td style="padding: 12px 15px;">{{ $c->telefono ?? '-' }}</td>
+                            <td style="padding: 12px 15px;">{{ $c->identificacion ?? '-' }}</td>
+                            <td style="padding: 12px 15px;">{{ $c->direccion ?? '-' }}</td>
+                            @if ($puedeGestionarClientes)
+                            <td style="padding: 12px 15px; text-align: center; white-space: nowrap;">
+                                <button class="btn-reactivar-cliente" data-id="{{ $c->id }}" style="background: transparent; color: #47c363; border: 1px solid #47c363; padding: 5px 10px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; font-size: 12px;">
+                                    <i class="fas fa-undo"></i> Reactivar
+                                </button>
+                            </td>
+                            @endif
+                        </tr>
+                        @empty
+                        <tr><td colspan="{{ $puedeGestionarClientes ? 5 : 4 }}" style="padding: 15px; text-align: center; color: #aaa;">No hay clientes eliminados.</td></tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -78,9 +127,21 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // Buscador del listado de clientes eliminados.
+    const buscadorEliminados = document.getElementById('buscador-eliminados-clientes');
+    if (buscadorEliminados) {
+        buscadorEliminados.addEventListener('input', function() {
+            const texto = this.value.toLowerCase().trim();
+            document.querySelectorAll('#tabla-eliminados-clientes tr').forEach(fila => {
+                fila.style.display = fila.textContent.toLowerCase().includes(texto) ? '' : 'none';
+            });
+        });
+    }
+
     document.body.addEventListener('click', function(e) {
         let btnEditar = e.target.closest('.btn-editar-cliente');
         let btnEliminar = e.target.closest('.btn-eliminar-cliente');
+        let btnReactivar = e.target.closest('.btn-reactivar-cliente');
 
         if (btnEditar) {
             modalCliente(
@@ -96,8 +157,20 @@ document.addEventListener('DOMContentLoaded', function() {
         if (btnEliminar) {
             eliminarCliente(btnEliminar.getAttribute('data-id'));
         }
+
+        if (btnReactivar) {
+            reactivarCliente(btnReactivar.getAttribute('data-id'));
+        }
     });
 });
+
+// Muestra u oculta el panel de clientes eliminados.
+function toggleEliminadosClientes() {
+    const panel = document.getElementById('panel-eliminados-clientes');
+    if (panel) {
+        panel.style.display = (panel.style.display === 'none' || panel.style.display === '') ? 'block' : 'none';
+    }
+}
 
 function modalCliente(accion, id = 0, nombre = '', tel = '', ident = '', dir = '') {
     if(tel === 'null') tel = '';
@@ -193,6 +266,37 @@ function eliminarCliente(id) {
             .then(data => {
                 if (data.exito) location.reload();
                 else Swal.fire('Error', data.error, 'error');
+            });
+        }
+    });
+}
+
+// Reactiva un cliente eliminado (mismo registro, sin duplicar).
+function reactivarCliente(id) {
+    Swal.fire({
+        title: '¿Reactivar cliente?',
+        text: 'El cliente volverá a aparecer en el directorio.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#47c363',
+        cancelButtonColor: '#6c757d',
+        confirmButtonText: 'Sí, reactivar',
+        cancelButtonText: 'Cancelar'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            const formData = new FormData();
+            formData.append('_token', '{{ csrf_token() }}');
+            formData.append('accion', 'reactivar');
+            formData.append('id', id);
+
+            fetch('{{ route("clientes.api") }}', { method: 'POST', body: formData })
+            .then(res => res.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Listo!', data.mensaje || 'Cliente reactivado.', 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Error', data.error, 'error');
+                }
             });
         }
     });
