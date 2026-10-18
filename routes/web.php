@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\InventarioController;
 use App\Http\Controllers\ConfiguracionController;
 use App\Http\Controllers\GastoController;
 
@@ -185,4 +186,33 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/configuracion/api', [ConfiguracionController::class, 'actualizar'])
         ->name('configuracion.api');
+
+    // ------------------------------------------------------------------
+    // MÓDULO DE INVENTARIO (informativo; nunca bloquea la venta).
+    // ADMIN, GERENTE y CAJERO consultan; solo ADMIN y GERENTE administran
+    // (control, carga inicial, mínimo y ajustes). El rol se valida en backend.
+    // ------------------------------------------------------------------
+    Route::get('/inventario', [InventarioController::class, 'index'])
+        ->name('inventario.index');
+
+    // El historial se declara antes de las rutas con {producto} para evitar
+    // que "historial" se interprete como un id de producto.
+    Route::get('/inventario/historial', [InventarioController::class, 'historial'])
+        ->name('inventario.historial');
+
+    Route::post('/inventario/{producto}/control', [InventarioController::class, 'cambiarControl'])
+        ->whereNumber('producto')
+        ->name('inventario.control');
+
+    Route::post('/inventario/{producto}/carga-inicial', [InventarioController::class, 'cargaInicial'])
+        ->whereNumber('producto')
+        ->name('inventario.cargaInicial');
+
+    Route::post('/inventario/{producto}/minimo', [InventarioController::class, 'configurarMinimo'])
+        ->whereNumber('producto')
+        ->name('inventario.minimo');
+
+    Route::post('/inventario/{producto}/ajuste', [InventarioController::class, 'ajuste'])
+        ->whereNumber('producto')
+        ->name('inventario.ajuste');
 });

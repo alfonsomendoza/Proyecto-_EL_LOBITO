@@ -81,6 +81,16 @@
                         <i class="fas fa-box-open"></i> Menú (Productos)
                     </a>
                 </li>
+                {{-- Inventario: ADMIN, GERENTE y CAJERO consultan; solo
+                     ADMIN/GERENTE administran (validado en el backend). Se
+                     oculta el enlace si el módulo está deshabilitado. --}}
+                @if ($inventarioHabilitado)
+                <li>
+                    <a href="{{ route('inventario.index') }}" class="{{ request()->routeIs('inventario.*') ? 'active' : '' }}">
+                        <i class="fas fa-boxes-stacked"></i> Inventario
+                    </a>
+                </li>
+                @endif
             @endif
 
             @if (in_array($rol, ['ADMIN', 'GERENTE']))
