@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\FacturaController;
 use App\Http\Controllers\ResumenDiarioController;
 use App\Http\Controllers\CajaCierreController;
 use App\Http\Controllers\CocinaController;
@@ -265,4 +266,15 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/reportes/resumen/ticket', [ResumenDiarioController::class, 'ticket'])
         ->name('reportes.resumen.ticket');
+
+    // ------------------------------------------------------------------
+    // HISTORIAL DE FACTURAS.
+    // ADMIN y GERENTE listan e imprimen; CAJERO solo imprime una factura.
+    // El rol se valida SIEMPRE en FacturaController. Es de SOLO LECTURA.
+    // ------------------------------------------------------------------
+    Route::get('/facturas', [FacturaController::class, 'index'])
+        ->name('facturas.index');
+
+    Route::get('/facturas/ticket', [FacturaController::class, 'ticket'])
+        ->name('facturas.ticket');
 });
