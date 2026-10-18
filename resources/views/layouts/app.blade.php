@@ -10,6 +10,13 @@
 <body>
     @php
         $rol = auth()->user()->rol->nombre ?? 'MESERO';
+
+        // Interruptores de módulos (solo ADMIN los cambia). Se consultan en el
+        // backend para decidir si se muestra el enlace; la autorización real
+        // siempre se valida en el controlador correspondiente.
+        $configuracion = app(\App\Services\ConfiguracionService::class);
+        $cocinaDigitalHabilitada = $configuracion->cocinaDigitalHabilitada();
+        $inventarioHabilitado = $configuracion->inventarioHabilitado();
     @endphp
 
     <aside class="sidebar">
@@ -97,6 +104,11 @@
                 <li>
                     <a href="{{ route('roles.index') }}" class="{{ request()->routeIs('roles.index') ? 'active' : '' }}">
                         <i class="fas fa-user-shield"></i> Roles
+                    </a>
+                </li>
+                <li>
+                    <a href="{{ route('configuracion.index') }}" class="{{ request()->routeIs('configuracion.*') ? 'active' : '' }}">
+                        <i class="fas fa-sliders"></i> Configuración
                     </a>
                 </li>
                 @endif

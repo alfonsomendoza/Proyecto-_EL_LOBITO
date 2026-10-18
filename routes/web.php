@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\ConfiguracionController;
 use App\Http\Controllers\GastoController;
 
 Route::middleware(['guest'])->group(function () {
@@ -173,4 +174,15 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/gastos/ticket/{id}', [GastoController::class, 'ticketGasto'])
         ->whereNumber('id')
         ->name('gastos.ticket.gasto');
+
+    // ------------------------------------------------------------------
+    // CONFIGURACIÓN DE MÓDULOS (EXCLUSIVA de ADMIN).
+    // Habilita/deshabilita cocina digital e inventario de forma independiente.
+    // El rol se valida en el backend (ConfiguracionController).
+    // ------------------------------------------------------------------
+    Route::get('/configuracion', [ConfiguracionController::class, 'index'])
+        ->name('configuracion.index');
+
+    Route::post('/configuracion/api', [ConfiguracionController::class, 'actualizar'])
+        ->name('configuracion.api');
 });
