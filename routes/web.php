@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\ResumenDiarioController;
 use App\Http\Controllers\CajaCierreController;
 use App\Http\Controllers\CocinaController;
 use App\Http\Controllers\InventarioController;
@@ -253,4 +254,15 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/caja/cierres/{id}/anular', [CajaCierreController::class, 'anular'])
         ->whereNumber('id')
         ->name('caja.cierre.anular');
+
+    // ------------------------------------------------------------------
+    // OPERACIONES — RESUMEN DEL DÍA (varios turnos de una fecha).
+    // Solo ADMIN y GERENTE consultan e imprimen; el rol se valida SIEMPRE
+    // en ResumenDiarioController. Es de SOLO LECTURA.
+    // ------------------------------------------------------------------
+    Route::get('/reportes/resumen', [ResumenDiarioController::class, 'index'])
+        ->name('reportes.resumen');
+
+    Route::get('/reportes/resumen/ticket', [ResumenDiarioController::class, 'ticket'])
+        ->name('reportes.resumen.ticket');
 });
