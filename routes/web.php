@@ -4,21 +4,21 @@ use Illuminate\Support\Facades\Route;
 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CajaAperturaController;
+use App\Http\Controllers\CajaCierreController;
 use App\Http\Controllers\ClienteController;
 use App\Http\Controllers\CatalogoController;
+use App\Http\Controllers\FacturaController;
+use App\Http\Controllers\ResumenDiarioController;
 use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\RolController;
 use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
-use App\Http\Controllers\FacturaController;
-use App\Http\Controllers\ResumenDiarioController;
-use App\Http\Controllers\CajaCierreController;
-use App\Http\Controllers\CocinaController;
-use App\Http\Controllers\InventarioController;
-use App\Http\Controllers\ConfiguracionController;
 use App\Http\Controllers\GastoController;
+use App\Http\Controllers\InventarioController;
+use App\Http\Controllers\CocinaController;
+use App\Http\Controllers\ConfiguracionController;
 
 Route::middleware(['guest'])->group(function () {
     Route::get('/login', [AuthController::class, 'showLoginForm'])
@@ -41,6 +41,14 @@ Route::middleware(['auth'])->group(function () {
     })->name('inicio');
 
     Route::get('/caja/apertura', function () {
+        // Autorización en servidor: la pantalla de caja muestra montos.
+        // COCINERO no debe acceder. Se conserva el acceso de los demás roles.
+        $rol = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            abort(403, 'No tienes permiso para acceder a la caja.');
+        }
+
         return view('caja.apertura');
     })->name('caja.apertura');
 
@@ -49,6 +57,46 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/caja/ticket-apertura', [CajaAperturaController::class, 'imprimirTicketApertura'])
         ->name('caja.ticket_apertura');
+
+    // ------------------------------------------------------------------
+    // CIERRE DE CAJA (arqueo del turno).
+    // ADMIN, GERENTE y CAJERO cierran e imprimen; solo ADMIN y GERENTE
+    // anulan un cierre. El rol se valida SIEMPRE en CajaCierreController.
+    // ------------------------------------------------------------------
+    Route::get('/caja/cierre', [CajaCierreController::class, 'index'])
+        ->name('caja.cierre');
+
+    Route::post('/caja/cierre', [CajaCierreController::class, 'registrar'])
+        ->name('caja.cierre.registrar');
+
+    Route::get('/caja/cierre/ticket', [CajaCierreController::class, 'ticket'])
+        ->name('caja.cierre.ticket');
+
+    Route::post('/caja/cierres/{id}/anular', [CajaCierreController::class, 'anular'])
+        ->whereNumber('id')
+        ->name('caja.cierre.anular');
+
+    // ------------------------------------------------------------------
+    // OPERACIONES — RESUMEN DEL DÍA (varios turnos de una fecha).
+    // Solo ADMIN y GERENTE consultan e imprimen; el rol se valida SIEMPRE
+    // en ResumenDiarioController. Es de SOLO LECTURA.
+    // ------------------------------------------------------------------
+    Route::get('/reportes/resumen', [ResumenDiarioController::class, 'index'])
+        ->name('reportes.resumen');
+
+    Route::get('/reportes/resumen/ticket', [ResumenDiarioController::class, 'ticket'])
+        ->name('reportes.resumen.ticket');
+
+    // ------------------------------------------------------------------
+    // HISTORIAL DE FACTURAS.
+    // ADMIN y GERENTE listan e imprimen; CAJERO solo imprime una factura.
+    // El rol se valida SIEMPRE en FacturaController. Es de SOLO LECTURA.
+    // ------------------------------------------------------------------
+    Route::get('/facturas', [FacturaController::class, 'index'])
+        ->name('facturas.index');
+
+    Route::get('/facturas/ticket', [FacturaController::class, 'ticket'])
+        ->name('facturas.ticket');
 
     Route::get('/clientes', [ClienteController::class, 'index'])
         ->name('clientes.index');
@@ -114,6 +162,17 @@ Route::middleware(['auth'])->group(function () {
     // Traslado de cuentas entre mesas (ADMIN, GERENTE y CAJERO).
     Route::post('/pos/cuentas/{cuentaId}/trasladar', [VentaController::class, 'trasladarCuenta'])
         ->name('pos.cuentas.trasladar');
+
+    // (Eliminadas) POST /pos/cuentas/{cuentaId}/trasladar-individual y
+    // POST /pos/cuentas/{cuentaId}/dividir.
+    //
+    // Apuntaban a VentaController@trasladarCuentaIndividual y a
+    // VentaController@dividirCuenta, métodos que NO existen: cualquier
+    // petición a esas rutas terminaba en un error 500.
+    //
+    // Las operaciones reales siguen disponibles y sin cambios:
+    //  - Traslado de la mesa completa -> pos.cuentas.trasladar (trasladarCuenta)
+    //  - División de cuentas          -> pos.cuentas.dividir (guardarDivision)
 
     // Anulación lógica de un producto individual (solo ADMIN y GERENTE).
     Route::post('/pos/detalle/{detalleId}/anular', [VentaController::class, 'anularDetalle'])
@@ -181,17 +240,6 @@ Route::middleware(['auth'])->group(function () {
         ->name('gastos.ticket.gasto');
 
     // ------------------------------------------------------------------
-    // CONFIGURACIÓN DE MÓDULOS (EXCLUSIVA de ADMIN).
-    // Habilita/deshabilita cocina digital e inventario de forma independiente.
-    // El rol se valida en el backend (ConfiguracionController).
-    // ------------------------------------------------------------------
-    Route::get('/configuracion', [ConfiguracionController::class, 'index'])
-        ->name('configuracion.index');
-
-    Route::post('/configuracion/api', [ConfiguracionController::class, 'actualizar'])
-        ->name('configuracion.api');
-
-    // ------------------------------------------------------------------
     // MÓDULO DE INVENTARIO (informativo; nunca bloquea la venta).
     // ADMIN, GERENTE y CAJERO consultan; solo ADMIN y GERENTE administran
     // (control, carga inicial, mínimo y ajustes). El rol se valida en backend.
@@ -239,42 +287,13 @@ Route::middleware(['auth'])->group(function () {
         ->name('cocina.api.estado');
 
     // ------------------------------------------------------------------
-    // CIERRE DE CAJA (arqueo del turno).
-    // ADMIN, GERENTE y CAJERO cierran e imprimen; solo ADMIN y GERENTE
-    // anulan un cierre. El rol se valida SIEMPRE en CajaCierreController.
+    // CONFIGURACIÓN DE MÓDULOS (EXCLUSIVA de ADMIN).
+    // Habilita/deshabilita cocina digital e inventario de forma independiente.
+    // El rol se valida en el backend (ConfiguracionController).
     // ------------------------------------------------------------------
-    Route::get('/caja/cierre', [CajaCierreController::class, 'index'])
-        ->name('caja.cierre');
+    Route::get('/configuracion', [ConfiguracionController::class, 'index'])
+        ->name('configuracion.index');
 
-    Route::post('/caja/cierre', [CajaCierreController::class, 'registrar'])
-        ->name('caja.cierre.registrar');
-
-    Route::get('/caja/cierre/ticket', [CajaCierreController::class, 'ticket'])
-        ->name('caja.cierre.ticket');
-
-    Route::post('/caja/cierres/{id}/anular', [CajaCierreController::class, 'anular'])
-        ->whereNumber('id')
-        ->name('caja.cierre.anular');
-
-    // ------------------------------------------------------------------
-    // OPERACIONES — RESUMEN DEL DÍA (varios turnos de una fecha).
-    // Solo ADMIN y GERENTE consultan e imprimen; el rol se valida SIEMPRE
-    // en ResumenDiarioController. Es de SOLO LECTURA.
-    // ------------------------------------------------------------------
-    Route::get('/reportes/resumen', [ResumenDiarioController::class, 'index'])
-        ->name('reportes.resumen');
-
-    Route::get('/reportes/resumen/ticket', [ResumenDiarioController::class, 'ticket'])
-        ->name('reportes.resumen.ticket');
-
-    // ------------------------------------------------------------------
-    // HISTORIAL DE FACTURAS.
-    // ADMIN y GERENTE listan e imprimen; CAJERO solo imprime una factura.
-    // El rol se valida SIEMPRE en FacturaController. Es de SOLO LECTURA.
-    // ------------------------------------------------------------------
-    Route::get('/facturas', [FacturaController::class, 'index'])
-        ->name('facturas.index');
-
-    Route::get('/facturas/ticket', [FacturaController::class, 'ticket'])
-        ->name('facturas.ticket');
+    Route::post('/configuracion/api', [ConfiguracionController::class, 'actualizar'])
+        ->name('configuracion.api');
 });

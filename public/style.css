@@ -107,8 +107,15 @@ body { background-color: var(--bg-body); display: flex; height: 100vh; overflow:
 /* --- MÓDULO RESPALDOS: TABLA CON DESPLAZAMIENTO CONTENIDO --- */
 .backups-tabla-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
+/* --- RESPONSIVE --- */
+/* Pantallas medianas (tablets) */
+@media (max-width: 900px) {
+    .content-area { padding: 20px; }
+}
+
 /* Móviles */
 @media (max-width: 768px) {
+    .content-area { padding: 12px; }
     .backups-contenido { padding: 15px !important; }
     .backups-contenido .backups-tabla-scroll { -webkit-overflow-scrolling: touch; }
 
@@ -119,6 +126,7 @@ body { background-color: var(--bg-body); display: flex; height: 100vh; overflow:
 
 /* Teléfonos pequeños */
 @media (max-width: 480px) {
+    .content-area { padding: 8px; }
     .backups-contenido { padding: 10px !important; }
     .backups-contenido code { font-size: 10px; }
     #btn-crear-backup { width: 100%; }
