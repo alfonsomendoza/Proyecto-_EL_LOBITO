@@ -13,6 +13,14 @@ class CatalogoController extends Controller
     // Método para mostrar la vista con categorías y productos
     public function index()
     {
+        // Autorización en servidor: el catálogo muestra precios. COCINERO no
+        // debe consultarlo. ADMIN, GERENTE, CAJERO y MESERO conservan el acceso.
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            abort(403, 'No tienes permiso para ver el catálogo.');
+        }
+
         // Todas las categorías (las categorías sí pueden quedar inactivas).
         $categorias = Categoria::all();
 

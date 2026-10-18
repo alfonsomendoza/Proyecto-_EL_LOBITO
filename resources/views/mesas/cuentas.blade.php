@@ -46,7 +46,10 @@
     .contenido-vacio { padding: 50px 20px; text-align: center; color: #98a6ad; }
 </style>
 
-<div id="panel-cuentas" class="monitor-card" style="max-width: 1200px; margin: 0 auto;">
+<div id="panel-cuentas" class="monitor-card"
+     style="max-width: 1200px; margin: 0 auto;"
+     data-venta-id="{{ (int) $venta->id }}"
+     data-mesas-destino="{{ $mesasDestino->map(fn ($m) => ['id' => $m->id, 'numero' => $m->numero])->values()->toJson() }}">
 
     {{-- Avisos de acciones de la Fase 2 (crear subcuenta), si los hay. --}}
     @if(session('success'))
@@ -110,11 +113,38 @@
         </div>
     </div>
 
-    @if($cuentas->isEmpty())
+    @if($mesaVacia)
+        {{--
+            Venta activa SIN consumos: flujo de recuperación de mesa vacía.
+            Se reutiliza liberarMesa() (mismas validaciones y permisos que el
+            botón "Liberar" del POS). Nunca libera con consumos, asignaciones
+            pendientes o cuentas con importe pendiente.
+        --}}
         <div class="contenido-vacio">
             <i class="fas fa-inbox" style="font-size: 40px; display: block; margin-bottom: 10px;"></i>
-            Esta mesa no tiene cuentas registradas.
+            <p style="margin-bottom: 18px;">Esta mesa no tiene consumos registrados.</p>
+            <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+                <a href="{{ route('pos.index', $mesa->id) }}" class="btn-abrir"
+                   title="Ir al POS para registrar productos">
+                    <i class="fas fa-cash-register"></i> Ir al POS
+                </a>
+                @if($puedeLiberar)
+                    <button type="button" id="btn-liberar-vacia" class="btn-volver"
+                            title="Liberar la mesa vacía y conservar el historial">
+                        <i class="fas fa-ban"></i> Liberar mesa
+                    </button>
+                @endif
+            </div>
         </div>
+    @endif
+
+    @if($cuentas->isEmpty())
+        @if(!$mesaVacia)
+            <div class="contenido-vacio">
+                <i class="fas fa-inbox" style="font-size: 40px; display: block; margin-bottom: 10px;"></i>
+                Esta mesa no tiene cuentas registradas.
+            </div>
+        @endif
     @else
         <div class="grid-cuentas">
             @foreach($cuentas as $cuenta)
@@ -159,7 +189,7 @@
 </div>
 
 <script>
-    {{-- Fase 2: crear subcuenta vacía (ADMIN, GERENTE, CAJERO y MESERO). --}}
+    // Fase 2: crear subcuenta vacía (ADMIN, GERENTE, CAJERO y MESERO).
     const URL_CREAR_CUENTA = '{{ route("mesas.cuentas.crear", ["mesaId" => $mesa->id]) }}';
 
     function crearSubcuenta() {
@@ -205,11 +235,11 @@
         btnNuevaCuenta.addEventListener('click', crearSubcuenta);
     }
 
-    {{-- Fase 6: traslado de la MESA COMPLETA entre mesas (ADMIN, GERENTE, CAJERO).
-         El backend mueve la venta completa (todas las cuentas) porque el POS usa
-         una sola venta por mesa. --}}
+    // Fase 6: traslado de la MESA COMPLETA entre mesas (ADMIN, GERENTE, CAJERO).
+    // El backend mueve la venta completa (todas las cuentas) porque el POS usa
+    // una sola venta por mesa.
     const URL_TRASLADAR = '{{ route("pos.cuentas.trasladar", ["cuentaId" => "__ID__"]) }}';
-    const MESAS_DESTINO = @json($mesasDestino->map(fn ($m) => ['id' => $m->id, 'numero' => $m->numero])->values());
+    const MESAS_DESTINO = JSON.parse(document.getElementById('panel-cuentas').dataset.mesasDestino || '[]');
 
     function trasladarMesaCompleta(cuentaId, numeroMesa) {
         if (!MESAS_DESTINO.length) {
@@ -275,6 +305,49 @@
     if (btnTrasladarMesa) {
         btnTrasladarMesa.addEventListener('click', function () {
             trasladarMesaCompleta(Number(this.dataset.cuentaId), this.dataset.mesaNumero);
+        });
+    }
+
+    // Fase de recuperación de mesas vacías: liberar reutilizando liberarMesa()
+    // vía pos.api (accion=liberar_mesa_vacia). Mismas validaciones y permisos
+    // que el botón "Liberar" del POS.
+    const URL_LIBERAR_MESA = '{{ route("pos.api") }}';
+    const VENTA_ID = Number(document.getElementById('panel-cuentas').dataset.ventaId);
+    const URL_MESAS = '{{ route("mesas.index") }}';
+
+    const btnLiberarVacia = document.getElementById('btn-liberar-vacia');
+    if (btnLiberarVacia) {
+        btnLiberarVacia.addEventListener('click', function () {
+            Swal.fire({
+                title: '¿Liberar esta mesa?',
+                text: 'La mesa volverá a estar libre y se descartará esta apertura vacía. El historial se conserva.',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#fc544b',
+                confirmButtonText: 'Sí, liberar mesa',
+                cancelButtonText: 'Cancelar'
+            }).then(function (result) {
+                if (!result.isConfirmed) return;
+
+                const fd = new FormData();
+                fd.append('_token', '{{ csrf_token() }}');
+                fd.append('accion', 'liberar_mesa_vacia');
+                fd.append('venta_id', VENTA_ID);
+
+                fetch(URL_LIBERAR_MESA, { method: 'POST', body: fd })
+                    .then(function (respuesta) { return respuesta.json(); })
+                    .then(function (data) {
+                        if (data.exito) {
+                            Swal.fire('¡Mesa liberada!', data.mensaje || 'La mesa fue liberada correctamente.', 'success')
+                                .then(function () { window.location.href = URL_MESAS; });
+                        } else {
+                            Swal.fire('Atención', data.error || 'No se pudo liberar la mesa.', 'warning');
+                        }
+                    })
+                    .catch(function () {
+                        Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error');
+                    });
+            });
         });
     }
 </script>

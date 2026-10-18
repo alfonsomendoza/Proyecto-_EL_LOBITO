@@ -54,6 +54,12 @@
             font-weight: bold;
         }
 
+        .nota {
+            font-size: 12px;
+            margin-top: 3px;
+            white-space: pre-line;
+        }
+
         @media print {
 
             @page {
@@ -109,6 +115,14 @@
             <span class="nombre">
                 {{ $detalle->nombre }}
             </span>
+
+            @if (!empty($detalle->notas))
+
+                <div class="nota">
+                    Nota: {{ $detalle->notas }}
+                </div>
+
+            @endif
 
         </div>
 

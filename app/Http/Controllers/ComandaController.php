@@ -10,12 +10,32 @@ use Illuminate\Support\Facades\Log;
 class ComandaController extends Controller
 {
     /**
+     * Autorización de las impresiones de cocina.
+     *
+     * Las cuatro rutas de impresión ya están bajo `auth`, pero se restringe
+     * además a los CINCO roles operativos reales de la aplicación. La impresión
+     * es de SOLO LECTURA y debe seguir funcionando aunque la cocina digital
+     * esté deshabilitada. La validación se hace en el backend: ocultar un botón
+     * no protege nada.
+     */
+    private function autorizarImpresion(): void
+    {
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO', 'COCINERO'], true)) {
+            abort(403, 'No tienes permiso para imprimir comandas.');
+        }
+    }
+
+    /**
      * ============================================================
      * IMPRIMIR UNA COMANDA
      * ============================================================
      */
     public function imprimir(int $id)
     {
+        $this->autorizarImpresion();
+
         $comanda = DB::table('comandas')
             ->join('mesas', 'mesas.id', '=', 'comandas.mesa_id')
             ->where('comandas.id', $id)
@@ -75,12 +95,14 @@ class ComandaController extends Controller
                 })
                 ->select(
                     'cuenta_detalles.cantidad',
-                    'productos.nombre'
+                    'productos.nombre',
+                    'venta_detalles.notas'
                 );
         } else {
             $detallesQuery->select(
                 'venta_detalles.cantidad',
-                'productos.nombre'
+                'productos.nombre',
+                'venta_detalles.notas'
             );
         }
 
@@ -102,6 +124,8 @@ class ComandaController extends Controller
      */
     public function imprimirTodas(int $ventaId)
     {
+        $this->autorizarImpresion();
+
         $venta = DB::table('ventas')
             ->join('mesas', 'mesas.id', '=', 'ventas.mesa_id')
             ->where('ventas.id', $ventaId)
@@ -166,12 +190,14 @@ class ComandaController extends Controller
                     })
                     ->select(
                         'cuenta_detalles.cantidad',
-                        'productos.nombre'
+                        'productos.nombre',
+                        'venta_detalles.notas'
                     );
             } else {
                 $detallesQuery->select(
                     'venta_detalles.cantidad',
-                    'productos.nombre'
+                    'productos.nombre',
+                    'venta_detalles.notas'
                 );
             }
 
@@ -206,6 +232,8 @@ class ComandaController extends Controller
      */
     public function imprimirCompleta(int $ventaId)
     {
+        $this->autorizarImpresion();
+
         $venta = DB::table('ventas')
             ->join('mesas', 'mesas.id', '=', 'ventas.mesa_id')
             ->where('ventas.id', $ventaId)
@@ -263,11 +291,13 @@ class ComandaController extends Controller
                 })
                 ->groupBy(
                     'venta_detalles.producto_id',
-                    'productos.nombre'
+                    'productos.nombre',
+                    'venta_detalles.notas'
                 )
                 ->select(
                     'venta_detalles.producto_id',
                     'productos.nombre',
+                    'venta_detalles.notas',
                     DB::raw('SUM(cuenta_detalles.cantidad) as cantidad'),
                     DB::raw('MIN(venta_detalles.id) as primer_detalle')
                 );
@@ -275,11 +305,13 @@ class ComandaController extends Controller
             $detallesQuery
                 ->groupBy(
                     'venta_detalles.producto_id',
-                    'productos.nombre'
+                    'productos.nombre',
+                    'venta_detalles.notas'
                 )
                 ->select(
                     'venta_detalles.producto_id',
                     'productos.nombre',
+                    'venta_detalles.notas',
                     DB::raw('SUM(venta_detalles.cantidad) as cantidad'),
                     DB::raw('MIN(venta_detalles.id) as primer_detalle')
                 );
@@ -311,6 +343,8 @@ class ComandaController extends Controller
      */
     public function imprimirPlato(int $detalleId)
     {
+        $this->autorizarImpresion();
+
         /*
          * Se enlaza el detalle con su producto, su comanda y la mesa
          * de esa comanda para obtener los datos de identificación.
@@ -344,6 +378,7 @@ class ComandaController extends Controller
                 'venta_detalles.venta_id',
                 'venta_detalles.cantidad',
                 'venta_detalles.estado',
+                'venta_detalles.notas',
                 'productos.nombre',
                 'productos.requiere_cocina',
                 'comandas.numero_ticket',
@@ -409,6 +444,7 @@ class ComandaController extends Controller
             (object) [
                 'cantidad' => $cantidad,
                 'nombre' => $detalle->nombre,
+                'notas' => $detalle->notas,
             ],
         ]);
 

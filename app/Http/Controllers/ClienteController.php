@@ -12,6 +12,14 @@ class ClienteController extends Controller
     // Método para mostrar la vista con la tabla
     public function index()
     {
+        // Autorización en servidor: COCINERO no debe acceder al módulo de
+        // clientes. ADMIN, GERENTE, CAJERO y MESERO conservan su acceso.
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            abort(403, 'No tienes permiso para acceder a los clientes.');
+        }
+
         // Activos para respetar la eliminación lógica.
         $clientes = Cliente::where('activo', 1)
             ->orderBy('nombre')

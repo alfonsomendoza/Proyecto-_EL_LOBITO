@@ -44,6 +44,7 @@ class ProtegerCuentasPagadasTest extends TestCase
     private function crearEsquema(): void
     {
         foreach ([
+            'movimientos_inventario',
             'cuenta_detalles',
             'cuentas',
             'venta_detalles',
@@ -93,6 +94,10 @@ class ProtegerCuentasPagadasTest extends TestCase
             $t->decimal('precio_unitario', 10, 2);
             $t->decimal('subtotal', 10, 2);
             $t->string('estado', 20)->default('ACTIVO');
+            // Módulo de cocina: observación por línea y estado de preparación.
+            // Se recrean aquí porque los tests usan SQLite en memoria.
+            $t->text('notas')->nullable();
+            $t->string('estado_preparacion', 20)->nullable();
             $t->timestamps();
         });
 
@@ -113,6 +118,22 @@ class ProtegerCuentasPagadasTest extends TestCase
             $t->unsignedInteger('cantidad');
             $t->decimal('subtotal', 10, 2);
             $t->timestamps();
+        });
+
+        // Inventario (Etapa 2): libro de movimientos que consulta cancelar().
+        // No se crea "productos": la reversión usa solo el historial, así que
+        // el servicio no necesita la tabla de catálogo para cancelar.
+        Schema::create('movimientos_inventario', function (Blueprint $t) {
+            $t->id();
+            $t->integer('producto_id');
+            $t->string('tipo', 30);
+            $t->decimal('cantidad', 12, 3);
+            $t->string('origen_tipo', 30)->nullable();
+            $t->unsignedBigInteger('origen_id')->nullable();
+            $t->integer('usuario_id')->nullable();
+            $t->string('observacion', 500)->nullable();
+            $t->timestamp('creado_en')->useCurrent();
+            $t->unique(['origen_tipo', 'origen_id']);
         });
     }
 

@@ -48,6 +48,8 @@
         .nota {
             font-size: 12px;
             margin-top: 3px;
+            /* Respeta los saltos de línea de la observación. */
+            white-space: pre-line;
         }
 
         @media print {

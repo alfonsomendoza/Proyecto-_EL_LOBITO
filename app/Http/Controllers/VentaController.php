@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\ConfiguracionService;
+use App\Services\FacturaService;
+use App\Services\InventarioService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -9,6 +12,36 @@ use Illuminate\Support\Facades\Log;
 
 class VentaController extends Controller
 {
+    /**
+     * Servicio de inventario (Etapa 2). Se resuelve del contenedor para no
+     * cambiar el constructor del controlador.
+     */
+    private function inventario(): InventarioService
+    {
+        return app(InventarioService::class);
+    }
+
+    /**
+     * Preferencias de módulos (cocina digital / inventario). Se resuelve del
+     * contenedor para no cambiar el constructor del controlador.
+     */
+    private function configuracion(): ConfiguracionService
+    {
+        return app(ConfiguracionService::class);
+    }
+
+    /**
+     * ¿El módulo de cocina digital gestiona estados de preparación?
+     *
+     * Solo cuando está HABILITADO se aplican las protecciones basadas en
+     * `estado_preparacion`. Si está deshabilitado no hay preparación
+     * gestionada y se conserva el comportamiento histórico de anulación.
+     */
+    private function cocinaGestionaEstados(): bool
+    {
+        return $this->configuracion()->cocinaDigitalHabilitada();
+    }
+
     /**
      * ============================================================
      * MOSTRAR POS DE UNA MESA
@@ -38,6 +71,15 @@ class VentaController extends Controller
 
             if (!$usuario) {
                 abort(401, 'Usuario no autenticado.');
+            }
+
+            // Autorización en servidor: el POS muestra precios y totales.
+            // COCINERO no debe acceder a información financiera. Se valida aquí
+            // aunque el enlace esté oculto en la vista.
+            $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+            if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+                abort(403, 'No tienes permiso para acceder al POS.');
             }
 
 
@@ -340,6 +382,12 @@ class VentaController extends Controller
                     'venta_detalles.comanda_id',
                     'venta_detalles.estado',
 
+                    // Observación de la línea y estado de preparación (cocina
+                    // digital). Se muestran en el POS para que la mesa consulte
+                    // el progreso. Los pedidos históricos pueden tener NULL.
+                    'venta_detalles.notas',
+                    'venta_detalles.estado_preparacion',
+
                     // Producto.
                     'productos.nombre',
 
@@ -525,6 +573,8 @@ class VentaController extends Controller
                         'cuenta_detalles.subtotal',
                         'venta_detalles.comanda_id',
                         'venta_detalles.estado',
+                        'venta_detalles.notas',
+                        'venta_detalles.estado_preparacion',
                         'productos.nombre',
                         'productos.requiere_cocina',
                         'comandas.numero_ticket'
@@ -635,6 +685,15 @@ class VentaController extends Controller
      */
     public function api(Request $request)
     {
+        // Autorización en servidor: esta API devuelve precios/totales y también
+        // crea comandas y libera mesas. COCINERO no la utiliza.
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para esta acción.'], 403);
+        }
+
         if ($request->input('accion') === 'enviar_cocina') {
             return $this->enviarPedidoDesdePos($request);
         }
@@ -782,17 +841,23 @@ class VentaController extends Controller
                 $items = [];
                 $totalCocina = 0;
                 $hayCocina = false;
+                $lineasInventario = [];
                 foreach ($carrito as $item) {
                     $producto = DB::table('productos')->where('id', (int) ($item['id'] ?? 0))->where('activo', 1)->first();
                     $cantidad = (int) ($item['cantidad'] ?? 0);
                     if (!$producto || $cantidad <= 0) throw new \RuntimeException('El pedido contiene un producto inválido.');
                     $subtotal = $cantidad * (float) $producto->precio;
                     $requiereCocina = ((int) $producto->requiere_cocina === 1);
+
+                    // Observación por línea (opcional, máximo 500 caracteres).
+                    // Se valida SIEMPRE aquí: no se confía en el navegador.
+                    $notas = $this->normalizarNotas($item['notas'] ?? null);
+
                     if ($requiereCocina) {
                         $hayCocina = true;
                         $totalCocina += $subtotal;
                     }
-                    $items[] = ['producto' => $producto, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'cocina' => $requiereCocina];
+                    $items[] = ['producto' => $producto, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'cocina' => $requiereCocina, 'notas' => $notas];
                 }
 
                 // La comanda de cocina solo se crea si la orden tiene al menos un
@@ -819,9 +884,25 @@ class VentaController extends Controller
 
                     // El detalle de venta y de cuenta se registran SIEMPRE, para que
                     // el producto siga apareciendo en la mesa, cuenta, prefactura y cobro.
-                    $detalleId = DB::table('venta_detalles')->insertGetId(['venta_id' => $venta->id, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'comanda_id' => $detalleComandaId, 'estado' => 'ACTIVO', 'created_at' => now(), 'updated_at' => now()]);
+                    // Las líneas de cocina nacen en estado PENDIENTE; las de barra
+                    // quedan con estado_preparacion NULL (no son tareas de cocina).
+                    // Los pedidos históricos sin observación siguen funcionando.
+                    $detalleId = DB::table('venta_detalles')->insertGetId(['venta_id' => $venta->id, 'producto_id' => $producto->id, 'cantidad' => $cantidad, 'precio_unitario' => $producto->precio, 'subtotal' => $subtotal, 'comanda_id' => $detalleComandaId, 'estado' => 'ACTIVO', 'notas' => $it['notas'], 'estado_preparacion' => $it['cocina'] ? 'PENDIENTE' : null, 'created_at' => now(), 'updated_at' => now()]);
                     DB::table('cuenta_detalles')->insert(['cuenta_id' => $cuenta->id, 'venta_id' => $venta->id, 'venta_detalle_id' => $detalleId, 'cantidad' => $cantidad, 'subtotal' => $subtotal, 'created_at' => now(), 'updated_at' => now()]);
+
+                    // Inventario (Etapa 2): se acumula la línea para registrar la
+                    // salida después del bucle. Solo se moverá si el producto
+                    // controla stock; nunca bloquea la venta.
+                    $lineasInventario[] = [
+                        'venta_detalle_id' => $detalleId,
+                        'producto_id' => $producto->id,
+                        'cantidad' => $cantidad,
+                    ];
                 }
+
+                // Salida de inventario de las líneas recién creadas. Dentro de la
+                // misma transacción: si falla, revierte con el pedido completo.
+                $this->inventario()->registrarVenta($lineasInventario, Auth::id());
 
                 if ($comandaId !== null) {
                     DB::table('comandas')->where('id', $comandaId)->update(['total' => $totalCocina]);
@@ -843,6 +924,40 @@ class VentaController extends Controller
             Log::warning('No se pudo guardar pedido POS', ['error' => $e->getMessage(), 'venta_id' => $request->input('venta_id')]);
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
         }
+    }
+
+    /**
+     * Normaliza la observación de una línea del carrito.
+     *
+     * Reglas:
+     *  - Opcional: null / cadena vacía / solo espacios => NULL.
+     *  - Máximo 500 caracteres (se cuentan caracteres, no bytes). Si se excede,
+     *    se lanza RuntimeException y el POS responde 422 (no se trunca).
+     *  - No se usa como identidad del producto: solo es texto de la línea.
+     */
+    private function normalizarNotas(mixed $valor): ?string
+    {
+        if ($valor === null) {
+            return null;
+        }
+
+        // Solo se aceptan escalares (string/número). Un array u objeto JSON se
+        // rechaza en lugar de convertirse silenciosamente.
+        if (!is_scalar($valor)) {
+            throw new \RuntimeException('La observación de un producto no es válida.');
+        }
+
+        $texto = trim((string) $valor);
+
+        if ($texto === '') {
+            return null;
+        }
+
+        if (mb_strlen($texto) > 500) {
+            throw new \RuntimeException('La observación no puede superar los 500 caracteres.');
+        }
+
+        return $texto;
     }
 
 
@@ -1411,11 +1526,22 @@ class VentaController extends Controller
                         ->lockForUpdate()
                         ->get();
 
-                    DB::table('venta_detalles')
+                    $detalles = DB::table('venta_detalles')
                         ->where('venta_id', $ventaId)
                         ->orderBy('id')
                         ->lockForUpdate()
                         ->get();
+
+
+                    // Inventario (Etapa 2): reponer el stock pendiente de cada
+                    // línea ANTES de marcarla CANCELADO. Se calcula desde el
+                    // historial de movimientos (no desde controla_stock actual).
+                    $this->inventario()->registrarCancelacion(
+                        $detalles->pluck('id')->map(
+                            static fn ($id) => (int) $id
+                        )->all(),
+                        Auth::id()
+                    );
 
 
                     // Cancelar detalles.
@@ -1515,7 +1641,7 @@ class VentaController extends Controller
     {
         try {
 
-            DB::transaction(
+            $resultado = DB::transaction(
                 function () use ($ventaId) {
 
                     // ORDEN GLOBAL: venta primero, para serializar con cobros,
@@ -1529,11 +1655,12 @@ class VentaController extends Controller
                         ->first();
 
 
+                    // Venta inexistente: se señala el resultado para responder
+                    // 404 después. (Se comprueba dentro del bloqueo para evitar
+                    // condiciones de carrera.)
                     if (!$venta) {
 
-                        throw new \Exception(
-                            'La venta no existe.'
-                        );
+                        return ['estado' => 'inexistente'];
                     }
 
 
@@ -1553,7 +1680,8 @@ class VentaController extends Controller
 
                     if ($cantidadDetalles > 0) {
 
-                        throw new \Exception(
+                        // Rechazo de negocio => 409 (conflicto), no 500.
+                        throw new \DomainException(
                             'No se puede liberar la mesa porque tiene productos.'
                         );
                     }
@@ -1569,7 +1697,7 @@ class VentaController extends Controller
 
                     if ($hayAsignaciones > 0) {
 
-                        throw new \Exception(
+                        throw new \DomainException(
                             'No se puede liberar la mesa porque hay consumos pendientes en sus cuentas.'
                         );
                     }
@@ -1582,7 +1710,7 @@ class VentaController extends Controller
 
                     if ($hayCuentasConSaldo > 0) {
 
-                        throw new \Exception(
+                        throw new \DomainException(
                             'No se puede liberar la mesa porque hay cuentas con saldo pendiente.'
                         );
                     }
@@ -1611,8 +1739,20 @@ class VentaController extends Controller
                                 'estado' => 'LIBRE',
                             ]);
                     }
+
+                    return ['estado' => 'ok'];
                 }
             );
+
+
+            // Venta inexistente => 404 (recurso no encontrado).
+            if ($resultado['estado'] === 'inexistente') {
+
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'La venta no existe.',
+                ], 404);
+            }
 
 
             return response()->json([
@@ -1620,6 +1760,17 @@ class VentaController extends Controller
                 'mensaje' =>
                     'La mesa fue liberada correctamente.',
             ]);
+
+
+        } catch (\DomainException $e) {
+
+            // Rechazo por regla de negocio => 409 (conflicto). No es una falla
+            // interna del servidor.
+            return response()->json([
+                'exito' => false,
+                'error' =>
+                    $e->getMessage(),
+            ], 409);
 
 
         } catch (\Throwable $e) {
@@ -1663,6 +1814,15 @@ class VentaController extends Controller
 
         if (!$usuario) {
             abort(401, 'Usuario no autenticado.');
+        }
+
+        // Autorización en servidor: este panel muestra los totales de las
+        // subcuentas de la mesa. COCINERO no debe verlos. Se bloquea solo a
+        // COCINERO para no alterar el comportamiento del resto de roles.
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if ($rol === 'COCINERO') {
+            abort(403, 'No tienes permiso para ver las cuentas de la mesa.');
         }
 
         // 1. La mesa debe existir.
@@ -1766,6 +1926,36 @@ class VentaController extends Controller
             ->orderBy('numero')
             ->get();
 
+        // -----------------------------------------------------------------
+        // ¿La venta activa está totalmente vacía?
+        // -----------------------------------------------------------------
+        // Se replica EXACTAMENTE la condición que valida liberarMesa(): sin
+        // consumos ACTIVOS, sin asignaciones pendientes en cuenta_detalles y
+        // sin cuentas ABIERTAS con importe pendiente. Solo en ese caso se
+        // ofrece el flujo de recuperación (volver al POS o liberar la mesa),
+        // porque el panel puede no mostrar ninguna cuenta (la principal vacía
+        // se oculta más arriba). Nunca se permite liberar una mesa con
+        // consumos, asignaciones o saldos pendientes.
+        $hayConsumosActivos = DB::table('venta_detalles')
+            ->where('venta_id', $venta->id)
+            ->where('estado', 'ACTIVO')
+            ->exists();
+
+        $hayAsignacionesPendientes = DB::table('cuenta_detalles')
+            ->where('venta_id', $venta->id)
+            ->where('eliminado', false)
+            ->exists();
+
+        $hayCuentasConSaldo = DB::table('cuentas')
+            ->where('venta_id', $venta->id)
+            ->where('estado', 'ABIERTA')
+            ->where('total', '>', 0)
+            ->exists();
+
+        $mesaVacia = !$hayConsumosActivos
+            && !$hayAsignacionesPendientes
+            && !$hayCuentasConSaldo;
+
         return view('mesas.cuentas', [
             'mesa' => $mesa,
             'venta' => $venta,
@@ -1779,6 +1969,11 @@ class VentaController extends Controller
             'mesasDestino' => $mesasDestino,
             // Cuenta ABIERTA de referencia para trasladar la venta completa.
             'cuentaTrasladoId' => $cuentaTrasladoId,
+            // La venta activa no tiene ningún consumo ni saldo pendiente.
+            'mesaVacia' => $mesaVacia,
+            // Recuperación de mesas vacías: se reutiliza liberarMesa(), ya
+            // accesible vía POS para los mismos roles. No se amplían permisos.
+            'puedeLiberar' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true),
         ]);
     }
 
@@ -2109,6 +2304,15 @@ class VentaController extends Controller
     /** Datos seguros para la pantalla de división y cobro por cuenta. */
     public function cuentas(int $mesaId)
     {
+        // Autorización en servidor: este JSON expone precios, subtotales y
+        // totales de las cuentas. COCINERO no debe recibirlos.
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para ver las cuentas.'], 403);
+        }
+
         $venta = DB::table('ventas')->where('mesa_id', $mesaId)->whereIn('estado', ['ACTIVA', 'ABIERTA'])->first();
 
         if (!$venta) {
@@ -2584,7 +2788,13 @@ class VentaController extends Controller
         }
     }
 
-    /** Cobra una cuenta y libera la mesa únicamente al pagar todas las cuentas. */
+    /**
+     * Cobra una cuenta y libera la mesa únicamente al pagar todas las cuentas.
+     *
+     * Al confirmar el pago se emite la factura de esa cuenta (ver
+     * App\Services\FacturaService) dentro de la misma transacción, y su número
+     * se devuelve en la respuesta para poder imprimirla desde el POS.
+     */
     public function pagarCuenta(Request $request, int $cuentaId)
     {
         $request->validate(['metodo_pago' => ['required', 'string', 'max:30'], 'monto_recibido' => ['required', 'numeric', 'min:0'], 'banco' => ['nullable', 'string', 'max:30']]);
@@ -2632,7 +2842,20 @@ class VentaController extends Controller
                     DB::table('ventas')->where('id', $venta->id)->update(['estado' => 'PAGADA']);
                     DB::table('mesas')->where('id', $venta->mesa_id)->update(['estado' => 'LIBRE']);
                 }
-                return ['cambio' => $cambio, 'mesa_liberada' => !$abiertas];
+
+                // FACTURA DEL COBRO. Se emite dentro de MISMA transacción para
+                // que no pueda existir un cobro sin factura ni una factura sin
+                // cobro: si la inserción falla, el pago entero se revierte.
+                // Una factura por cobro (por cuenta). Ver FacturaService.
+                $factura = app(FacturaService::class)
+                    ->emitirPorCobro($cuenta, $venta, $total, (int) Auth::id());
+
+                return [
+                    'cambio' => $cambio,
+                    'mesa_liberada' => !$abiertas,
+                    'factura' => $factura->numero_factura,
+                    'factura_id' => $factura->id,
+                ];
             });
             return response()->json(['exito' => true, 'mensaje' => $resultado['mesa_liberada'] ? 'Todas las cuentas fueron pagadas. Mesa liberada.' : 'Cuenta pagada. La mesa sigue abierta.', ...$resultado]);
         } catch (\Throwable $e) {
@@ -2778,6 +3001,25 @@ class VentaController extends Controller
                     throw new \RuntimeException(
                         'El producto ya fue anulado o cancelado.'
                     );
+                }
+
+                // Protección de cocina: si el módulo está habilitado y la
+                // cocina YA empezó a preparar la línea (o la marcó LISTA), no
+                // se permite la anulación ordinaria, total ni parcial. El
+                // estado corresponde a la línea completa, por eso se bloquea
+                // cualquier cantidad. No hay excepción para ADMIN/GERENTE en
+                // esta etapa. Las líneas históricas o de barra tienen
+                // estado_preparacion NULL y NO se ven afectadas.
+                if ($this->cocinaGestionaEstados()) {
+                    $estadoPreparacion = $detalle->estado_preparacion ?? null;
+
+                    if (in_array((string) $estadoPreparacion, ['EN_PREPARACION', 'LISTO'], true)) {
+                        throw new \RuntimeException(
+                            $estadoPreparacion === 'LISTO'
+                                ? 'No se puede anular: el plato ya fue marcado como LISTO en cocina.'
+                                : 'No se puede anular: la preparación del plato ya comenzó en cocina.'
+                        );
+                    }
                 }
 
                 $cantidadLinea = (int) $detalle->cantidad;
@@ -2965,7 +3207,7 @@ class VentaController extends Controller
                     [$cantidadAnular, $precioUnitario]
                 )->subtotal;
 
-                DB::table('anulaciones')->insert([
+                $anulacionId = DB::table('anulaciones')->insertGetId([
                     'tipo' => 'ITEM_ANULADO',
                     'venta_id' => $venta->id,
                     'venta_detalle_id' => $detalle->id,
@@ -2978,6 +3220,16 @@ class VentaController extends Controller
                     'estado_previo' => 'ACTIVO',
                     'creado_en' => now(),
                 ]);
+
+                // Inventario (Etapa 2): reponer stock de la cantidad realmente
+                // anulada. Solo si la línea tenía una salida VENTA registrada.
+                // Se usa el id real de la anulación como origen.
+                $this->inventario()->registrarAnulacion(
+                    (int) $detalle->id,
+                    (int) $anulacionId,
+                    $cantidadAnular,
+                    (int) $usuario->id
+                );
 
                 return [
                     'venta_id' => $venta->id,

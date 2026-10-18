@@ -75,6 +75,7 @@ class CuentaPrincipalDivisionTest extends TestCase
             $t->string('nombre', 150);
             $t->decimal('precio', 10, 2)->default(0);
             $t->boolean('requiere_cocina')->default(false);
+            $t->boolean('controla_stock')->default(false);
             $t->boolean('activo')->default(true);
         });
 
@@ -118,6 +119,10 @@ class CuentaPrincipalDivisionTest extends TestCase
             $t->integer('comanda_id')->nullable();
             $t->integer('cuenta_id')->nullable();
             $t->string('estado', 255)->default('ACTIVO');
+            // Módulo de cocina: observación por línea y estado de preparación.
+            // Se recrean aquí porque los tests usan SQLite en memoria.
+            $t->text('notas')->nullable();
+            $t->string('estado_preparacion', 20)->nullable();
             $t->timestamps();
         });
 
@@ -163,6 +168,21 @@ class CuentaPrincipalDivisionTest extends TestCase
             $t->integer('usuario_id')->nullable();
             $t->string('estado_previo', 255)->nullable();
             $t->timestamp('creado_en')->nullable();
+        });
+
+        // Tabla real de MySQL. El cobro emite una factura por cuenta pagada
+        // (VentaController::pagarCuenta), por lo que debe existir en el esquema.
+        Schema::create('facturas', function (Blueprint $t) {
+            $t->increments('id');
+            $t->string('numero_factura', 20)->unique();
+            $t->integer('venta_id');
+            $t->integer('cuenta_id')->nullable();
+            $t->string('mesa', 50)->nullable();
+            $t->text('detalle_consumo')->nullable();
+            $t->decimal('total', 10, 2)->default(0);
+            $t->dateTime('fecha_emision')->nullable();
+            $t->integer('usuario_id')->nullable();
+            $t->string('estado', 20)->default('EMITIDA');
         });
     }
 

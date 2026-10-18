@@ -57,6 +57,7 @@
         .nota {
             font-size: 12px;
             margin-top: 3px;
+            white-space: pre-line;
         }
 
         @media print {

@@ -77,6 +77,10 @@
     // (no con el ID de la venta) para no confundir los parámetros.
     const URL_CUENTAS_MESA = '{{ url('/mesas') }}';
 
+    // Base del POS. Al abrir una mesa libre se entra directamente aquí para
+    // registrar el primer producto (la mesa permanece LIBRE hasta ese momento).
+    const URL_POS_MESA = '{{ url('/pos') }}';
+
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.mesa-card').forEach(mesa => {
             mesa.addEventListener('click', function () {
@@ -175,10 +179,11 @@
         .then(response => response.json()) 
         .then(data => {
             if (data.exito) {
-                // Tras abrir la mesa, muestra su panel de subcuentas.
-                window.location.href = URL_CUENTAS_MESA + '/' + mesaId + '/cuentas';
+                // Tras preparar la mesa, entra al POS para registrar el primer
+                // producto. La mesa no se marca OCUPADA hasta que exista consumo.
+                window.location.href = URL_POS_MESA + '/' + mesaId;
             } else {
-                // Ahora sí mostrará el mensaje real del 409 (Ej: "La mesa ya está ocupada")
+                // Muestra el mensaje real devuelto por el servidor.
                 Swal.fire('Atención', data.error || 'No fue posible realizar la acción.', 'warning');
             }
         })

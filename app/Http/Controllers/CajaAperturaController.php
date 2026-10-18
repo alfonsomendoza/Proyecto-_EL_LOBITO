@@ -10,6 +10,14 @@ class CajaAperturaController extends Controller
 {
     public function registrarApertura(Request $request)
     {
+        // Autorización en servidor: la apertura maneja montos de caja.
+        // COCINERO no puede abrir caja ni iniciar turnos.
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para abrir la caja.'], 403);
+        }
+
         $request->validate([
             'monto_inicial' => 'required|numeric|min:0',
         ], [
@@ -45,6 +53,14 @@ class CajaAperturaController extends Controller
 
     public function imprimirTicketApertura(Request $request)
     {
+        // Autorización en servidor: el ticket de apertura contiene montos.
+        // COCINERO no debe imprimirlo ni verlo.
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+            abort(403, 'No tienes permiso para imprimir el ticket de apertura.');
+        }
+
         $idApertura = $request->query('id', 0);
 
         if ($idApertura > 0) {

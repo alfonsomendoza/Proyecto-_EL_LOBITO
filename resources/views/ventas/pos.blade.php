@@ -398,6 +398,29 @@
         color: #34395e;
     }
 
+    /* Observación mostrada en el historial de la mesa. */
+    .item-historial-nota {
+        color: #8a5a00;
+        background: #fff6e0;
+        border-left: 3px solid #f0b400;
+        font-size: 10px;
+        font-style: italic;
+        margin-top: 4px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        white-space: pre-line;
+        word-break: break-word;
+        text-align: left;
+    }
+
+    /* Estado de preparación (cocina digital) en el historial. */
+    .item-historial-preparacion {
+        font-size: 10px;
+        font-weight: 800;
+        margin-top: 3px;
+        color: #0b5faa;
+    }
+
     .btn-anular {
         border: none;
         border-radius: 5px;
@@ -478,6 +501,37 @@
         font-size: 10px;
         font-weight: 700;
         margin-top: 3px;
+    }
+
+    /* Observación por línea dentro del carrito. */
+    .nuevo-nota {
+        color: #8a5a00;
+        background: #fff6e0;
+        border-left: 3px solid #f0b400;
+        font-size: 10px;
+        font-style: italic;
+        margin-top: 4px;
+        padding: 3px 6px;
+        border-radius: 4px;
+        white-space: pre-line;
+        word-break: break-word;
+    }
+
+    /* Botón para añadir/editar la observación de una línea. */
+    .btn-nota {
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: 5px;
+        background: #fff2cc;
+        color: #8a5a00;
+        cursor: pointer;
+        font-size: 11px;
+        padding: 0;
+    }
+
+    .btn-nota:hover {
+        background: #ffe8a3;
     }
 
     .nuevo-controles {
@@ -937,6 +991,29 @@
 
                                 {{ $h->nombre }}
 
+                                {{-- Observación de la línea (escapada por Blade). --}}
+                                @if(!empty($h->notas))
+                                    <div class="item-historial-nota">
+                                        <i class="fas fa-note-sticky"></i> {{ $h->notas }}
+                                    </div>
+                                @endif
+
+                                {{-- Progreso de preparación (cocina digital). Solo
+                                     para líneas activas de cocina. --}}
+                                @if($h->estado === 'ACTIVO' && $h->requiere_cocina && !empty($h->estado_preparacion))
+                                    @php
+                                        $etiquetasPreparacion = [
+                                            'PENDIENTE' => 'Pendiente',
+                                            'EN_PREPARACION' => 'En preparación',
+                                            'LISTO' => 'Listo',
+                                        ];
+                                        $prepTexto = $etiquetasPreparacion[$h->estado_preparacion] ?? $h->estado_preparacion;
+                                    @endphp
+                                    <div class="item-historial-nota" style="background:#eaf3fb;border-left-color:#4a9fe0;color:#0b5faa;font-style:normal;font-weight:700;">
+                                        <i class="fas fa-fire"></i> Cocina: {{ $prepTexto }}
+                                    </div>
+                                @endif
+
                             </div>
 
                             <div class="item-historial-info">
@@ -1030,6 +1107,7 @@
                                             data-nombre="{{ $h->nombre }}"
                                             data-cantidad="{{ $h->cantidad }}"
                                             data-precio="{{ $h->precio_unitario }}"
+                                            data-preparacion="{{ $h->estado_preparacion ?? '' }}"
                                         >
                                             <i class="fas fa-ban"></i>
                                             Anular
@@ -1168,6 +1246,14 @@
 <script>
     let nuevoPedido = [];
     let categoriaActual = 'todas';
+
+    // Identificador único por línea del carrito. Permite que dos líneas del
+    // MISMO producto con observaciones distintas convivan sin fusionarse.
+    let nuevoPedidoSeq = 1;
+
+    function siguienteUid() {
+        return nuevoPedidoSeq++;
+    }
 
     document.addEventListener('DOMContentLoaded', function () {
         inicializarProductos();
@@ -1333,32 +1419,38 @@
             return;
         }
 
+        // Se fusiona únicamente si coincide el producto Y la línea no tiene
+        // observación. Así una línea con nota ("sin cebolla") permanece
+        // separada de la línea normal del mismo producto.
         const itemExistente =
             nuevoPedido.find(function (item) {
-                return item.id === productoId;
+                return item.id === productoId &&
+                    (item.notas === null || item.notas === '');
             });
 
         if (itemExistente) {
             itemExistente.cantidad++;
         } else {
             nuevoPedido.push({
+                uid: siguienteUid(),
                 id: productoId,
                 nombre: productoNombre,
                 precio: productoPrecio,
                 cantidad: 1,
-                requiere_cocina: requiereCocina
+                requiere_cocina: requiereCocina,
+                notas: null
             });
         }
 
         renderizarNuevo();
     }
 
-    function modQty(id, cambio) {
-        const productoId = Number(id);
+    function modQty(uid, cambio) {
+        const lineaUid = Number(uid);
 
         const item =
             nuevoPedido.find(function (producto) {
-                return producto.id === productoId;
+                return producto.uid === lineaUid;
             });
 
         if (!item) {
@@ -1370,11 +1462,61 @@
         if (item.cantidad <= 0) {
             nuevoPedido =
                 nuevoPedido.filter(function (producto) {
-                    return producto.id !== productoId;
+                    return producto.uid !== lineaUid;
                 });
         }
 
         renderizarNuevo();
+    }
+
+    // Abre un cuadro para escribir/editar la observación de UNA línea.
+    function editarNota(uid) {
+        const lineaUid = Number(uid);
+        const item = nuevoPedido.find(function (producto) {
+            return producto.uid === lineaUid;
+        });
+
+        if (!item) {
+            return;
+        }
+
+        Swal.fire({
+            title: 'Observación del producto',
+            input: 'textarea',
+            inputValue: item.notas || '',
+            inputAttributes: {
+                maxlength: 500,
+                placeholder: 'Ej.: sin cebolla, bien cocido, para llevar'
+            },
+            inputLabel: item.nombre,
+            showCancelButton: true,
+            confirmButtonText: 'Guardar',
+            cancelButtonText: 'Cancelar',
+            confirmButtonColor: '#47c363',
+            inputValidator: function (valor) {
+                // Se valida con el helper real del archivo (longitudTexto).
+                // Si supera el límite se rechaza; el servidor vuelve a validar.
+                if (valor && longitudTexto(valor) > 500) {
+                    return 'La observación no puede superar los 500 caracteres.';
+                }
+                return false;
+            }
+        }).then(function (result) {
+            if (!result.isConfirmed) {
+                return;
+            }
+
+            // No se trunca: el textarea ya limita a 500 y el servidor
+            // rechaza cualquier nota superior al límite.
+            const texto = String(result.value || '').trim();
+            item.notas = texto === '' ? null : texto;
+
+            renderizarNuevo();
+        });
+    }
+
+    function longitudTexto(texto) {
+        return texto == null ? 0 : String(texto).length;
     }
 
     function escaparHtml(texto) {
@@ -1425,6 +1567,9 @@
             const nombreSeguro =
                 escaparHtml(item.nombre);
 
+            const notaSegura =
+                item.notas ? escaparHtml(item.notas) : '';
+
             const icono =
                 item.requiere_cocina
                     ? '<i class="fas fa-fire" style="color:#fc544b;"></i>'
@@ -1446,6 +1591,13 @@
                             item.precio.toFixed(2) +
                         '</div>' +
 
+                        (notaSegura
+                            ? '<div class="nuevo-nota">' +
+                                '<i class="fas fa-note-sticky"></i> ' +
+                                notaSegura +
+                              '</div>'
+                            : '') +
+
                     '</div>' +
 
                     '<div class="nuevo-controles">' +
@@ -1453,8 +1605,8 @@
                         '<button ' +
                             'type="button" ' +
                             'class="qty-btn" ' +
-                            'data-id="' +
-                            item.id +
+                            'data-uid="' +
+                            item.uid +
                             '" ' +
                             'data-cambio="-1"' +
                         '>' +
@@ -1468,12 +1620,23 @@
                         '<button ' +
                             'type="button" ' +
                             'class="qty-btn" ' +
-                            'data-id="' +
-                            item.id +
+                            'data-uid="' +
+                            item.uid +
                             '" ' +
                             'data-cambio="1"' +
                         '>' +
                             '+' +
+                        '</button>' +
+
+                        '<button ' +
+                            'type="button" ' +
+                            'class="btn-nota" ' +
+                            'data-uid="' +
+                            item.uid +
+                            '" ' +
+                            'title="Añadir o editar observación"' +
+                        '>' +
+                            '<i class="fas fa-note-sticky"></i>' +
                         '</button>' +
 
                     '</div>' +
@@ -1505,13 +1668,29 @@
 
                     event.stopPropagation();
 
-                    const id =
-                        Number(this.dataset.id);
+                    const uid =
+                        Number(this.dataset.uid);
 
                     const cambio =
                         Number(this.dataset.cambio);
 
-                    modQty(id, cambio);
+                    modQty(uid, cambio);
+                }
+            );
+        });
+
+        const botonesNota =
+            contenedor.querySelectorAll('.btn-nota');
+
+        botonesNota.forEach(function (boton) {
+
+            boton.addEventListener(
+                'click',
+                function (event) {
+
+                    event.stopPropagation();
+
+                    editarNota(Number(this.dataset.uid));
                 }
             );
         });
@@ -1677,6 +1856,9 @@
         const precio =
             Number(boton.dataset.precio) || 0;
 
+        const preparacion =
+            (boton.dataset.preparacion || '').toUpperCase();
+
         if (!detalleId || detalleId <= 0) {
 
             Swal.fire(
@@ -1688,6 +1870,20 @@
             return;
         }
 
+        // Aviso cuando la cocina ya empezó: la anulación sigue siendo posible
+        // para ADMIN/GERENTE, pero no debe parecer que nunca se preparó.
+        let avisoPreparacion = '';
+
+        if (preparacion === 'EN_PREPARACION' || preparacion === 'LISTO') {
+            avisoPreparacion =
+                '<div style="background:#fdecea;color:#c0392b;padding:8px;border-radius:6px;margin:0 0 10px;font-size:12px;font-weight:700;">' +
+                    '<i class="fas fa-triangle-exclamation"></i> ' +
+                    (preparacion === 'LISTO'
+                        ? 'Este plato ya fue marcado como LISTO en cocina.'
+                        : 'La preparación de este plato ya comenzó en cocina.') +
+                '</div>';
+        }
+
         Swal.fire({
 
             title: '¿Anular producto?',
@@ -1696,6 +1892,7 @@
             // se anulará calculado con el precio unitario.
             html:
                 '<div style="text-align:left;">' +
+                    avisoPreparacion +
                     '<p style="margin:0 0 10px;"><strong>' +
                         escapeHtml(nombre) +
                     '</strong></p>' +
@@ -2438,8 +2635,31 @@
                         .then(response => response.json())
                         .then(respuesta => {
                             if (!respuesta.exito) throw new Error(respuesta.error || 'No se pudo cobrar.');
-                            Swal.fire('Pago registrado', respuesta.mensaje + ' Cambio: C$ ' + Number(respuesta.cambio).toFixed(2), 'success')
-                                .then(() => respuesta.mesa_liberada ? window.location.href = '{{ route("mesas.index") }}' : location.reload());
+                            const texto = respuesta.mensaje + ' Cambio: C$ ' + Number(respuesta.cambio).toFixed(2)
+                                + (respuesta.factura ? '<br><strong>Factura: ' + escaparHtml(respuesta.factura) + '</strong>' : '');
+                            const despuesDeCobrar = () => respuesta.mesa_liberada ? window.location.href = '{{ route("mesas.index") }}' : location.reload();
+
+                            // La factura ya fue emitida en el backend dentro de la
+                            // misma transacción del cobro; aquí solo se ofrece
+                            // imprimirla. Si no vino el id, se cierra normalmente.
+                            if (!respuesta.factura_id) {
+                                Swal.fire('Pago registrado', texto, 'success').then(despuesDeCobrar);
+                                return;
+                            }
+
+                            Swal.fire({
+                                title: 'Pago registrado',
+                                html: texto,
+                                icon: 'success',
+                                showDenyButton: true,
+                                confirmButtonText: 'Imprimir factura',
+                                denyButtonText: 'Cerrar'
+                            }).then(resultado => {
+                                if (resultado.isConfirmed) {
+                                    window.open('{{ route("facturas.ticket") }}?id=' + encodeURIComponent(respuesta.factura_id), '_blank');
+                                }
+                                despuesDeCobrar();
+                            });
                         })
                         .catch(error => Swal.fire('Error', error.message, 'error'));
                 });
@@ -2661,15 +2881,18 @@
             )
             .then(function (response) {
 
-                if (!response.ok) {
+                // Se lee el cuerpo JSON tanto en éxito (2xx) como en errores
+                // (404/409/500) para mostrar el mensaje real del backend en
+                // lugar de un error genérico. Si el cuerpo no fuera JSON, se
+                // cae a un mensaje basado en el código HTTP.
+                return response.json().catch(function () {
 
-                    throw new Error(
-                        'HTTP ' +
-                        response.status
-                    );
-                }
-
-                return response.json();
+                    return {
+                        exito: false,
+                        error: 'HTTP ' +
+                            response.status
+                    };
+                });
             })
             .then(function (data) {
 

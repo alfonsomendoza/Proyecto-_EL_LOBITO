@@ -115,6 +115,10 @@ class SubdivisionSubcuentaTest extends TestCase
             $t->integer('comanda_id')->nullable();
             $t->integer('cuenta_id')->nullable();
             $t->string('estado', 255)->default('ACTIVO');
+            // Módulo de cocina: observación por línea y estado de preparación.
+            // Se recrean aquí porque los tests usan SQLite en memoria.
+            $t->text('notas')->nullable();
+            $t->string('estado_preparacion', 20)->nullable();
             $t->timestamps();
         });
 

@@ -48,6 +48,7 @@ class DivisionUnidadesTest extends TestCase
     private function crearEsquema(): void
     {
         foreach ([
+            'movimientos_inventario',
             'anulaciones',
             'cuenta_detalles',
             'cuentas',
@@ -101,6 +102,10 @@ class DivisionUnidadesTest extends TestCase
             $t->integer('comanda_id')->nullable();
             $t->integer('cuenta_id')->nullable();
             $t->string('estado', 255)->default('ACTIVO');
+            // Módulo de cocina: observación por línea y estado de preparación.
+            // Se recrean aquí porque los tests usan SQLite en memoria.
+            $t->text('notas')->nullable();
+            $t->string('estado_preparacion', 20)->nullable();
             $t->timestamps();
         });
 
@@ -140,6 +145,20 @@ class DivisionUnidadesTest extends TestCase
             $t->integer('usuario_id')->nullable();
             $t->string('estado_previo', 255)->nullable();
             $t->timestamp('creado_en')->nullable();
+        });
+
+        // Inventario (Etapa 2): libro de movimientos consultado por el servicio.
+        Schema::create('movimientos_inventario', function (Blueprint $t) {
+            $t->id();
+            $t->integer('producto_id');
+            $t->string('tipo', 30);
+            $t->decimal('cantidad', 12, 3);
+            $t->string('origen_tipo', 30)->nullable();
+            $t->unsignedBigInteger('origen_id')->nullable();
+            $t->integer('usuario_id')->nullable();
+            $t->string('observacion', 500)->nullable();
+            $t->timestamp('creado_en')->useCurrent();
+            $t->unique(['origen_tipo', 'origen_id']);
         });
     }
 

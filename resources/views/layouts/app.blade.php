@@ -21,6 +21,8 @@
 
     <aside class="sidebar">
         <div class="sidebar-brand">
+            <img src="{{ asset('images/RestauranteELLOBITO.jpg') }}" alt="Logo Restaurante El Lobito"
+                 style="height: 36px; width: auto; border-radius: 6px; margin-right: 12px; flex-shrink: 0;">
             <h2>EL LOBITO</h2>
         </div>
 
@@ -30,33 +32,6 @@
                     <i class="fas fa-home"></i> Inicio
                 </a>
             </li>
-
-            {{-- Cocina digital (opcional): solo si el módulo está habilitado. --}}
-            @if ($cocinaDigitalHabilitada && in_array($rol, ['ADMIN', 'GERENTE', 'COCINERO']))
-                <li>
-                    <a href="{{ route('cocina.index') }}" class="{{ request()->routeIs('cocina.*') ? 'active' : '' }}">
-                        <i class="fas fa-fire"></i> Cocina
-                    </a>
-                </li>
-            @endif
-
-            {{-- Cocina digital (opcional): solo si el módulo está habilitado. --}}
-            @if ($cocinaDigitalHabilitada && in_array($rol, ['ADMIN', 'GERENTE', 'COCINERO']))
-                <li>
-                    <a href="{{ route('cocina.index') }}" class="{{ request()->routeIs('cocina.*') ? 'active' : '' }}">
-                        <i class="fas fa-fire"></i> Cocina
-                    </a>
-                </li>
-            @endif
-
-            {{-- Cocina digital (opcional): solo si el módulo está habilitado. --}}
-            @if ($cocinaDigitalHabilitada && in_array($rol, ['ADMIN', 'GERENTE', 'COCINERO']))
-                <li>
-                    <a href="{{ route('cocina.index') }}" class="{{ request()->routeIs('cocina.*') ? 'active' : '' }}">
-                        <i class="fas fa-fire"></i> Cocina
-                    </a>
-                </li>
-            @endif
 
             {{-- Cocina digital (opcional): solo si el módulo está habilitado. --}}
             @if ($cocinaDigitalHabilitada && in_array($rol, ['ADMIN', 'GERENTE', 'COCINERO']))
@@ -99,11 +74,13 @@
                 </a>
             </li>
 
-            <li>
-                <a href="{{ route('clientes.index') }}" class="{{ request()->routeIs('clientes.index') ? 'active' : '' }}">
-                    <i class="fas fa-address-book"></i> Clientes
-                </a>
-            </li>
+            @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO']))
+                <li>
+                    <a href="{{ route('clientes.index') }}" class="{{ request()->routeIs('clientes.index') ? 'active' : '' }}">
+                        <i class="fas fa-address-book"></i> Clientes
+                    </a>
+                </li>
+            @endif
 
             @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO']))
                 <li>
@@ -140,11 +117,13 @@
                         <i class="fas fa-box"></i> Operaciones
                     </a>
                 </li>
+                @if (in_array($rol, ['ADMIN', 'GERENTE']))
                 <li>
                     <a href="{{ route('usuarios.index') }}" class="{{ request()->routeIs('usuarios.index') ? 'active' : '' }}">
                         <i class="fas fa-users"></i> Usuarios
                     </a>
                 </li>
+                @endif
                 <li>
                     <a href="{{ route('backups.index') }}" class="{{ request()->routeIs('backups.index') ? 'active' : '' }}">
                         <i class="fas fa-database"></i> Copias de Seguridad
