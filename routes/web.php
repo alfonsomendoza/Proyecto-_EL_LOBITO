@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\CajaCierreController;
 use App\Http\Controllers\CocinaController;
 use App\Http\Controllers\InventarioController;
 use App\Http\Controllers\ConfiguracionController;
@@ -234,4 +235,22 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/cocina/api/detalles/{detalle}/estado', [CocinaController::class, 'cambiarEstado'])
         ->whereNumber('detalle')
         ->name('cocina.api.estado');
+
+    // ------------------------------------------------------------------
+    // CIERRE DE CAJA (arqueo del turno).
+    // ADMIN, GERENTE y CAJERO cierran e imprimen; solo ADMIN y GERENTE
+    // anulan un cierre. El rol se valida SIEMPRE en CajaCierreController.
+    // ------------------------------------------------------------------
+    Route::get('/caja/cierre', [CajaCierreController::class, 'index'])
+        ->name('caja.cierre');
+
+    Route::post('/caja/cierre', [CajaCierreController::class, 'registrar'])
+        ->name('caja.cierre.registrar');
+
+    Route::get('/caja/cierre/ticket', [CajaCierreController::class, 'ticket'])
+        ->name('caja.cierre.ticket');
+
+    Route::post('/caja/cierres/{id}/anular', [CajaCierreController::class, 'anular'])
+        ->whereNumber('id')
+        ->name('caja.cierre.anular');
 });
