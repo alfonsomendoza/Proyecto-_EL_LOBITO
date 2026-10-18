@@ -12,6 +12,7 @@ use App\Http\Controllers\MesaController;
 use App\Http\Controllers\VentaController;
 use App\Http\Controllers\ComandaController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\CocinaController;
 use App\Http\Controllers\InventarioController;
 use App\Http\Controllers\ConfiguracionController;
 use App\Http\Controllers\GastoController;
@@ -215,4 +216,22 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/inventario/{producto}/ajuste', [InventarioController::class, 'ajuste'])
         ->whereNumber('producto')
         ->name('inventario.ajuste');
+
+    // ------------------------------------------------------------------
+    // MONITOR DIGITAL DE COCINA (función OPCIONAL).
+    // COCINERO, ADMIN y GERENTE consultan y actualizan estados; CAJERO y
+    // MESERO reciben 403. Si la cocina digital está deshabilitada, todos los
+    // endpoints rechazan el acceso. El rol y el interruptor se validan SIEMPRE
+    // en el backend (CocinaController), no en la vista.
+    // Rutas HTML y JSON separadas.
+    // ------------------------------------------------------------------
+    Route::get('/cocina', [CocinaController::class, 'index'])
+        ->name('cocina.index');
+
+    Route::get('/cocina/api/panel', [CocinaController::class, 'panel'])
+        ->name('cocina.api.panel');
+
+    Route::post('/cocina/api/detalles/{detalle}/estado', [CocinaController::class, 'cambiarEstado'])
+        ->whereNumber('detalle')
+        ->name('cocina.api.estado');
 });

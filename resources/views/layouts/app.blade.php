@@ -31,6 +31,15 @@
                 </a>
             </li>
 
+            {{-- Cocina digital (opcional): solo si el módulo está habilitado. --}}
+            @if ($cocinaDigitalHabilitada && in_array($rol, ['ADMIN', 'GERENTE', 'COCINERO']))
+                <li>
+                    <a href="{{ route('cocina.index') }}" class="{{ request()->routeIs('cocina.*') ? 'active' : '' }}">
+                        <i class="fas fa-fire"></i> Cocina
+                    </a>
+                </li>
+            @endif
+
             <li>
                 <a href="#">
                     <i class="fas fa-file-invoice"></i> Historial Facturas
