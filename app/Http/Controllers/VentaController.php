@@ -2519,20 +2519,21 @@ class VentaController extends Controller
                         'updated_at' => now(),
                     ]);
 
-                    // DESTINO: línea nueva sin comanda ni estado_preparacion
-                    // (la cocina nunca debe re-preparar esto), con la misma
-                    // nota del original y marcada con la línea de origen.
+                    // DESTINO: línea nueva que conserva comanda_id y estado_preparacion
+                    // (para que cocina la muestre con la mesa de destino sin reiniciar
+                    // la preparación). No se duplica la comanda; otras cuentas
+                    // que compartan esa comanda no se ven afectadas.
                     $vdDestinoId = DB::table('venta_detalles')->insertGetId([
                         'venta_id' => $ventaDestinoId,
                         'producto_id' => $linea->producto_id,
                         'cantidad' => $mover,
                         'precio_unitario' => $linea->precio_unitario,
                         'subtotal' => $subtotalTrasladado,
-                        'comanda_id' => null,
+                        'comanda_id' => $linea->comanda_id,
                         'cuenta_id' => null,
                         'estado' => 'ACTIVO',
                         'notas' => $linea->vd_notas,
-                        'estado_preparacion' => null,
+                        'estado_preparacion' => $linea->estado_preparacion,
                         'trasladado_desde_id' => $linea->vd_id,
                         'created_at' => now(),
                         'updated_at' => now(),
