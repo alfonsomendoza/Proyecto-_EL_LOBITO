@@ -1270,7 +1270,7 @@
      sustituye la autorización. --}}
 @php
     $rolPos = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
-    $puedeAjustarCobro = in_array($rolPos, ['ADMIN', 'GERENTE'], true);
+    $puedeAjustarCobro = in_array($rolPos, ['ADMIN', 'GERENTE', 'CAJERO'], true);
 @endphp
 
 <script>
@@ -2708,8 +2708,8 @@
                     return `<option value="${cuenta.id}" data-total="${cuenta.total}"${marcada}>${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total).toFixed(2)}</option>`;
                 }).join('');
 
-                // Ajustes (descuento/propina): SOLO ADMIN/GERENTE. Si el rol
-                // no puede aplicarlos, el modal ni siquiera los muestra.
+                // Ajustes (descuento/propina): ADMIN, GERENTE y CAJERO pueden aplicarlos.
+                // Si el rol no puede aplicarlos, el modal ni siquiera los muestra.
                 const htmlAjustes = PUEDE_AJUSTAR_COBRO ? `
                     <input id="descuento-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Descuento (C$)">
                     <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">

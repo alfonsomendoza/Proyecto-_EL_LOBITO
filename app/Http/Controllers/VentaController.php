@@ -3420,8 +3420,8 @@ class VentaController extends Controller
             return response()->json(['exito' => false, 'error' => 'El descuento y la propina no pueden ser negativos.'], 422);
         }
 
-        if (($descuento > 0 || $propina > 0 || $motivo !== '') && !in_array($rol, ['ADMIN', 'GERENTE'], true)) {
-            return response()->json(['exito' => false, 'error' => 'Solo ADMIN o GERENTE pueden aplicar descuentos o propinas.'], 403);
+        if (($descuento > 0 || $propina > 0 || $motivo !== '') && !in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'Solo ADMIN, GERENTE o CAJERO pueden aplicar descuentos o propinas.'], 403);
         }
 
         try {
@@ -3848,8 +3848,8 @@ class VentaController extends Controller
         $consumo = round(array_sum(array_column($lineas, 'subtotal')), 2);
 
         // Ajustes previsualizados (query string del modal de cobro). Solo
-        // ADMIN/GERENTE pueden anticipar un descuento o una propina; para
-        // el resto se ignoran si son mayores que cero (no se persisten).
+        // ADMIN, GERENTE o CAJERO pueden anticipar un descuento o una propina;
+        // para MESERO y COCINERO no se permiten ajustes (y no se persisten).
         $descuento = round((float) $request->query('descuento', 0), 2);
         $propina = round((float) $request->query('propina', 0), 2);
 
@@ -3858,8 +3858,8 @@ class VentaController extends Controller
         }
 
         if ($descuento > 0 || $propina > 0) {
-            if (!in_array($rol, ['ADMIN', 'GERENTE'], true)) {
-                abort(403, 'Solo ADMIN o GERENTE pueden aplicar descuentos o propinas.');
+            if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+                abort(403, 'Solo ADMIN, GERENTE o CAJERO pueden aplicar descuentos o propinas.');
             }
         } else {
             $descuento = 0.0;
