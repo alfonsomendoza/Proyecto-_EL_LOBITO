@@ -43,6 +43,14 @@ class RolesCatalogoTest extends TestCase
         Schema::create('roles', function (Blueprint $t) {
             $t->increments('id');
             $t->string('nombre', 30)->unique();
+
+            // Activación (migración 2026_10_18_000003) y auditoría de la
+            // última desactivación / reactivación.
+            $t->boolean('activo')->default(1);
+            $t->integer('desactivado_por')->nullable();
+            $t->timestamp('desactivado_en')->nullable();
+            $t->integer('reactivado_por')->nullable();
+            $t->timestamp('reactivado_en')->nullable();
         });
 
         Schema::create('usuarios', function (Blueprint $t) {
@@ -64,6 +72,14 @@ class RolesCatalogoTest extends TestCase
         }
 
         return (int) DB::table('roles')->insertGetId(['nombre' => $nombre]);
+    }
+
+    /**
+     * ID real del rol en la tabla (no el "esperado").
+     */
+    private function rolId(string $nombre): int
+    {
+        return (int) DB::table('roles')->where('nombre', $nombre)->value('id');
     }
 
     private function usuario(string $rolNombre): User
@@ -410,5 +426,365 @@ class RolesCatalogoTest extends TestCase
                 ->assertStatus(200)
                 ->assertDontSee(route('roles.index'));
         }
+    }
+
+    /* ==================================================================
+     | 11. Estado inicial: los cinco roles quedan ACTIVOS
+     | ================================================================== */
+
+    public function test_los_cinco_roles_inician_activos(): void
+    {
+        foreach (self::OFICIALES as $rol) {
+            $this->rol($rol);
+        }
+
+        $admin = $this->usuario('ADMIN');
+
+        // Ningún rol desactivado y la migración deja las columnas de auditoría vacías.
+        $this->assertSame(0, DB::table('roles')->where('activo', 0)->count());
+        $this->assertSame(5, DB::table('roles')->where('activo', 1)->count());
+        $this->assertNull(DB::table('roles')->where('nombre', 'CAJERO')->value('desactivado_en'));
+
+        $this->actingAs($admin)
+            ->get(route('roles.index'))
+            ->assertStatus(200)
+            ->assertSee('ACTIVO')
+            ->assertDontSee('INACTIVO');
+    }
+
+    /* ==================================================================
+     | 12. Desactivar un rol con usuarios conserva las asignaciones
+     | ================================================================== */
+
+    public function test_admin_desactiva_rol_con_usuarios_conservando_asignaciones(): void
+    {
+        $this->rol('ADMIN');
+        $cajeroId = $this->rol('CAJERO');
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+
+        $resp = $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $cajeroId])
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        // Se informa el número real de usuarios asociados.
+        $this->assertSame(1, $resp->json('usuarios'));
+
+        // El rol NO se borra; queda inactivo.
+        $this->assertDatabaseHas('roles', ['id' => $cajeroId, 'activo' => 0]);
+
+        // La asignación del usuario se conserva intacta (no se reasigna a nadie).
+        $this->assertSame($cajeroId, (int) DB::table('usuarios')->where('id', $cajero->id)->value('rol_id'));
+
+        // Auditoría: quedó registrado quién y cuándo desactivó.
+        $fila = DB::table('roles')->where('id', $cajeroId)->first();
+        $this->assertSame((int) $admin->id, (int) $fila->desactivado_por);
+        $this->assertNotNull($fila->desactivado_en);
+        $this->assertNull($fila->reactivado_en);
+    }
+
+    /* ==================================================================
+     | 12b. La pantalla muestra estado, usuarios asociados y protección ADMIN
+     | ================================================================== */
+
+    public function test_pantalla_muestra_usuarios_asociados_y_estado(): void
+    {
+        foreach (self::OFICIALES as $rol) {
+            $this->rol($rol);
+        }
+
+        $admin = $this->usuario('ADMIN');
+        $this->usuario('CAJERO');
+
+        // Desactivamos CAJERO (tiene 1 usuario asociado).
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 0]);
+
+        $html = $this->actingAs($admin)
+            ->get(route('roles.index'))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('INACTIVO', $html);
+        $this->assertStringContainsString('btn-estado-rol', $html);
+        // ADMIN aparece protegido (nunca se puede desactivar desde la pantalla).
+        $this->assertStringContainsString('Protegido', $html);
+        // Los cinco roles oficiales siguen listados.
+        $this->assertSame(5, DB::table('roles')->count());
+    }
+
+    /* ==================================================================
+     | 13. Usuario con rol desactivado no puede iniciar sesión
+     | ================================================================== */
+
+    public function test_usuario_con_rol_desactivado_no_puede_iniciar_sesion(): void
+    {
+        $this->rol('ADMIN');
+        $this->usuario('CAJERO');
+
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 0]);
+
+        $this->post(route('login.post'), [
+            'usuario' => 'cajero_test',
+            'password' => 'secret123',
+        ])->assertSessionHasErrors('usuario');
+
+        $this->assertGuest();
+
+        // Al reactivar el rol, el mismo usuario puede entrar.
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 1]);
+
+        $this->post(route('login.post'), [
+            'usuario' => 'cajero_test',
+            'password' => 'secret123',
+        ])->assertRedirect(route('inicio'));
+
+        $this->assertAuthenticated();
+    }
+
+    /* ==================================================================
+     | 14. Sesiones ya abiertas se bloquean en su siguiente solicitud
+     | ================================================================== */
+
+    public function test_sesion_existente_se_bloquea_al_desactivar_el_rol(): void
+    {
+        $this->rol('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+
+        // Antes de desactivar, la sesión funciona con normalidad.
+        $this->actingAs($cajero)->get(route('inicio'))->assertStatus(200);
+
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 0]);
+
+        // La misma sesión queda bloqueada en la siguiente petición web...
+        $this->actingAs($cajero)->get(route('inicio'))->assertStatus(403);
+
+        // ...y también en peticiones que esperan JSON.
+        $this->actingAs($cajero)
+            ->getJson(route('inicio'))
+            ->assertStatus(403)
+            ->assertJson(['exito' => false]);
+    }
+
+    /* ==================================================================
+     | 15. Reactivar devuelve el acceso y registra la auditoría
+     | ================================================================== */
+
+    public function test_reactivar_rol_devuelve_el_acceso(): void
+    {
+        $this->rol('ADMIN');
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        $cajeroId = $this->rolId('CAJERO');
+
+        DB::table('roles')->where('id', $cajeroId)->update(['activo' => 0]);
+        $this->actingAs($cajero)->get(route('inicio'))->assertStatus(403);
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'reactivar', 'id' => $cajeroId])
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $fila = DB::table('roles')->where('id', $cajeroId)->first();
+        $this->assertSame(1, (int) $fila->activo);
+        $this->assertSame((int) $admin->id, (int) $fila->reactivado_por);
+        $this->assertNotNull($fila->reactivado_en);
+
+        // El usuario recupera el acceso sin modificar su registro.
+        $this->assertSame($cajeroId, (int) DB::table('usuarios')->where('id', $cajero->id)->value('rol_id'));
+        $this->actingAs($cajero)->get(route('inicio'))->assertStatus(200);
+    }
+
+    /* ==================================================================
+     | 16. ADMIN no puede desactivarse
+     | ================================================================== */
+
+    public function test_admin_no_puede_desactivarse(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $adminId = $this->rolId('ADMIN');
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $adminId])
+            ->assertStatus(422)
+            ->assertJson(['exito' => false]);
+
+        $this->assertSame(1, (int) DB::table('roles')->where('id', $adminId)->value('activo'));
+    }
+
+    /* ==================================================================
+     | 17. Solo ADMIN puede cambiar el estado (autorización en backend)
+     | ================================================================== */
+
+    public function test_solo_admin_puede_cambiar_el_estado(): void
+    {
+        $this->rol('ADMIN');
+        $this->rol('GERENTE');
+        $gerente = $this->usuario('GERENTE');
+        $cajeroId = $this->rol('CAJERO');
+
+        $this->actingAs($gerente)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $cajeroId])
+            ->assertStatus(403)
+            ->assertJson(['exito' => false]);
+
+        $this->assertSame(1, (int) DB::table('roles')->where('id', $cajeroId)->value('activo'));
+    }
+
+    /* ==================================================================
+     | 18. No se puede desactivar un rol no oficial ni inexistente
+     | ================================================================== */
+
+    public function test_no_se_puede_desactivar_un_rol_no_oficial(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $raroId = $this->rol('ALGO_RARO');
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $raroId])
+            ->assertStatus(422)
+            ->assertJson(['exito' => false]);
+
+        $this->assertSame(1, (int) DB::table('roles')->where('id', $raroId)->value('activo'));
+
+        // Un rol inexistente tampoco se toca.
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => 9999])
+            ->assertStatus(404)
+            ->assertJson(['exito' => false]);
+    }
+
+    /* ==================================================================
+     | 19. Idempotencia: no se repite una operación ya aplicada
+     | ================================================================== */
+
+    public function test_operaciones_de_estado_son_idempotentes(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $cajeroId = $this->rol('CAJERO');
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $cajeroId])
+            ->assertStatus(200);
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'desactivar', 'id' => $cajeroId])
+            ->assertStatus(422);
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'reactivar', 'id' => $cajeroId])
+            ->assertStatus(200);
+
+        $this->actingAs($admin)
+            ->post(route('roles.api'), ['accion' => 'reactivar', 'id' => $cajeroId])
+            ->assertStatus(422);
+    }
+
+    /* ==================================================================
+     | 19b. El selector de usuarios solo ofrece roles ACTIVOS
+     | ================================================================== */
+
+    public function test_selector_de_usuarios_solo_ofrece_roles_activos(): void
+    {
+        foreach (self::OFICIALES as $rol) {
+            $this->rol($rol);
+        }
+
+        $admin = $this->usuario('ADMIN');
+
+        // Desactivamos MESERO: no debe ofrecerse para nuevos usuarios.
+        DB::table('roles')->where('nombre', 'MESERO')->update(['activo' => 0]);
+
+        $html = $this->actingAs($admin)
+            ->get(route('usuarios.index'))
+            ->assertStatus(200)
+            ->getContent();
+
+        // El JSON que alimenta el selector incluye los activos y excluye el inactivo.
+        $this->assertStringContainsString('"nombre":"CAJERO"', $html);
+        $this->assertStringNotContainsString('"nombre":"MESERO"', $html);
+    }
+
+    /* ==================================================================
+     | 20. No se puede asignar un rol inactivo (backend, petición manipulada)
+     | ================================================================== */
+
+    public function test_no_se_puede_asignar_un_rol_inactivo(): void
+    {
+        $this->rol('ADMIN');
+        $admin = $this->usuario('ADMIN');
+        $cajeroId = $this->rol('CAJERO');
+
+        DB::table('roles')->where('id', $cajeroId)->update(['activo' => 0]);
+
+        $this->actingAs($admin)
+            ->post(route('usuarios.api'), [
+                'accion' => 'crear',
+                'nombre' => 'Nuevo Cajero',
+                'username' => 'nuevo_cajero',
+                'password' => 'secret123',
+                'rol_id' => $cajeroId,
+            ])
+            ->assertStatus(200)
+            ->assertJson(['exito' => false]);
+
+        $this->assertDatabaseMissing('usuarios', ['username' => 'nuevo_cajero']);
+
+        // Con el rol activo, la misma petición sí crea el usuario.
+        DB::table('roles')->where('id', $cajeroId)->update(['activo' => 1]);
+
+        $this->actingAs($admin)
+            ->post(route('usuarios.api'), [
+                'accion' => 'crear',
+                'nombre' => 'Nuevo Cajero',
+                'username' => 'nuevo_cajero',
+                'password' => 'secret123',
+                'rol_id' => $cajeroId,
+            ])
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertDatabaseHas('usuarios', ['username' => 'nuevo_cajero', 'rol_id' => $cajeroId]);
+    }
+
+    /* ==================================================================
+     | 21. También se bloquean las rutas que resuelven el rol por SQL (JOIN)
+     | ================================================================== */
+
+    public function test_ruta_con_join_de_roles_queda_bloqueada(): void
+    {
+        // `MesaController::api` resuelve el rol con un JOIN a `roles`. La
+        // protección efectiva la aporta el middleware: si el rol está
+        // desactivado, la petición se rechaza ANTES de llegar al controlador.
+        $this->rol('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 0]);
+
+        $this->actingAs($cajero)
+            ->postJson(route('mesas.api'), ['accion' => 'crear_mesa', 'numero' => 'X1'])
+            ->assertStatus(403)
+            ->assertJson(['exito' => false])
+            ->assertJsonFragment(['error' => 'Tu rol está desactivado. Contacta al administrador para que lo reactive.']);
+    }
+
+    /* ==================================================================
+     | 22. Un rol desactivado puede cerrar sesión (no queda atrapado)
+     | ================================================================== */
+
+    public function test_usuario_con_rol_desactivado_puede_cerrar_sesion(): void
+    {
+        $this->rol('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        DB::table('roles')->where('nombre', 'CAJERO')->update(['activo' => 0]);
+
+        // Bloqueado para operar...
+        $this->actingAs($cajero)->get(route('inicio'))->assertStatus(403);
+
+        // ...pero sí puede cerrar sesión.
+        $this->actingAs($cajero)
+            ->post(route('logout'))
+            ->assertRedirect(route('login'));
+
+        $this->assertGuest();
     }
 }

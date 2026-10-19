@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 
 class UsuarioController extends Controller
 {
@@ -105,14 +106,22 @@ class UsuarioController extends Controller
                 ->get();
         }
 
-        // Roles reales del sistema
+        // Roles reales del sistema para el selector. Solo se ofrecen los
+        // ACTIVOS: no tiene sentido asignar un rol desactivado (sus usuarios
+        // no podrían operar). Si la migración aún no está aplicada, se
+        // muestran todos, como antes.
+        $rolesQuery = DB::table('roles');
+        if (Schema::hasColumn('roles', 'activo')) {
+            $rolesQuery->where('activo', 1);
+        }
+
         if ($rol === 'GERENTE') {
-            $roles = DB::table('roles')
+            $roles = (clone $rolesQuery)
                 ->whereIn('nombre', ['CAJERO', 'MESERO', 'COCINERO'])
                 ->orderBy('id')
                 ->get();
         } else {
-            $roles = DB::table('roles')->orderBy('id')->get();
+            $roles = $rolesQuery->orderBy('id')->get();
         }
 
         // Filtros actuales, para repintar el formulario.
@@ -190,12 +199,22 @@ class UsuarioController extends Controller
                 ]);
             }
 
-            // El rol debe existir realmente (no inventamos roles).
-            $rolExiste = DB::table('roles')->where('id', $rol_id)->exists();
-            if (! $rolExiste) {
+            // El rol debe existir realmente (no inventamos roles) y estar
+            // ACTIVO: un rol desactivado no se puede asignar, ni siquiera con
+            // una petición HTTP manipulada.
+            $rolElegido = DB::table('roles')->where('id', $rol_id)->first();
+
+            if (! $rolElegido) {
                 return response()->json([
                     'exito' => false,
                     'error' => 'El rol seleccionado no existe.',
+                ]);
+            }
+
+            if (Schema::hasColumn('roles', 'activo') && (int) $rolElegido->activo === 0) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'El rol seleccionado está desactivado y no se puede asignar.',
                 ]);
             }
 
