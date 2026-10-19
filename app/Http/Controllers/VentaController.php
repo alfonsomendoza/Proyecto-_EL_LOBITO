@@ -2408,9 +2408,11 @@ class VentaController extends Controller
 
                     // Protección de cocina: si el cocinero ya tiene el plato
                     // EN_PREPARACION o LISTO, NO se traslada (todo o nada).
-                    if (in_array((string) $linea->estado_preparacion, ['EN_PREPARACION', 'LISTO'], true)) {
-                        throw new \RuntimeException('No se puede trasladar: el pedido de cocina ya está en preparación o listo.');
-                    }
+                    // Esta restricción DEBE ELIMINARSE según el requerimiento:
+                    // las líneas pueden trasladarse conservando su estado.
+                    // if (in_array((string) $linea->estado_preparacion, ['EN_PREPARACION', 'LISTO'], true)) {
+                    //     throw new \RuntimeException('No se puede trasladar: el pedido de cocina ya está en preparación o listo.');
+                    // }
                 }
 
                 // -------------------------------------------------------
