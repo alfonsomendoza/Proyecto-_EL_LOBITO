@@ -11,6 +11,19 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // Guardas de instalación limpia y de bases importadas desde respaldo:
+        //
+        //  - Si la tabla `usuarios` no existe, esta migración no puede (ni
+        //    debe) añadir nada; en una instalación limpia la crea
+        //    2026_09_18_000001 (que corre ANTES que esta).
+        //  - Si la columna `activo` ya existe (p. ej. respaldo de producción
+        //    importado sin registrar la migración), no se vuelve a añadir.
+        //
+        // Así `php artisan migrate` no falla ni duplica la columna.
+        if (!Schema::hasTable('usuarios') || Schema::hasColumn('usuarios', 'activo')) {
+            return;
+        }
+
         // Agregamos la columna activo a la tabla usuarios.
         // 1 = usuario activo
         // 0 = usuario desactivado
@@ -26,9 +39,11 @@ return new class extends Migration
      */
     public function down(): void
     {
-        // Eliminamos la columna si hacemos rollback.
-        Schema::table('usuarios', function (Blueprint $table) {
-            $table->dropColumn('activo');
-        });
+        // Solo eliminamos la columna si existe (misma guarda que up()).
+        if (Schema::hasTable('usuarios') && Schema::hasColumn('usuarios', 'activo')) {
+            Schema::table('usuarios', function (Blueprint $table) {
+                $table->dropColumn('activo');
+            });
+        }
     }
 };
