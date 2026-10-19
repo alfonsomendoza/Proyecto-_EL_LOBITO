@@ -144,6 +144,13 @@ Route::middleware(['auth'])->group(function () {
     | VENTAS Y DIVISIÓN DE CUENTAS
     |--------------------------------------------------------------------------
     */
+
+    // Tipo de cambio vigente para cobros en USD (solo lectura). IMPORTANTE:
+    // DEBE registrarse ANTES de /pos/{id}, porque esa ruta captura cualquier
+    // segmento de dos componentes y "tipo-cambio" llegaría como {id}.
+    Route::get('/pos/tipo-cambio', [VentaController::class, 'tipoCambio'])
+        ->name('pos.tipoCambio');
+
     Route::get('/pos/{id}', [VentaController::class, 'pos'])
         ->name('pos.index');
 
@@ -159,19 +166,31 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/pos/cuentas/{cuentaId}/pagar', [VentaController::class, 'pagarCuenta'])
         ->name('pos.cuentas.pagar');
 
+    // Prefactura imprimible (SOLO LECTURA): no marca nada como pagado,
+    // no emite factura y no toca la mesa ni la venta. Acepta ?descuento=&propina=
+    // para previsualizar los ajustes capturados en el modal de cobro.
+    Route::get('/pos/cuentas/{cuentaId}/prefactura', [VentaController::class, 'prefactura'])
+        ->name('pos.cuentas.prefactura');
+
     // Traslado de cuentas entre mesas (ADMIN, GERENTE y CAJERO).
+    //  - Traslado de la MESA COMPLETA (mueve toda la venta):
     Route::post('/pos/cuentas/{cuentaId}/trasladar', [VentaController::class, 'trasladarCuenta'])
         ->name('pos.cuentas.trasladar');
 
-    // (Eliminadas) POST /pos/cuentas/{cuentaId}/trasladar-individual y
-    // POST /pos/cuentas/{cuentaId}/dividir.
+    //  - Traslado INDIVIDUAL de una subcuenta (mueve solo su consumo a
+    //    otra mesa). Implementado de verdad esta vez: el método existe,
+    //    valida permisos, cocina y trazabilidad (ver trasladarConsumoCuenta).
+    Route::post('/pos/cuentas/{cuentaId}/trasladar-consumo', [VentaController::class, 'trasladarConsumoCuenta'])
+        ->name('pos.cuentas.trasladoConsumo');
+
+    // (Eliminada) POST /pos/cuentas/{cuentaId}/dividir.
     //
-    // Apuntaban a VentaController@trasladarCuentaIndividual y a
-    // VentaController@dividirCuenta, métodos que NO existen: cualquier
-    // petición a esas rutas terminaba en un error 500.
+    // Apuntaba a VentaController@dividirCuenta, un método que NO existe:
+    // cualquier petición a esa ruta terminaba en un error 500.
     //
-    // Las operaciones reales siguen disponibles y sin cambios:
+    // Las operaciones reales disponibles son:
     //  - Traslado de la mesa completa -> pos.cuentas.trasladar (trasladarCuenta)
+    //  - Traslado de una subcuenta     -> pos.cuentas.trasladoConsumo (trasladarConsumoCuenta)
     //  - División de cuentas          -> pos.cuentas.dividir (guardarDivision)
 
     // Anulación lógica de un producto individual (solo ADMIN y GERENTE).

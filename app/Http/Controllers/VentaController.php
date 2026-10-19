@@ -9,6 +9,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 
 class VentaController extends Controller
 {
@@ -41,6 +43,20 @@ class VentaController extends Controller
     {
         return $this->configuracion()->cocinaDigitalHabilitada();
     }
+
+    /**
+     * Métodos de pago del cobro (formato de líneas múltiples `pagos[]`).
+     * El banco NO es un método: es un dato extra de las líneas con tarjeta.
+     */
+    private const METODOS_PAGO = [
+        'EFECTIVO_CORDOBA', // efectivo en córdobas
+        'EFECTIVO_USD',     // efectivo en dólares (conversión con tasa del día)
+        'TARJETA_DEBITO',   // tarjeta de débito (requiere banco)
+        'TARJETA_CREDITO',  // tarjeta de crédito (requiere banco)
+    ];
+
+    /** Bancos admitidos para pagos con tarjeta (débito o crédito). */
+    private const BANCOS_TARJETA = ['Banpro', 'Ficohsa', 'BAC', 'Lafise'];
 
     /**
      * ============================================================
@@ -371,6 +387,12 @@ class VentaController extends Controller
                     $venta->id
                 )
 
+                // Las líneas trasladadas en origen quedan con cantidad 0
+                // (no se borran: conservan comanda, notas e historial). Ese
+                // consumo YA está en la mesa destino, así que aquí no se
+                // muestran.
+                ->where('venta_detalles.cantidad', '>', 0)
+
                 // Campos que utiliza el Blade.
                 ->select(
                     'venta_detalles.id',
@@ -397,6 +419,20 @@ class VentaController extends Controller
                     // Número de ticket de la comanda.
                     'comandas.numero_ticket'
                 )
+
+                // Traslado individual: $h->trasladado indica que la línea
+                // LLEGÓ de otra mesa (existe como destino en
+                // traslado_detalles). Se usa EXISTS (y no JOIN) para no
+                // duplicar filas; las líneas normales del POS valen 0.
+                // Va con addSelect: un ->select() posterior borraría la
+                // columna.
+                ->addSelect([
+                    DB::raw(
+                        'EXISTS (SELECT 1 FROM traslado_detalles'
+                        . ' WHERE traslado_detalles.venta_detalle_destino_id = venta_detalles.id)'
+                        . ' AS trasladado'
+                    ),
+                ])
 
                 // Mantener orden de creación.
                 ->orderBy('venta_detalles.id')
@@ -1664,7 +1700,9 @@ class VentaController extends Controller
                     }
 
 
-                    // Verificar si existen productos activos.
+                    // Verificar si existen productos activos. Las líneas
+                    // vaciadas por un traslado individual (cantidad 0) no
+                    // cuentan: ese consumo ya está en la mesa destino.
                     $cantidadDetalles =
                         DB::table('venta_detalles')
                             ->where(
@@ -1675,6 +1713,7 @@ class VentaController extends Controller
                                 'estado',
                                 'ACTIVO'
                             )
+                            ->where('cantidad', '>', 0)
                             ->count();
 
 
@@ -1908,11 +1947,9 @@ class VentaController extends Controller
             })->values();
         }
 
-        // Cuenta representativa para el traslado de la MESA COMPLETA. El POS
-        // maneja una venta por mesa, así que mover una subcuenta de forma
-        // individual no es posible con el esquema actual; el backend mueve
-        // TODA la venta (todas las cuentas) a la mesa destino. Solo se
-        // necesita una cuenta ABIERTA válida de la venta como referencia.
+        // Cuenta representativa para el traslado de la MESA COMPLETA (mueve
+        // TODA la venta). El traslado INDIVIDUAL de una subcuenta se ofrece
+        // aparte, por cuenta, en la tarjeta de cada una (botón "Trasladar").
         $cuentaTrasladoId = optional($cuentas->firstWhere('estado', 'ABIERTA'))->id;
 
         // Rol real del usuario autenticado para decidir qué acciones mostrar.
@@ -1923,6 +1960,17 @@ class VentaController extends Controller
         $mesasDestino = DB::table('mesas')
             ->where('id', '!=', $mesaId)
             ->where('estado', 'LIBRE')
+            ->orderBy('numero')
+            ->get();
+
+        // Mesas candidatas para el traslado INDIVIDUAL de una subcuenta: se
+        // admite tanto una mesa LIBRE (se le crea venta) como una OCUPADA
+        // con venta ACTIVA (la subcuenta se añade a su consumo). Las mesas
+        // COBRANDO se excluyen porque están en pleno cobro. El backend
+        // vuelve a validar todo dentro de la transacción.
+        $mesasDestinoIndividual = DB::table('mesas')
+            ->where('id', '!=', $mesaId)
+            ->whereIn('estado', ['LIBRE', 'OCUPADA'])
             ->orderBy('numero')
             ->get();
 
@@ -1939,6 +1987,9 @@ class VentaController extends Controller
         $hayConsumosActivos = DB::table('venta_detalles')
             ->where('venta_id', $venta->id)
             ->where('estado', 'ACTIVO')
+            // Líneas vaciadas por un traslado individual (cantidad 0) no son
+            // consumo de esta mesa: sin este filtro la mesa quedaría bloqueada.
+            ->where('cantidad', '>', 0)
             ->exists();
 
         $hayAsignacionesPendientes = DB::table('cuenta_detalles')
@@ -1967,6 +2018,9 @@ class VentaController extends Controller
             // Traslado de mesa completa entre mesas (Fase 6).
             'puedeTrasladar' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
             'mesasDestino' => $mesasDestino,
+            // Mesas candidatas para el traslado individual de una subcuenta
+            // (LIBRES u OCUPADAS, se valida en backend).
+            'mesasDestinoIndividual' => $mesasDestinoIndividual,
             // Cuenta ABIERTA de referencia para trasladar la venta completa.
             'cuentaTrasladoId' => $cuentaTrasladoId,
             // La venta activa no tiene ningún consumo ni saldo pendiente.
@@ -2082,10 +2136,13 @@ class VentaController extends Controller
                 DB::table('comandas')->where('venta_id', $venta->id)->update(['mesa_id' => $mesaDestinoId]);
 
                 // 5. Estados de mesa coherentes con el consumo REAL de la venta
-                //    trasladada, no por el mero hecho de moverla.
+                //    trasladada, no por el mero hecho de moverla. Las líneas
+                //    vaciadas por un traslado individual (cantidad 0) no
+                //    cuentan como consumo.
                 $tieneConsumos = DB::table('venta_detalles')
                     ->where('venta_id', $venta->id)
                     ->where('estado', 'ACTIVO')
+                    ->where('cantidad', '>', 0)
                     ->exists();
 
                 // El destino solo se ocupa si la venta trasladada trae consumos.
@@ -2129,6 +2186,503 @@ class VentaController extends Controller
             ]);
         } catch (\Throwable $e) {
             Log::warning('No se pudo trasladar la cuenta', ['cuenta_id' => $cuentaId, 'error' => $e->getMessage()]);
+
+            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+    }
+
+    /**
+     * =========================================================================
+     * TRASLADO INDIVIDUAL DE UNA SUBCUENTA A OTRA MESA
+     * =========================================================================
+     *
+     * Mueve SOLO el consumo de una subcuenta (no la mesa completa) hacia
+     * otra mesa. Reglas de negocio que cumple:
+     *
+     *  - Autorizan ADMIN, GERENTE y CAJERO (mismos permisos que dividir y
+     *    cobrar). La validación SIEMPRE está aquí, en el servidor.
+     *  - La cuenta origen debe estar ABIERTA en una venta ACTIVA.
+     *  - Si alguna línea afectada ya está EN_PREPARACION o LISTO en cocina,
+     *    se rechaza TODO el traslado (todo o nada): nunca se mueve comida
+     *    que el cocinero ya tiene en marcha.
+     *  - El origen solo REDUCE cantidad y subtotal, conservando comanda_id,
+     *    estado, notas y estado_preparacion: no se borra nada ni se reescribe
+     *    el historial. Al llegar a 0 la línea queda oculta por el filtro
+     *    cantidad > 0; su asignación se marca eliminada (cuenta_detalles
+     *    exige cantidad > 0, por eso no se pone a cero).
+     *  - El destino crea líneas NUEVAS sin comanda ni estado_preparacion
+     *    (el traslado nunca re-imprime comida a cocina) y con
+     *    trasladado_desde_id para pintar el aviso «Este pedido fue
+     *    trasladado a otra mesa. No volver a prepararlo».
+     *  - Si la mesa destino está LIBRE se le crea venta con su Cuenta
+     *    Principal (patrón del POS); si está OCUPADA, la subcuenta se añade
+     *    a su venta ACTIVA como cuenta nueva.
+     *  - La cuenta origen vacía pasa a CANCELADA; si la mesa origen se queda
+     *    sin consumo real ni saldos, vuelve a LIBRE. La venta origen nunca
+     *    cambia su estado financiero aquí.
+     *  - `clave_operacion` da idempotencia: reenviar la misma petición no
+     *    duplica el movimiento (columna única en traslados_cuenta).
+     *  - Trazabilidad completa en traslados_cuenta + traslado_detalles.
+     *
+     * Responde JSON siempre: el flujo sale del panel con fetch/AJAX.
+     */
+    public function trasladarConsumoCuenta(Request $request, int $cuentaId)
+    {
+        // 1. Autorización primero, siempre en el servidor.
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return response()->json(['exito' => false, 'error' => 'Usuario no autenticado.'], 401);
+        }
+
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para trasladar cuentas.'], 403);
+        }
+
+        // 2. Validación de entrada.
+        $request->validate([
+            'mesa_destino_id' => ['required', 'integer', 'exists:mesas,id'],
+            'clave_operacion' => ['nullable', 'string', 'max:64'],
+        ]);
+
+        try {
+            $resultado = DB::transaction(function () use ($request, $usuario, $cuentaId) {
+                $mesaDestinoId = (int) $request->input('mesa_destino_id');
+                $claveOperacion = $request->input('clave_operacion') ?: null;
+
+                // -------------------------------------------------------
+                // IDEMPOTENCIA
+                // -------------------------------------------------------
+                // Si esta misma clave ya registró un traslado, la petición
+                // se reenvió (doble clic, red inestable): se devuelve el
+                // resultado anterior sin repetir el movimiento.
+                if ($claveOperacion) {
+                    $trasladoPrevio = DB::table('traslados_cuenta')
+                        ->where('clave_operacion', $claveOperacion)
+                        ->first();
+
+                    if ($trasladoPrevio) {
+                        return [
+                            'idempotente' => true,
+                            'traslado_id' => (int) $trasladoPrevio->id,
+                            'cuenta_destino_id' => (int) $trasladoPrevio->cuenta_destino_id,
+                            'venta_destino_id' => (int) $trasladoPrevio->venta_destino_id,
+                            'mesa_destino_id' => (int) $trasladoPrevio->mesa_destino_id,
+                        ];
+                    }
+                }
+
+                // -------------------------------------------------------
+                // LECTURAS DE NAVEGACIÓN (sin bloqueo)
+                // -------------------------------------------------------
+                $cuentaNav = DB::table('cuentas')->where('id', $cuentaId)->first();
+                if (!$cuentaNav) {
+                    throw new \RuntimeException('La cuenta no existe.');
+                }
+
+                // Candidata a venta destino si la mesa ya está ocupada (se
+                // vuelve a validar con bloqueos más abajo).
+                $ventaDestinoNav = DB::table('ventas')
+                    ->where('mesa_id', $mesaDestinoId)
+                    ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                    ->orderByDesc('id')
+                    ->first();
+
+                // -------------------------------------------------------
+                // ORDEN GLOBAL DE BLOQUEO (igual que el resto del POS):
+                // ventas (id ASC) -> cuenta origen -> mesas (id ASC) ->
+                // líneas (venta_detalles id ASC). Las dos ventas se bloquean
+                // en la MISMA consulta ordenada para que dos traslados
+                // cruzados (A→B y B→A) esperen siempre en el mismo orden.
+                // -------------------------------------------------------
+                $idsVentas = array_values(array_unique(array_filter([
+                    (int) $cuentaNav->venta_id,
+                    $ventaDestinoNav ? (int) $ventaDestinoNav->id : null,
+                ])));
+                sort($idsVentas);
+
+                $ventasBloqueadas = DB::table('ventas')
+                    ->whereIn('id', $idsVentas)
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                $ventaOrigen = $ventasBloqueadas->get((int) $cuentaNav->venta_id);
+                if (!$ventaOrigen || !in_array($ventaOrigen->estado, ['ACTIVA', 'ABIERTA'], true)) {
+                    throw new \RuntimeException('La venta de origen no está activa.');
+                }
+
+                // La cuenta origen se bloquea dentro del orden global. La de
+                // destino no existe todavía: se crea aquí mismo.
+                $cuentaOrigen = DB::table('cuentas')->where('id', $cuentaId)->lockForUpdate()->first();
+                if (!$cuentaOrigen || (int) $cuentaOrigen->venta_id !== (int) $ventaOrigen->id) {
+                    throw new \RuntimeException('La cuenta no pertenece a la venta de origen.');
+                }
+
+                // Solo se traslada una cuenta ABIERTA: una PAGADA o CANCELADA
+                // ya no representa consumo por cobrar.
+                if ($cuentaOrigen->estado !== 'ABIERTA') {
+                    throw new \RuntimeException('Solo se pueden trasladar cuentas ABIERTAS.');
+                }
+
+                $mesaOrigenId = (int) $ventaOrigen->mesa_id;
+
+                if ($mesaDestinoId === $mesaOrigenId) {
+                    throw new \RuntimeException('La cuenta ya se encuentra en esa mesa.');
+                }
+
+                // Bloquear ambas mesas en orden determinista (id ASC).
+                $mesas = DB::table('mesas')
+                    ->whereIn('id', [$mesaOrigenId, $mesaDestinoId])
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->keyBy('id');
+
+                $mesaDestino = $mesas->get($mesaDestinoId);
+                if (!$mesaDestino) {
+                    throw new \RuntimeException('La mesa destino no existe.');
+                }
+
+                // Solo LIBRE (se le crea venta) u OCUPADA (se une a su venta
+                // ACTIVA). COBRANDO está en pleno cobro: no se mueve nada.
+                if (!in_array($mesaDestino->estado, ['LIBRE', 'OCUPADA'], true)) {
+                    throw new \RuntimeException('La mesa destino no admite traslados en este momento.');
+                }
+
+                // Coherencia entre lo leído sin bloquear y el estado ya
+                // bloqueado: si cambió entre medias, se rechaza y se pide
+                // reintento (nunca se procede sobre supuestos viejos).
+                $ventaDestino = null;
+
+                if ($mesaDestino->estado === 'OCUPADA') {
+                    $ventaDestino = $ventaDestinoNav
+                        ? $ventasBloqueadas->get((int) $ventaDestinoNav->id)
+                        : null;
+
+                    if (!$ventaDestino || !in_array($ventaDestino->estado, ['ACTIVA', 'ABIERTA'], true)) {
+                        throw new \RuntimeException('La mesa destino está ocupada sin una venta activa. Vuelve a intentarlo.');
+                    }
+                } elseif ($ventaDestinoNav && $ventasBloqueadas->has((int) $ventaDestinoNav->id)) {
+                    throw new \RuntimeException('La mesa destino cambió de estado. Vuelve a intentarlo.');
+                }
+
+                // -------------------------------------------------------
+                // LÍNEAS DE CONSUMO DE LA CUENTA ORIGEN (bloqueadas)
+                // -------------------------------------------------------
+                $lineas = DB::table('cuenta_detalles as cd')
+                    ->join('venta_detalles as vd', 'vd.id', '=', 'cd.venta_detalle_id')
+                    ->where('cd.cuenta_id', $cuentaOrigen->id)
+                    ->where('cd.eliminado', false)
+                    ->where('vd.venta_id', $ventaOrigen->id)
+                    ->orderBy('vd.id')
+                    ->lockForUpdate()
+                    ->get([
+                        'cd.id as cd_id',
+                        'cd.cantidad as cd_cantidad',
+                        'cd.venta_detalle_id',
+                        'vd.id as vd_id',
+                        'vd.producto_id',
+                        'vd.cantidad as vd_cantidad',
+                        'vd.precio_unitario',
+                        'vd.notas as vd_notas',
+                        'vd.estado as vd_estado',
+                        'vd.estado_preparacion',
+                    ]);
+
+                if ($lineas->isEmpty()) {
+                    throw new \RuntimeException('La cuenta no tiene consumo para trasladar.');
+                }
+
+                foreach ($lineas as $linea) {
+                    if ($linea->vd_estado !== 'ACTIVO') {
+                        throw new \RuntimeException('El consumo de la cuenta cambió. Vuelve a intentarlo.');
+                    }
+
+                    if ((int) $linea->cd_cantidad > (int) $linea->vd_cantidad) {
+                        throw new \RuntimeException('Inconsistencia de consumo detectada: no se realizó ningún traslado.');
+                    }
+
+                    // Protección de cocina: si el cocinero ya tiene el plato
+                    // EN_PREPARACION o LISTO, NO se traslada (todo o nada).
+                    if (in_array((string) $linea->estado_preparacion, ['EN_PREPARACION', 'LISTO'], true)) {
+                        throw new \RuntimeException('No se puede trasladar: el pedido de cocina ya está en preparación o listo.');
+                    }
+                }
+
+                // -------------------------------------------------------
+                // DESTINO: venta y cuenta
+                // -------------------------------------------------------
+                if (!$ventaDestino) {
+                    // Mesa LIBRE: se crea la venta al estilo del POS, con su
+                    // Cuenta Principal, para que los pedidos nuevos de esa
+                    // mesa no caigan dentro de la cuenta trasladada.
+                    $ventaDestinoId = DB::table('ventas')->insertGetId([
+                        'mesa_id' => $mesaDestinoId,
+                        'cliente_id' => null,
+                        'descripcion' => 'Consumo Mesa ' . $mesaDestino->numero,
+                        'monto' => 0,
+                        'metodo_pago' => null,
+                        'banco' => null,
+                        'monto_recibido' => null,
+                        'tasa_cambio' => null,
+                        'cambio' => null,
+                        'fecha' => now(),
+                        'estado' => 'ACTIVA',
+                        'usuario_id' => $usuario->id,
+                        'descuento_porcentaje' => 0,
+                        'apertura_id' => null,
+                    ]);
+
+                    DB::table('cuentas')->insert([
+                        'venta_id' => $ventaDestinoId,
+                        'nombre' => 'Cuenta Principal',
+                        'total' => 0,
+                        'estado' => 'ABIERTA',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                } else {
+                    $ventaDestinoId = (int) $ventaDestino->id;
+                }
+
+                // Nombre de la cuenta destino: se conserva el de origen. Si
+                // ya existe ese nombre en la venta destino (de cualquier
+                // estado) se añade « (traslado)» para no confundir dos grupos
+                // distintos con el mismo nombre.
+                $nombreBase = (string) $cuentaOrigen->nombre;
+                $nombreDestino = $nombreBase;
+
+                for ($intento = 1; $intento <= 100; $intento++) {
+                    $existe = DB::table('cuentas')
+                        ->where('venta_id', $ventaDestinoId)
+                        ->where('nombre', $nombreDestino)
+                        ->exists();
+
+                    if (!$existe) {
+                        break;
+                    }
+
+                    $nombreDestino = $nombreBase . ' (traslado' . ($intento > 1 ? ' ' . $intento : '') . ')';
+                }
+
+                $cuentaDestinoId = DB::table('cuentas')->insertGetId([
+                    'venta_id' => $ventaDestinoId,
+                    'nombre' => $nombreDestino,
+                    'total' => 0,
+                    'estado' => 'ABIERTA',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+                // -------------------------------------------------------
+                // MOVER CADA LÍNEA
+                // -------------------------------------------------------
+                $montoTrasladado = 0.0;
+                $lineasMovidas = [];
+
+                foreach ($lineas as $linea) {
+                    $mover = (int) $linea->cd_cantidad;
+
+                    // Subtotales con la misma fórmula que el POS: redondeo a
+                    // 2 decimales calculado por el motor de base de datos.
+                    $subtotalOrigen = DB::selectOne(
+                        'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                        [(int) $linea->vd_cantidad - $mover, $linea->precio_unitario]
+                    )->subtotal;
+
+                    $subtotalTrasladado = DB::selectOne(
+                        'SELECT ROUND(CAST(? AS DECIMAL(10,2)) * CAST(? AS DECIMAL(10,2)), 2) AS subtotal',
+                        [$mover, $linea->precio_unitario]
+                    )->subtotal;
+
+                    // ORIGEN: solo se reduce la línea. Se conservan comanda,
+                    // estado, notas e historial de cocina intactos.
+                    DB::table('venta_detalles')->where('id', $linea->vd_id)->update([
+                        'cantidad' => (int) $linea->vd_cantidad - $mover,
+                        'subtotal' => $subtotalOrigen,
+                        'updated_at' => now(),
+                    ]);
+
+                    // La asignación del origen se marca eliminada (borrado
+                    // lógico): cuenta_detalles exige cantidad > 0, por eso
+                    // NO se pone a cero.
+                    DB::table('cuenta_detalles')->where('id', $linea->cd_id)->update([
+                        'eliminado' => true,
+                        'eliminado_por' => $usuario->id,
+                        'eliminado_en' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    // DESTINO: línea nueva sin comanda ni estado_preparacion
+                    // (la cocina nunca debe re-preparar esto), con la misma
+                    // nota del original y marcada con la línea de origen.
+                    $vdDestinoId = DB::table('venta_detalles')->insertGetId([
+                        'venta_id' => $ventaDestinoId,
+                        'producto_id' => $linea->producto_id,
+                        'cantidad' => $mover,
+                        'precio_unitario' => $linea->precio_unitario,
+                        'subtotal' => $subtotalTrasladado,
+                        'comanda_id' => null,
+                        'cuenta_id' => null,
+                        'estado' => 'ACTIVO',
+                        'notas' => $linea->vd_notas,
+                        'estado_preparacion' => null,
+                        'trasladado_desde_id' => $linea->vd_id,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    // Asignación de la cuenta destino: la fuente de verdad de
+                    // a quién pertenece cada unidad para dividir y cobrar.
+                    DB::table('cuenta_detalles')->insert([
+                        'cuenta_id' => $cuentaDestinoId,
+                        'venta_id' => $ventaDestinoId,
+                        'venta_detalle_id' => $vdDestinoId,
+                        'cantidad' => $mover,
+                        'subtotal' => $subtotalTrasladado,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+
+                    $montoTrasladado += (float) $subtotalTrasladado;
+
+                    $lineasMovidas[] = [
+                        'venta_detalle_origen_id' => (int) $linea->vd_id,
+                        'venta_detalle_destino_id' => $vdDestinoId,
+                        'producto_id' => (int) $linea->producto_id,
+                        'cantidad' => $mover,
+                        'precio_unitario' => $linea->precio_unitario,
+                        'subtotal' => $subtotalTrasladado,
+                    ];
+                }
+
+                // -------------------------------------------------------
+                // TOTALES Y ESTADOS
+                // -------------------------------------------------------
+                // Cuenta destino: suma de sus asignaciones activas.
+                $totalDestino = (float) DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuentaDestinoId)
+                    ->where('eliminado', false)
+                    ->sum('subtotal');
+
+                DB::table('cuentas')->where('id', $cuentaDestinoId)->update([
+                    'total' => $totalDestino,
+                    'updated_at' => now(),
+                ]);
+
+                // Cuenta origen: se recalcula con lo que le quede. Si queda
+                // vacía pasa a CANCELADA (mismo patrón que la subdivisión de
+                // cuentas): nunca se borra, conserva su historial.
+                $totalOrigen = (float) DB::table('cuenta_detalles')
+                    ->where('cuenta_id', $cuentaOrigen->id)
+                    ->where('eliminado', false)
+                    ->sum('subtotal');
+
+                DB::table('cuentas')->where('id', $cuentaOrigen->id)->update([
+                    'total' => $totalOrigen,
+                    'estado' => $totalOrigen > 0 ? 'ABIERTA' : 'CANCELADA',
+                    'updated_at' => now(),
+                ]);
+
+                // Venta origen: el importe es la suma de sus líneas ACTIVAS
+                // (las trasladadas quedan a 0 y no aportan), la misma
+                // fórmula que usan el POS y la anulación de detalles.
+                DB::table('ventas')->where('id', $ventaOrigen->id)->update([
+                    'monto' => DB::table('venta_detalles')
+                        ->where('venta_id', $ventaOrigen->id)
+                        ->where('estado', 'ACTIVO')
+                        ->sum('subtotal'),
+                ]);
+
+                // Venta destino: idéntico recálculo (también correcto cuando
+                // ya tenía consumo previo de otras cuentas).
+                DB::table('ventas')->where('id', $ventaDestinoId)->update([
+                    'monto' => DB::table('venta_detalles')
+                        ->where('venta_id', $ventaDestinoId)
+                        ->where('estado', 'ACTIVO')
+                        ->sum('subtotal'),
+                ]);
+
+                // Mesa destino: ahora tiene consumo real => OCUPADA.
+                DB::table('mesas')->where('id', $mesaDestinoId)->update(['estado' => 'OCUPADA']);
+
+                // Mesa origen: LIBRE solo si ya no queda ni consumo ACTIVO
+                // con cantidad ni cuentas ABIERTAS con saldo pendiente.
+                $origenConConsumo = DB::table('venta_detalles')
+                    ->where('venta_id', $ventaOrigen->id)
+                    ->where('estado', 'ACTIVO')
+                    ->where('cantidad', '>', 0)
+                    ->exists();
+
+                $origenCuentasConSaldo = DB::table('cuentas')
+                    ->where('venta_id', $ventaOrigen->id)
+                    ->where('estado', 'ABIERTA')
+                    ->where('total', '>', 0)
+                    ->exists();
+
+                if (!$origenConConsumo && !$origenCuentasConSaldo) {
+                    DB::table('mesas')->where('id', $mesaOrigenId)->update(['estado' => 'LIBRE']);
+                }
+
+                // -------------------------------------------------------
+                // TRAZABILIDAD
+                // -------------------------------------------------------
+                $trasladoId = DB::table('traslados_cuenta')->insertGetId([
+                    'clave_operacion' => $claveOperacion,
+                    'cuenta_origen_id' => $cuentaOrigen->id,
+                    'cuenta_destino_id' => $cuentaDestinoId,
+                    'venta_origen_id' => $ventaOrigen->id,
+                    'venta_destino_id' => $ventaDestinoId,
+                    'mesa_origen_id' => $mesaOrigenId,
+                    'mesa_destino_id' => $mesaDestinoId,
+                    'usuario_id' => $usuario->id,
+                    'cantidad_lineas' => count($lineasMovidas),
+                    'monto_total' => $montoTrasladado,
+                    'creado_en' => now(),
+                ]);
+
+                foreach ($lineasMovidas as $movida) {
+                    DB::table('traslado_detalles')->insert([
+                        'traslado_id' => $trasladoId,
+                        'venta_detalle_origen_id' => $movida['venta_detalle_origen_id'],
+                        'venta_detalle_destino_id' => $movida['venta_detalle_destino_id'],
+                        'producto_id' => $movida['producto_id'],
+                        'cantidad' => $movida['cantidad'],
+                        'precio_unitario' => $movida['precio_unitario'],
+                        'subtotal' => $movida['subtotal'],
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                return [
+                    'idempotente' => false,
+                    'traslado_id' => $trasladoId,
+                    'cuenta_destino_id' => $cuentaDestinoId,
+                    'venta_destino_id' => $ventaDestinoId,
+                    'mesa_destino_id' => $mesaDestinoId,
+                    'nombre_destino' => $nombreDestino,
+                    'numero_destino' => $mesaDestino->numero,
+                    'lineas' => count($lineasMovidas),
+                    'monto_total' => round($montoTrasladado, 2),
+                ];
+            });
+
+            return response()->json([
+                'exito' => true,
+                'mensaje' => $resultado['idempotente']
+                    ? 'Este traslado ya se había realizado.'
+                    : 'Cuenta trasladada a la mesa ' . $resultado['numero_destino'] . '.',
+                ...$resultado,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('No se pudo trasladar el consumo de la cuenta', [
+                'cuenta_id' => $cuentaId,
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
         }
@@ -2789,20 +3343,89 @@ class VentaController extends Controller
     }
 
     /**
-     * Cobra una cuenta y libera la mesa únicamente al pagar todas las cuentas.
+     * ============================================================
+     * COBRO DE UNA CUENTA (PAGOS MIXTOS + DESCUENTO + PROPINA)
+     * ============================================================
      *
-     * Al confirmar el pago se emite la factura de esa cuenta (ver
-     * App\Services\FacturaService) dentro de la misma transacción, y su número
-     * se devuelve en la respuesta para poder imprimirla desde el POS.
+     * Todo ocurre dentro de UNA transacción:
+     *  1. Autorización y validación de la petición (nunca confiar en JS).
+     *  2. Bloqueo en orden global venta -> cuentas (id ASC), igual que el
+     *     resto del POS: dos cobros simultáneos se serializan.
+     *  3. Total a cobrar = consumo − descuento + propina (fórmula única;
+     *     sin ajustes coincide con el consumo de siempre).
+     *  4. Las líneas de pago se normalizan EN EL SERVIDOR: importes en
+     *     córdobas calculados aquí, USD convertidos con la tasa vigente
+     *     (el sistema nunca inventa un tipo de cambio fijo).
+     *  5. Los pagos deben cubrir el total; el excedente SOLO puede venir
+     *     del efectivo y se devuelve como cambio (nunca negativo).
+     *  6. Cada línea queda en `pagos_cuenta` (idempotencia por
+     *     `clave_operacion`), la cuenta pasa a PAGADA y, si no quedan más
+     *     cuentas abiertas con saldo, la venta se cierra y la mesa se libera.
+     *  7. La factura se emite dentro de la MISMA transacción
+     *     (FacturaService): si algo falla no queda pago sin factura ni
+     *     factura sin pago, y un reintento no duplica cobros, pagos ni
+     *     facturas (la cuenta ya no está ABIERTA).
+     *
+     * Permisos: cobran ADMIN, GERENTE y CAJERO. Descuento y propina solo
+     * los aplican ADMIN y GERENTE. El rol CONTADOR NO existe en `roles`
+     * (solo ADMIN, GERENTE, CAJERO, MESERO, COCINERO): no se agrega en
+     * silencio, su integración requiere un cambio de esquema/roles y queda
+     * como decisión pendiente documentada.
      */
     public function pagarCuenta(Request $request, int $cuentaId)
     {
-        $request->validate(['metodo_pago' => ['required', 'string', 'max:30'], 'monto_recibido' => ['required', 'numeric', 'min:0'], 'banco' => ['nullable', 'string', 'max:30']]);
-        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
-        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) return response()->json(['exito' => false, 'error' => 'No tienes permiso para cobrar.'], 403);
+        // ------------------------------------------------------------
+        // 1. AUTORIZACIÓN PRIMERO (antes de revelar validaciones)
+        // ------------------------------------------------------------
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para cobrar.'], 403);
+        }
+
+        // ------------------------------------------------------------
+        // 2. VALIDACIÓN DE ENTRADA
+        // ------------------------------------------------------------
+        // Se aceptan LOS DOS formatos:
+        //  - Nuevo:  `pagos[]` con varias líneas (efectivo C$, USD, débito,
+        //            crédito con banco) -> pagos mixtos.
+        //  - Antiguo: `metodo_pago` + `monto_recibido` (un solo método),
+        //            que es lo que hoy envía el POS y las pruebas.
+        $request->validate([
+            'metodo_pago' => ['nullable', 'string', 'max:30'],
+            'monto_recibido' => ['nullable', 'numeric', 'min:0'],
+            'banco' => ['nullable', 'string', 'max:30'],
+            'pagos' => ['nullable', 'array'],
+            'pagos.*.clave_operacion' => ['required_with:pagos', 'string', 'max:64'],
+            'pagos.*.metodo_pago' => ['required_with:pagos', 'string', 'max:30', 'in:'.implode(',', self::METODOS_PAGO)],
+            'pagos.*.monto' => ['required_with:pagos', 'numeric', 'gt:0'],
+            'pagos.*.banco' => ['nullable', 'string', 'max:30'],
+            'pagos.*.tasa_cambio' => ['nullable', 'numeric', 'gt:0'],
+            'descuento' => ['nullable', 'numeric', 'min:0'],
+            'descuento_motivo' => ['nullable', 'string', 'max:255'],
+            'propina' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        // ------------------------------------------------------------
+        // 3. AJUSTES OPCIONALES: solo ADMIN/GERENTE los autorizan
+        // ------------------------------------------------------------
+        // Si no se envía nada, ambos son cero: no se aplica ningún ajuste
+        // automático. MESERO ni COCINERO llegan aquí (paso 1).
+        $descuento = round((float) ($request->input('descuento') ?? 0), 2);
+        $propina = round((float) ($request->input('propina') ?? 0), 2);
+        $motivo = trim((string) ($request->input('descuento_motivo') ?? ''));
+
+        if ($descuento < 0 || $propina < 0) {
+            return response()->json(['exito' => false, 'error' => 'El descuento y la propina no pueden ser negativos.'], 422);
+        }
+
+        if (($descuento > 0 || $propina > 0 || $motivo !== '') && !in_array($rol, ['ADMIN', 'GERENTE'], true)) {
+            return response()->json(['exito' => false, 'error' => 'Solo ADMIN o GERENTE pueden aplicar descuentos o propinas.'], 403);
+        }
 
         try {
-            $resultado = DB::transaction(function () use ($request, $cuentaId) {
+            $resultado = DB::transaction(function () use ($request, $cuentaId, $usuario, $descuento, $propina, $motivo) {
                 // Lectura de navegación sin bloqueo: solo para conocer la venta.
                 $cuentaNav = DB::table('cuentas')->where('id', $cuentaId)->first();
                 if (!$cuentaNav) throw new \RuntimeException('La cuenta no existe.');
@@ -2820,14 +3443,124 @@ class VentaController extends Controller
                     ->get()
                     ->keyBy('id');
 
+                // Solo cobra una cuenta ABIERTA: si ya está PAGADA o
+                // CANCELADA el reintento se rechaza y NO se duplican pagos
+                // ni facturas.
                 $cuenta = $cuentas->get($cuentaId);
-                if (!$cuenta || $cuenta->estado !== 'ABIERTA') throw new \RuntimeException('La cuenta no está disponible para cobro.');
+                if (!$cuenta || $cuenta->estado !== 'ABIERTA') throw new \RuntimeException('La cuenta no está disponible para cobro (ya fue pagada o cancelada).');
 
-                $total = (float) DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal');
-                $recibido = (float) $request->input('monto_recibido');
-                if ($total <= 0 || $recibido < $total) throw new \RuntimeException('El monto recibido no cubre el total de la cuenta.');
-                $cambio = $recibido - $total;
-                DB::table('cuentas')->where('id', $cuentaId)->update(['total' => $total, 'estado' => 'PAGADA', 'metodo_pago' => $request->input('metodo_pago'), 'banco' => $request->input('banco'), 'monto_recibido' => $recibido, 'cambio' => $cambio, 'usuario_cobro' => Auth::id(), 'updated_at' => now()]);
+                // ----------------------------------------------------
+                // TOTALES: consumo -> descuento -> base -> propina -> total
+                // ----------------------------------------------------
+                $consumo = (float) DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal');
+
+                if ($consumo <= 0) {
+                    throw new \RuntimeException('La cuenta no tiene consumo por cobrar.');
+                }
+
+                if ($descuento > $consumo) {
+                    throw new \RuntimeException('El descuento (C$ '.number_format($descuento, 2).') no puede superar el consumo de la cuenta (C$ '.number_format($consumo, 2).').');
+                }
+
+                // FÓRMULA ÚNICA de propina: porcentaje sobre la BASE
+                // (consumo − descuento). Nunca se calcula sobre sí misma ni
+                // se aplica dos veces: aquí se fija UNA vez por cobro.
+                $base = round($consumo - $descuento, 2);
+                $totalCobrar = round($base + $propina, 2);
+
+                // ----------------------------------------------------
+                // LÍNEAS DE PAGO (importes en córdobas calculados en
+                // el servidor; ver lineasDePago)
+                // ----------------------------------------------------
+                $lineas = $this->lineasDePago($request);
+
+                $efectivo = 0.0;
+                $otros = 0.0;
+
+                foreach ($lineas as $linea) {
+                    if (str_contains($linea['metodo_pago'], 'EFECTIVO')) {
+                        $efectivo += $linea['monto_cordobas'];
+                    } else {
+                        $otros += $linea['monto_cordobas'];
+                    }
+                }
+
+                $efectivo = round($efectivo, 2);
+                $otros = round($otros, 2);
+
+                // REGLA DE EXCEDENTE: las tarjetas se cobran exactas; no se
+                // devuelve "cambio" por tarjeta. El sobrante solo puede venir
+                // del efectivo (posiblemente convertido desde USD).
+                if ($otros > $totalCobrar) {
+                    throw new \RuntimeException('Los pagos con tarjeta (C$ '.number_format($otros, 2).') exceden el total a cobrar (C$ '.number_format($totalCobrar, 2).'): el excedente solo se admite en efectivo.');
+                }
+
+                $suma = round($efectivo + $otros, 2);
+
+                if ($suma < $totalCobrar) {
+                    throw new \RuntimeException('El total de los pagos (C$ '.number_format($suma, 2).') no cubre el total a cobrar (C$ '.number_format($totalCobrar, 2).').');
+                }
+
+                // Cambio entregado en efectivo; por construcción >= 0.
+                $cambio = round($suma - $totalCobrar, 2);
+
+                // ----------------------------------------------------
+                // IDEMPOTENCIA DE LÍNEAS: una misma clave nunca se
+                // registra dos veces (el índice UNIQUE lo garantiza;
+                // aquí se detecta antes de insertar para dar un
+                // mensaje claro).
+                // ----------------------------------------------------
+                $claves = array_values(array_filter(array_map(fn ($l) => $l['clave_operacion'], $lineas)));
+
+                if ($claves !== [] && DB::table('pagos_cuenta')->whereIn('clave_operacion', $claves)->exists()) {
+                    throw new \RuntimeException('Una línea de pago ya estaba registrada con esa clave (reintento detectado). Vuelve a cargar la cuenta.');
+                }
+
+                // Resumen del cobro para la cuenta: un solo método se guarda
+                // tal cual; varios se guardan como MIXTO (NUNCA se concatena
+                // la lista ni se pisa con el último recibido).
+                $metodos = array_values(array_unique(array_map(fn ($l) => $l['metodo_pago'], $lineas)));
+                $bancos = array_values(array_unique(array_filter(array_map(fn ($l) => $l['banco'], $lineas))));
+
+                // ----------------------------------------------------
+                // REGISTRO DE CADA LÍNEA DE PAGO
+                // ----------------------------------------------------
+                foreach ($lineas as $linea) {
+                    DB::table('pagos_cuenta')->insert([
+                        'clave_operacion' => $linea['clave_operacion'],
+                        'cuenta_id' => (int) $cuentaId,
+                        'venta_id' => (int) $venta->id,
+                        'metodo_pago' => $linea['metodo_pago'],
+                        'banco' => $linea['banco'],
+                        'moneda' => $linea['moneda'],
+                        'monto' => $linea['monto'],
+                        'tasa_cambio' => $linea['tasa_cambio'],
+                        'monto_cordobas' => $linea['monto_cordobas'],
+                        'usuario_id' => (int) $usuario->id,
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                // ----------------------------------------------------
+                // CUENTA PAGADA + AJUSTES (auditoría de quién aplicó
+                // el descuento). `total` sigue siendo el CONSUMO: los
+                // ajustes viven en sus propias columnas.
+                // ----------------------------------------------------
+                DB::table('cuentas')->where('id', $cuentaId)->update([
+                    'total' => $consumo,
+                    'estado' => 'PAGADA',
+                    'descuento' => $descuento,
+                    'descuento_motivo' => $descuento > 0 && $motivo !== '' ? mb_substr($motivo, 0, 255) : null,
+                    'descuento_usuario_id' => $descuento > 0 ? (int) $usuario->id : null,
+                    'propina' => $propina,
+                    'metodo_pago' => count($metodos) === 1 ? $metodos[0] : 'MIXTO',
+                    'banco' => count($bancos) === 1 ? $bancos[0] : null,
+                    'monto_recibido' => $suma,
+                    'cambio' => $cambio,
+                    'usuario_cobro' => (int) $usuario->id,
+                    'updated_at' => now(),
+                ]);
+
                 // Una cuenta vacía no debe impedir el cierre: solo importan
                 // las cuentas abiertas que todavía tienen consumo pendiente.
                 // Lectura con bloqueo para ver el último estado confirmado.
@@ -2838,6 +3571,7 @@ class VentaController extends Controller
                     ->where('total', '>', 0)
                     ->lockForUpdate()
                     ->exists();
+
                 if (!$abiertas) {
                     DB::table('ventas')->where('id', $venta->id)->update(['estado' => 'PAGADA']);
                     DB::table('mesas')->where('id', $venta->mesa_id)->update(['estado' => 'LIBRE']);
@@ -2847,20 +3581,309 @@ class VentaController extends Controller
                 // que no pueda existir un cobro sin factura ni una factura sin
                 // cobro: si la inserción falla, el pago entero se revierte.
                 // Una factura por cobro (por cuenta). Ver FacturaService.
+                // El total que se factura es lo REALMENTE cobrado
+                // (consumo − descuento + propina) y los ajustes quedan en el
+                // detalle JSON del comprobante.
                 $factura = app(FacturaService::class)
-                    ->emitirPorCobro($cuenta, $venta, $total, (int) Auth::id());
+                    ->emitirPorCobro($cuenta, $venta, $totalCobrar, (int) $usuario->id, [
+                        'consumo' => $consumo,
+                        'descuento' => $descuento,
+                        'base' => $base,
+                        'propina' => $propina,
+                        'total' => $totalCobrar,
+                    ]);
 
                 return [
                     'cambio' => $cambio,
                     'mesa_liberada' => !$abiertas,
                     'factura' => $factura->numero_factura,
                     'factura_id' => $factura->id,
+                    'totales' => [
+                        'consumo' => $consumo,
+                        'descuento' => $descuento,
+                        'base' => $base,
+                        'propina' => $propina,
+                        'total' => $totalCobrar,
+                    ],
+                    'pagos' => count($lineas),
                 ];
             });
             return response()->json(['exito' => true, 'mensaje' => $resultado['mesa_liberada'] ? 'Todas las cuentas fueron pagadas. Mesa liberada.' : 'Cuenta pagada. La mesa sigue abierta.', ...$resultado]);
         } catch (\Throwable $e) {
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
         }
+    }
+
+    /**
+     * Convierte la petición en líneas de pago normalizadas. TODOS los importes
+     * en córdobas se calculan aquí, en el servidor: el navegador solo envía el
+     * importe original y (en dólares) la tasa elegida.
+     *
+     * Formato nuevo:   pagos[] = {clave_operacion, metodo_pago, monto, banco?, tasa_cambio?}
+     * Formato antiguo: metodo_pago + monto_recibido (un único método en córdobas).
+     *
+     * Reglas por línea:
+     *  - metodo_pago debe ser de METODOS_PAGO (validado también por Laravel).
+     *  - Tarjeta (débito/crédito): banco OBLIGATORIO y de la lista BANCOS_TARJETA.
+     *  - Dólares: tasa obligatoria > 0; si no llega, se usa la vigente del
+     *    sistema (configuraciones.tipo_cambio_usd o la última tasa de
+     *    caja_cierre). Si no hay NINGUNA, se rechaza el cobro en USD en vez
+     *    de inventar un valor: ese es el punto que debe definir el negocio.
+     *  - El monto en córdobas (monto_cordobas) se deriva SIEMPRE aquí.
+     *
+     * @return array<int, array{clave_operacion: string, metodo_pago: string, banco: ?string, moneda: string, monto: float, tasa_cambio: ?float, monto_cordobas: float}>
+     */
+    private function lineasDePago(Request $request): array
+    {
+        $pagos = $request->input('pagos');
+
+        // ------------------------------------------------------------
+        // Formato nuevo: varias líneas (pagos mixtos).
+        // ------------------------------------------------------------
+        if (is_array($pagos) && $pagos !== []) {
+            $lineas = [];
+
+            foreach (array_values($pagos) as $indice => $pago) {
+                $n = $indice + 1;
+                $metodo = strtoupper(trim((string) ($pago['metodo_pago'] ?? '')));
+
+                if (!in_array($metodo, self::METODOS_PAGO, true)) {
+                    throw new \RuntimeException("Método de pago no válido en la línea $n.");
+                }
+
+                $monto = round((float) ($pago['monto'] ?? 0), 2);
+
+                if ($monto <= 0) {
+                    throw new \RuntimeException("El importe de la línea $n debe ser mayor que cero.");
+                }
+
+                $clave = trim((string) ($pago['clave_operacion'] ?? ''));
+
+                if ($clave === '') {
+                    throw new \RuntimeException("La línea $n no tiene clave de operación.");
+                }
+
+                $esTarjeta = in_array($metodo, ['TARJETA_DEBITO', 'TARJETA_CREDITO'], true);
+                $esDolares = $metodo === 'EFECTIVO_USD';
+
+                // Banco: SOLO en tarjeta, y siempre de la lista oficial.
+                $banco = null;
+
+                if ($esTarjeta) {
+                    $banco = $this->normalizarBanco((string) ($pago['banco'] ?? ''));
+
+                    if ($banco === null) {
+                        throw new \RuntimeException("La línea $n es con tarjeta: seleccione banco (Banpro, Ficohsa, BAC o Lafise).");
+                    }
+                }
+
+                // Tasa de cambio: solo en dólares; nunca un valor inventado
+                // por el código (ver tipoCambioVigente).
+                $tasa = null;
+
+                if ($esDolares) {
+                    $tasa = round((float) ($pago['tasa_cambio'] ?? 0), 4);
+
+                    if ($tasa <= 0) {
+                        $tasa = $this->tipoCambioVigente() ?? 0.0;
+                    }
+
+                    if ($tasa <= 0) {
+                        throw new \RuntimeException('No hay tipo de cambio vigente para cobrar en dólares. Capture la tasa del día (> 0): el sistema no inventa un tipo de cambio.');
+                    }
+                }
+
+                $lineas[] = [
+                    'clave_operacion' => $clave,
+                    'metodo_pago' => $metodo,
+                    'banco' => $banco,
+                    'moneda' => $esDolares ? 'USD' : 'NIO',
+                    'monto' => $monto,
+                    'tasa_cambio' => $esDolares ? $tasa : null,
+                    'monto_cordobas' => $esDolares ? round($monto * $tasa, 2) : $monto,
+                ];
+            }
+
+            return $lineas;
+        }
+
+        // ------------------------------------------------------------
+        // Formato antiguo: un solo método (compatibilidad total con el
+        // POS actual y con las peticiones ya existentes).
+        // ------------------------------------------------------------
+        $metodo = trim((string) ($request->input('metodo_pago') ?? ''));
+
+        if ($metodo === '') {
+            throw new \RuntimeException('Debe indicar al menos un método de pago.');
+        }
+
+        if (strtoupper($metodo) === 'EFECTIVO_USD') {
+            throw new \RuntimeException('Para cobrar en dólares use las líneas de pago (pagos[]) con la tasa del día.');
+        }
+
+        $monto = round((float) ($request->input('monto_recibido') ?? 0), 2);
+
+        if ($monto <= 0) {
+            throw new \RuntimeException('El monto recibido debe ser mayor que cero.');
+        }
+
+        return [[
+            'clave_operacion' => (string) Str::uuid(),
+            'metodo_pago' => mb_substr($metodo, 0, 30),
+            'banco' => $request->filled('banco') ? mb_substr(trim((string) $request->input('banco')), 0, 30) : null,
+            'moneda' => 'NIO',
+            'monto' => $monto,
+            'tasa_cambio' => null,
+            'monto_cordobas' => $monto,
+        ]];
+    }
+
+    /**
+     * Devuelve el banco tal cual está en la lista oficial (respetando su
+     * mayúscula) o null si no es un banco admitido para tarjetas.
+     */
+    private function normalizarBanco(string $banco): ?string
+    {
+        foreach (self::BANCOS_TARJETA as $permitido) {
+            if (strcasecmp($banco, $permitido) === 0) {
+                return $permitido;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Tipo de cambio "vigente" según la información REAL del sistema, en
+     * este orden:
+     *
+     *  1. `configuraciones.tipo_cambio_usd`, si un ADMIN/GERENTE la definió.
+     *  2. La última `tasa_cambio` registrada en un cierre de caja
+     *     (`caja_cierre`), que es la única tasa que el negocio guarda hoy.
+     *  3. null: no hay tasa -> el cobro en USD exige capturarla.
+     *
+     * El código NUNCA devuelve un valor fijo inventado.
+     */
+    private function tipoCambioVigente(): ?float
+    {
+        if (Schema::hasTable('configuraciones')) {
+            $valor = DB::table('configuraciones')->where('clave', 'tipo_cambio_usd')->value('valor');
+
+            if ($valor !== null && is_numeric($valor) && (float) $valor > 0) {
+                return round((float) $valor, 4);
+            }
+        }
+
+        if (Schema::hasTable('caja_cierre')) {
+            $valor = DB::table('caja_cierre')->where('tasa_cambio', '>', 0)->orderByDesc('id')->value('tasa_cambio');
+
+            if ($valor !== null && (float) $valor > 0) {
+                return round((float) $valor, 4);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Tipo de cambio vigente para la interfaz de cobro (solo lectura).
+     * El valor es una SUGERENCIA: la línea de pago en USD siempre guarda la
+     * tasa que quedó confirmada en el cobro.
+     */
+    public function tipoCambio()
+    {
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para consultar el tipo de cambio.'], 403);
+        }
+
+        $tasa = $this->tipoCambioVigente();
+
+        return response()->json([
+            'exito' => true,
+            'tasa' => $tasa,
+            'disponible' => $tasa !== null,
+        ]);
+    }
+
+    /**
+     * ============================================================
+     * PREFACTURA (SOLO LECTURA)
+     * ============================================================
+     *
+     * Imprime la cuenta ANTES de cobrarla. La prefactura:
+     *  - usa los detalles REALMENTE asignados a la cuenta seleccionada
+     *    (FacturaService::detalleCuenta, la misma fuente del cobro), así
+     *    no incluye consumos de otra subcuenta ni líneas anuladas;
+     *  - muestra consumo, descuento, base, propina y total (los ajustes se
+     *    reciben como consulta para previsualizar lo capturado en el modal
+     *    de cobro; NUNCA se guardan aquí);
+     *  - NO marca la cuenta como pagada, NO emite factura, NO toca la mesa
+     *    ni la venta: es una operación independiente del pago.
+     *
+     * Permisos: los mismos del POS (COCINERO no ve información financiera).
+     */
+    public function prefactura(Request $request, int $cuentaId)
+    {
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario?->rol?->nombre ?? ''));
+
+        if ($rol === 'COCINERO' || $rol === '') {
+            abort(403, 'No tienes permiso para imprimir la prefactura.');
+        }
+
+        $cuenta = DB::table('cuentas')->where('id', $cuentaId)->first();
+
+        if (!$cuenta) {
+            abort(404, 'No se encontró la cuenta solicitada.');
+        }
+
+        $venta = DB::table('ventas')->where('id', $cuenta->venta_id)->first();
+        $mesa = $venta ? DB::table('mesas')->where('id', $venta->mesa_id)->first() : null;
+
+        // Detalles realmente asignados a ESTA cuenta (misma fuente que la
+        // factura y el cobro): no duplica ni mezcla subcuentas.
+        $lineas = app(FacturaService::class)->detalleCuenta($cuentaId);
+        $consumo = round(array_sum(array_column($lineas, 'subtotal')), 2);
+
+        // Ajustes previsualizados (query string del modal de cobro). Solo
+        // ADMIN/GERENTE pueden anticipar un descuento o una propina; para
+        // el resto se ignoran si son mayores que cero (no se persisten).
+        $descuento = round((float) $request->query('descuento', 0), 2);
+        $propina = round((float) $request->query('propina', 0), 2);
+
+        if ($descuento < 0 || $propina < 0 || $descuento > $consumo) {
+            abort(422, 'Los ajustes de la prefactura no son válidos.');
+        }
+
+        if ($descuento > 0 || $propina > 0) {
+            if (!in_array($rol, ['ADMIN', 'GERENTE'], true)) {
+                abort(403, 'Solo ADMIN o GERENTE pueden aplicar descuentos o propinas.');
+            }
+        } else {
+            $descuento = 0.0;
+            $propina = 0.0;
+        }
+
+        $base = round($consumo - $descuento, 2);
+        $total = round($base + $propina, 2);
+
+        return view('ventas.prefactura', [
+            'usuario' => $usuario,
+            'mesa' => $mesa,
+            'venta' => $venta,
+            'cuenta' => $cuenta,
+            'lineas' => $lineas,
+            'consumo' => $consumo,
+            'descuento' => $descuento,
+            'base' => $base,
+            'propina' => $propina,
+            'total' => $total,
+            // Propina sugerida: 10 % de la misma base del cálculo.
+            'propinaSugerida' => round($base * 0.10, 2),
+            'emision' => now(),
+        ]);
     }
 
     /**

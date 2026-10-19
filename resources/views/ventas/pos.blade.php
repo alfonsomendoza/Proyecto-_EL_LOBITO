@@ -1014,6 +1014,16 @@
                                     </div>
                                 @endif
 
+                                {{-- Línea que LLEGÓ por traslado individual de otra
+                                     mesa ($h->trasladado = existe en
+                                     traslado_detalles como destino). Aviso para no
+                                     volver a mandarla a preparar. --}}
+                                @if(!empty($h->trasladado) && $h->estado === 'ACTIVO')
+                                    <div class="item-historial-nota" style="background:#fff7e6;border-left-color:#e0a800;color:#8a6d00;font-style:normal;font-weight:700;">
+                                        <i class="fas fa-right-left"></i> Este pedido fue trasladado a otra mesa. No volver a prepararlo.
+                                    </div>
+                                @endif
+
                             </div>
 
                             <div class="item-historial-info">
@@ -1129,6 +1139,15 @@
 
             <div class="panel-footer">
 
+                @php
+                    // Rol del usuario para decidir qué botones se muestran.
+                    // OCULTAR NO SUSTITUYE la autorización: el backend vuelve
+                    // a validar en VentaController::pagarCuenta (403).
+                    $rolFooter = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
+                    // Cobran solo ADMIN, GERENTE y CAJERO (MESERO y COCINERO no).
+                    $puedeCobrarMesa = in_array($rolFooter, ['ADMIN', 'GERENTE', 'CAJERO'], true);
+                @endphp
+
                 <button
                     type="button"
                     class="btn-footer"
@@ -1148,6 +1167,7 @@
                     Pre-Factura
                 </button>
 
+                @if($puedeCobrarMesa)
                 <button
                     type="button"
                     class="btn-footer btn-cobrar"
@@ -1156,6 +1176,7 @@
                     <i class="fas fa-cash-register"></i>
                     Cobrar Mesa
                 </button>
+                @endif
 
             </div>
 
@@ -1243,7 +1264,20 @@
 
 </div>
 
+{{-- Permisos de ajustes del cobro: solo ADMIN y GERENTE aplican descuentos
+     o propinas (el rol CONTADOR NO existe en `roles`, no se agrega en
+     silencio). El backend VUELVE A VALIDARLO: ocultar el input aquí no
+     sustituye la autorización. --}}
+@php
+    $rolPos = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
+    $puedeAjustarCobro = in_array($rolPos, ['ADMIN', 'GERENTE'], true);
+@endphp
+
 <script>
+    // ¿Puede este usuario aplicar descuentos/propinas en el cobro? (si no,
+    // el modal ni siquiera pide estos campos).
+    const PUEDE_AJUSTAR_COBRO = {{ $puedeAjustarCobro ? 'true' : 'false' }};
+
     let nuevoPedido = [];
     let categoriaActual = 'todas';
 
@@ -2167,14 +2201,7 @@
 
             btnPrefactura.addEventListener(
                 'click',
-                function () {
-
-                    Swal.fire(
-                        'Pre-Factura',
-                        'Esta función será habilitada en el módulo de facturación.',
-                        'info'
-                    );
-                }
+                abrirPrefactura
             );
         }
 
@@ -2608,35 +2635,377 @@
             .catch(error => Swal.fire('Error', error.message, 'error'));
     }
 
+    /**
+     * Clave de operación de una línea de pago: el navegador genera un id
+     * único por línea y el backend lo guarda en `pagos_cuenta.clave_operacion`
+     * (columna única). Un reintento con la misma clave nunca duplica pagos.
+     */
+    function claveOperacionPago() {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+        }
+
+        return 'pago-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+    }
+
+    /**
+     * Prefactura imprimible (SOLO LECTURA).
+     *
+     * Abre en una pestaña nueva la prefactura de la cuenta elegida. NO marca
+     * nada como pagado, NO emite factura y NO toca la mesa: la ruta es un GET
+     * de solo lectura (VentaController::prefactura). Si el POS está acotado a
+     * una cuenta (?cuenta=) se imprime esa misma; si no, se elige entre las
+     * cuentas abiertas con consumo de la mesa.
+     */
+    function abrirPrefactura() {
+        const URL_BASE_PREFACTURA = '{{ url("/pos/cuentas") }}';
+        const urlDe = cuentaId => URL_BASE_PREFACTURA + '/' + encodeURIComponent(cuentaId) + '/prefactura';
+
+        const campoCuenta = document.getElementById('cuenta-actual-id');
+
+        if (campoCuenta && campoCuenta.value) {
+            window.open(urlDe(campoCuenta.value), '_blank');
+            return;
+        }
+
+        fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
+            .then(response => response.json())
+            .then(data => {
+                const abiertas = (data.cuentas || []).filter(cuenta => cuenta.estado === 'ABIERTA' && Number(cuenta.total) > 0);
+                if (!abiertas.length) throw new Error('No hay cuentas con consumo por cobrar.');
+
+                const opciones = abiertas.map(cuenta => `<option value="${cuenta.id}">${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total).toFixed(2)}</option>`).join('');
+
+                Swal.fire({
+                    title: 'Imprimir prefactura',
+                    html: `<select id="cuenta-prefactura" class="swal2-select">${opciones}</select>
+                        <p style="font-size:12px;color:#666;">Documento de consulta: NO es factura fiscal y NO marca la cuenta como pagada.</p>`,
+                    showCancelButton: true,
+                    confirmButtonText: 'Abrir e imprimir',
+                    cancelButtonText: 'Cancelar',
+                    preConfirm: () => Number(document.getElementById('cuenta-prefactura').value)
+                }).then(resultado => {
+                    if (!resultado.isConfirmed || !resultado.value) return;
+                    window.open(urlDe(resultado.value), '_blank');
+                });
+            })
+            .catch(error => Swal.fire('Prefactura', error.message, 'warning'));
+    }
+
     function cobrarCuenta() {
         fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
             .then(response => response.json())
             .then(data => {
                 const abiertas = (data.cuentas || []).filter(cuenta => cuenta.estado === 'ABIERTA' && Number(cuenta.total) > 0);
                 if (!abiertas.length) throw new Error('Primero divide y guarda las cuentas con productos asignados.');
-                const opciones = abiertas.map(cuenta => `<option value="${cuenta.id}" data-total="${cuenta.total}">${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total).toFixed(2)}</option>`).join('');
+
+                // POS acotado a una cuenta (?cuenta=): esa queda preseleccionada.
+                const campoCuenta = document.getElementById('cuenta-actual-id');
+                const cuentaAcotada = campoCuenta && campoCuenta.value ? String(campoCuenta.value) : '';
+
+                const opciones = abiertas.map(cuenta => {
+                    const marcada = String(cuenta.id) === cuentaAcotada ? ' selected' : '';
+                    return `<option value="${cuenta.id}" data-total="${cuenta.total}"${marcada}>${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total).toFixed(2)}</option>`;
+                }).join('');
+
+                // Ajustes (descuento/propina): SOLO ADMIN/GERENTE. Si el rol
+                // no puede aplicarlos, el modal ni siquiera los muestra.
+                const htmlAjustes = PUEDE_AJUSTAR_COBRO ? `
+                    <input id="descuento-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Descuento (C$)">
+                    <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
+                    <div style="font-size:12px;color:#555;margin:-4px 0 4px;">
+                        Propina sugerida (10% de la base): <strong id="propina-sugerida">C$ 0.00</strong>
+                        <button type="button" id="propina-sugerir" style="margin-left:6px;background:#6777ef;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Usar 10%</button>
+                        <button type="button" id="propina-quitar" style="margin-left:4px;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Quitar</button>
+                    </div>
+                    <input id="propina-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Propina (C$)">
+                ` : '';
+
+                // Catálogo de métodos (idéntico a VentaController::METODOS_PAGO).
+                const etiquetasMetodo = {
+                    EFECTIVO_CORDOBA: 'Efectivo C$',
+                    EFECTIVO_USD: 'Efectivo USD',
+                    TARJETA_DEBITO: 'Tarjeta débito',
+                    TARJETA_CREDITO: 'Tarjeta crédito'
+                };
+                const esEfectivo = metodo => metodo === 'EFECTIVO_CORDOBA' || metodo === 'EFECTIVO_USD';
+                const esTarjeta = metodo => metodo === 'TARJETA_DEBITO' || metodo === 'TARJETA_CREDITO';
+
+                // Estado del modal: las líneas de pago que se van agregando.
+                let lineasPago = [];
+
+                const leerConsumo = () => {
+                    const sel = document.getElementById('cuenta-cobro');
+                    const opt = sel && sel.selectedOptions[0];
+                    return opt ? Number(opt.dataset.total || 0) : 0;
+                };
+
+                const leerAjustes = () => {
+                    if (!PUEDE_AJUSTAR_COBRO) return { descuento: 0, motivo: '', propina: 0 };
+                    const desc = document.getElementById('descuento-cobro');
+                    const motivo = document.getElementById('motivo-cobro');
+                    const prop = document.getElementById('propina-cobro');
+                    return {
+                        descuento: Number(desc && desc.value || 0),
+                        motivo: motivo ? motivo.value.trim() : '',
+                        propina: Number(prop && prop.value || 0)
+                    };
+                };
+
+                // Consumo → descuento → BASE (para la propina) → propina → total.
+                const leerTotales = () => {
+                    const consumo = leerConsumo();
+                    const ajustes = leerAjustes();
+                    const base = Math.max(0, consumo - ajustes.descuento);
+                    return {
+                        consumo: consumo,
+                        descuento: ajustes.descuento,
+                        motivo: ajustes.motivo,
+                        base: base,
+                        propina: ajustes.propina,
+                        total: base + ajustes.propina
+                    };
+                };
+
+                const sumaLineas = () => lineasPago.reduce((suma, linea) => suma + linea.montoCordobas, 0);
+
+                const pintarCobro = () => {
+                    const t = leerTotales();
+                    const pagado = sumaLineas();
+                    const saldo = t.total - pagado;
+
+                    document.getElementById('resumen-cobro').innerHTML =
+                        `Consumo: <strong>C$ ${t.consumo.toFixed(2)}</strong>` +
+                        (t.descuento > 0 ? ` · Descuento: <strong>− C$ ${t.descuento.toFixed(2)}</strong>` : '') +
+                        ` · Base: C$ ${t.base.toFixed(2)}` +
+                        (t.propina > 0 ? ` · Propina: <strong>+ C$ ${t.propina.toFixed(2)}</strong>` : '') +
+                        `<br>Total por cobrar: <strong>C$ ${t.total.toFixed(2)}</strong>`;
+
+                    if (PUEDE_AJUSTAR_COBRO) {
+                        const sugerida = document.getElementById('propina-sugerida');
+                        if (sugerida) sugerida.textContent = 'C$ ' + (t.base * 0.10).toFixed(2);
+                    }
+
+                    document.getElementById('lista-lineas').innerHTML = lineasPago.length === 0
+                        ? '<span style="color:#999;">Sin líneas de pago agregadas.</span>'
+                        : lineasPago.map((linea, indice) => {
+                            const importe = linea.moneda === 'USD'
+                                ? `USD ${linea.monto.toFixed(2)} × ${Number(linea.tasaCambio).toFixed(4)} = C$ ${linea.montoCordobas.toFixed(2)}`
+                                : `C$ ${linea.montoCordobas.toFixed(2)}`;
+                            const banco = linea.banco ? ` · ${escaparHtml(linea.banco)}` : '';
+                            return `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+                                <span>${etiquetasMetodo[linea.metodoPago]}: ${importe}${banco}</span>
+                                <button type="button" data-quitar-linea="${indice}" title="Quitar línea" style="background:#c0392b;color:#fff;border:0;border-radius:4px;padding:1px 7px;cursor:pointer;">✕</button>
+                            </div>`;
+                        }).join('');
+
+                    document.querySelectorAll('#lista-lineas [data-quitar-linea]').forEach(boton => {
+                        boton.addEventListener('click', function () {
+                            lineasPago.splice(Number(this.dataset.quitarLinea), 1);
+                            pintarCobro();
+                        });
+                    });
+
+                    document.getElementById('saldo-pendiente').innerHTML = saldo > 0.009
+                        ? `Saldo pendiente: <strong style="color:#c0392b;">C$ ${saldo.toFixed(2)}</strong>`
+                        : (saldo < -0.009
+                            ? `Excedente (se devuelve en efectivo): C$ ${(-saldo).toFixed(2)}`
+                            : 'Total cubierto ✓');
+
+                    // Enlace de prefactura con los AJUSTES actuales (previsualiza).
+                    const params = new URLSearchParams();
+                    if (t.descuento > 0) params.set('descuento', t.descuento.toFixed(2));
+                    if (t.propina > 0) params.set('propina', t.propina.toFixed(2));
+                    const consulta = params.toString();
+
+                    document.getElementById('enlace-prefactura').href =
+                        '{{ url("/pos/cuentas") }}/' + encodeURIComponent(document.getElementById('cuenta-cobro').value) + '/prefactura'
+                        + (consulta ? '?' + consulta : '');
+                };
+
                 Swal.fire({
                     title: 'Cobrar cuenta',
-                    html: `<select id="cuenta-cobro" class="swal2-select">${opciones}</select><select id="metodo-cobro" class="swal2-select"><option value="EFECTIVO">Efectivo</option><option value="TARJETA">Tarjeta</option><option value="TRANSFERENCIA">Transferencia</option></select><input id="recibido-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Monto recibido">`,
+                    width: 560,
+                    html: `
+                        <select id="cuenta-cobro" class="swal2-select">${opciones}</select>
+                        <div id="resumen-cobro" style="font-size:13px;color:#333;margin:6px 0;"></div>
+                        ${htmlAjustes}
+                        <div style="border-top:1px dashed #aaa;margin:8px 0 0;padding-top:8px;text-align:left;font-size:13px;">
+                            <strong>Líneas de pago</strong> <span style="color:#777;font-weight:normal;">(varias permitidas)</span>
+                            <select id="metodo-linea" class="swal2-select">
+                                <option value="EFECTIVO_CORDOBA">Efectivo (córdobas)</option>
+                                <option value="EFECTIVO_USD">Efectivo (dólares USD)</option>
+                                <option value="TARJETA_DEBITO">Tarjeta de débito</option>
+                                <option value="TARJETA_CREDITO">Tarjeta de crédito</option>
+                            </select>
+                            <select id="banco-linea" class="swal2-select" style="display:none;">
+                                <option value="">Seleccionar banco…</option>
+                                <option value="Banpro">Banpro</option>
+                                <option value="Ficohsa">Ficohsa</option>
+                                <option value="BAC">BAC</option>
+                                <option value="Lafise">Lafise</option>
+                            </select>
+                            <input id="tasa-linea" class="swal2-input" type="number" min="0" step="0.0001" placeholder="Tasa USD del día" style="display:none;">
+                            <input id="monto-linea" class="swal2-input" type="number" min="0" step="0.01" placeholder="Monto de la línea">
+                            <button type="button" id="agregar-linea" style="display:block;width:100%;background:#47c363;color:#fff;border:0;border-radius:6px;padding:8px;font-weight:bold;cursor:pointer;">+ Agregar línea de pago</button>
+                            <div id="error-linea" style="color:#c0392b;font-size:12px;min-height:14px;"></div>
+                            <div id="lista-lineas" style="margin:4px 0;"></div>
+                            <div id="saldo-pendiente" style="font-size:13px;margin-top:4px;"></div>
+                        </div>
+                        <a id="enlace-prefactura" href="#" target="_blank" rel="noopener" style="font-size:12px;display:inline-block;margin-top:6px;">Imprimir prefactura (no es factura fiscal)</a>
+                    `,
                     showCancelButton: true,
                     confirmButtonText: 'Confirmar pago',
-                    preConfirm: () => ({
-                        cuentaId: Number(document.getElementById('cuenta-cobro').value),
-                        metodo: document.getElementById('metodo-cobro').value,
-                        recibido: Number(document.getElementById('recibido-cobro').value)
-                    })
-                }).then(result => {
-                    if (!result.isConfirmed) return;
+                    cancelButtonText: 'Cancelar',
+                    didOpen: () => {
+                        // Banco solo para tarjeta; tasa solo para dólares.
+                        document.getElementById('metodo-linea').addEventListener('change', function () {
+                            document.getElementById('banco-linea').style.display = esTarjeta(this.value) ? '' : 'none';
+                            document.getElementById('tasa-linea').style.display = this.value === 'EFECTIVO_USD' ? '' : 'none';
+                        });
+
+                        // Tasa USD SUGERIDA por el servidor (configuraciones o
+                        // último cierre de caja). Si no hay ninguna, el cajero
+                        // la captura: el código nunca inventa un valor fijo.
+                        fetch('{{ route("pos.tipoCambio") }}')
+                            .then(respuesta => respuesta.json())
+                            .then(detalle => {
+                                const campo = document.getElementById('tasa-linea');
+                                if (campo && detalle.exito && detalle.tasa) campo.value = Number(detalle.tasa).toFixed(4);
+                            })
+                            .catch(() => { /* sin sugerencia: el cajero captura la tasa */ });
+
+                        document.getElementById('agregar-linea').addEventListener('click', () => {
+                            const error = document.getElementById('error-linea');
+                            const metodo = document.getElementById('metodo-linea').value;
+                            const monto = Number(document.getElementById('monto-linea').value || 0);
+                            const banco = esTarjeta(metodo) ? document.getElementById('banco-linea').value : '';
+                            const tasa = metodo === 'EFECTIVO_USD' ? Number(document.getElementById('tasa-linea').value || 0) : 0;
+
+                            if (!(monto > 0)) { error.textContent = 'Ingrese un monto mayor que cero.'; return; }
+                            if (esTarjeta(metodo) && !banco) { error.textContent = 'Seleccione el banco de la tarjeta.'; return; }
+                            if (metodo === 'EFECTIVO_USD' && !(tasa > 0)) { error.textContent = 'Capture la tasa de cambio USD del día (el sistema no la inventa).'; return; }
+
+                            // Vista previa: el servidor recalcula siempre.
+                            const montoCordobas = metodo === 'EFECTIVO_USD' ? Math.round(monto * tasa * 100) / 100 : monto;
+
+                            lineasPago.push({
+                                claveOperacion: claveOperacionPago(),
+                                metodoPago: metodo,
+                                moneda: metodo === 'EFECTIVO_USD' ? 'USD' : 'NIO',
+                                banco: banco || null,
+                                monto: monto,
+                                tasaCambio: metodo === 'EFECTIVO_USD' ? tasa : null,
+                                montoCordobas: montoCordobas
+                            });
+
+                            error.textContent = '';
+                            document.getElementById('monto-linea').value = '';
+                            pintarCobro();
+                        });
+
+                        // Resumen, saldo y prefactura se recalculan en vivo.
+                        ['cuenta-cobro', 'descuento-cobro', 'motivo-cobro', 'propina-cobro'].forEach(id => {
+                            const campo = document.getElementById(id);
+                            if (!campo) return;
+                            campo.addEventListener('input', pintarCobro);
+                            campo.addEventListener('change', pintarCobro);
+                        });
+
+                        if (PUEDE_AJUSTAR_COBRO) {
+                            const btnSugerir = document.getElementById('propina-sugerir');
+                            const btnQuitar = document.getElementById('propina-quitar');
+
+                            if (btnSugerir) btnSugerir.addEventListener('click', () => {
+                                document.getElementById('propina-cobro').value = (leerTotales().base * 0.10).toFixed(2);
+                                pintarCobro();
+                            });
+
+                            if (btnQuitar) btnQuitar.addEventListener('click', () => {
+                                document.getElementById('propina-cobro').value = '';
+                                pintarCobro();
+                            });
+                        }
+
+                        pintarCobro();
+                    },
+                    preConfirm: () => {
+                        const t = leerTotales();
+
+                        if (lineasPago.length === 0) {
+                            return Swal.showValidationMessage('Agregue al menos una línea de pago.');
+                        }
+
+                        if (t.descuento > t.consumo) {
+                            return Swal.showValidationMessage('El descuento no puede superar el consumo de la cuenta.');
+                        }
+
+                        if (t.descuento < 0 || t.propina < 0) {
+                            return Swal.showValidationMessage('El descuento y la propina no pueden ser negativos.');
+                        }
+
+                        const pagado = sumaLineas();
+
+                        if (pagado < t.total - 0.009) {
+                            return Swal.showValidationMessage(`Faltan C$ ${(t.total - pagado).toFixed(2)} por cubrir.`);
+                        }
+
+                        // Misma regla que el servidor: el excedente solo viene
+                        // del efectivo (no se devuelve cambio por tarjeta).
+                        const otros = lineasPago
+                            .filter(linea => !esEfectivo(linea.metodoPago))
+                            .reduce((suma, linea) => suma + linea.montoCordobas, 0);
+
+                        if (otros > t.total + 0.009) {
+                            return Swal.showValidationMessage('Los pagos con tarjeta no pueden exceder el total: el excedente solo se admite en efectivo.');
+                        }
+
+                        return {
+                            cuentaId: Number(document.getElementById('cuenta-cobro').value),
+                            descuento: t.descuento,
+                            motivo: t.motivo,
+                            propina: t.propina,
+                            lineas: lineasPago
+                        };
+                    }
+                }).then(resultado => {
+                    if (!resultado.isConfirmed) return;
+
+                    const cobro = resultado.value;
                     const form = new FormData();
                     form.append('_token', '{{ csrf_token() }}');
-                    form.append('metodo_pago', result.value.metodo);
-                    form.append('monto_recibido', result.value.recibido);
-                    fetch('/pos/cuentas/' + result.value.cuentaId + '/pagar', { method: 'POST', body: form })
+                    form.append('descuento', cobro.descuento.toFixed(2));
+                    form.append('propina', cobro.propina.toFixed(2));
+                    if (cobro.motivo) form.append('descuento_motivo', cobro.motivo);
+
+                    // Una fila en pagos_cuenta POR LÍNEA (nunca concatenados).
+                    cobro.lineas.forEach((linea, indice) => {
+                        form.append(`pagos[${indice}][clave_operacion]`, linea.claveOperacion);
+                        form.append(`pagos[${indice}][metodo_pago]`, linea.metodoPago);
+                        form.append(`pagos[${indice}][monto]`, linea.monto.toFixed(2));
+                        if (linea.banco) form.append(`pagos[${indice}][banco]`, linea.banco);
+                        if (linea.tasaCambio) form.append(`pagos[${indice}][tasa_cambio]`, linea.tasaCambio);
+                    });
+
+                    fetch('/pos/cuentas/' + cobro.cuentaId + '/pagar', { method: 'POST', body: form })
                         .then(response => response.json())
                         .then(respuesta => {
                             if (!respuesta.exito) throw new Error(respuesta.error || 'No se pudo cobrar.');
-                            const texto = respuesta.mensaje + ' Cambio: C$ ' + Number(respuesta.cambio).toFixed(2)
-                                + (respuesta.factura ? '<br><strong>Factura: ' + escaparHtml(respuesta.factura) + '</strong>' : '');
+
+                            const totales = respuesta.totales || {};
+                            let texto = respuesta.mensaje;
+
+                            if (totales.total !== undefined) {
+                                texto += `<br>Consumo: C$ ${Number(totales.consumo).toFixed(2)}`;
+                                if (Number(totales.descuento) > 0) texto += ` · Descuento: −C$ ${Number(totales.descuento).toFixed(2)}`;
+                                texto += ` · Base: C$ ${Number(totales.base).toFixed(2)}`;
+                                if (Number(totales.propina) > 0) texto += ` · Propina: +C$ ${Number(totales.propina).toFixed(2)}`;
+                                texto += `<br><strong>Total cobrado: C$ ${Number(totales.total).toFixed(2)}</strong>`;
+                            }
+
+                            texto += '<br>Cambio: C$ ' + Number(respuesta.cambio).toFixed(2);
+                            if (respuesta.factura) texto += '<br><strong>Factura: ' + escaparHtml(respuesta.factura) + '</strong>';
+
                             const despuesDeCobrar = () => respuesta.mesa_liberada ? window.location.href = '{{ route("mesas.index") }}' : location.reload();
 
                             // La factura ya fue emitida en el backend dentro de la
@@ -2654,8 +3023,8 @@
                                 showDenyButton: true,
                                 confirmButtonText: 'Imprimir factura',
                                 denyButtonText: 'Cerrar'
-                            }).then(resultado => {
-                                if (resultado.isConfirmed) {
+                            }).then(resultadoImpresion => {
+                                if (resultadoImpresion.isConfirmed) {
                                     window.open('{{ route("facturas.ticket") }}?id=' + encodeURIComponent(respuesta.factura_id), '_blank');
                                 }
                                 despuesDeCobrar();

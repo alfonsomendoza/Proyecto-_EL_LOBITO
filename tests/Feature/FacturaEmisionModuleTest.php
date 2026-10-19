@@ -300,6 +300,38 @@ class FacturaEmisionModuleTest extends TestCase
         $this->assertSame('ABIERTA', DB::table('cuentas')->find($escena['cuentas'][0])->estado);
     }
 
+    public function test_cocinero_no_puede_cobrar_ni_emitir_factura(): void
+    {
+        $cocinero = $this->usuario('COCINERO');
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarMesa($cajero, 1, 100, 1);
+
+        // Petición directa al endpoint (como haría un navegador manipulado):
+        // el backend responde 403 sin tocar nada.
+        $this->cobrar($cocinero, $escena['cuentas'][0], 100)
+            ->assertStatus(403);
+
+        $this->assertSame(0, DB::table('facturas')->count());
+        $this->assertSame(0, DB::table('pagos_cuenta')->count());
+        $this->assertSame('ABIERTA', DB::table('cuentas')->find($escena['cuentas'][0])->estado);
+        $this->assertSame('ACTIVA', DB::table('ventas')->find($escena['venta'])->estado);
+    }
+
+    public function test_admin_y_gerente_tambien_pueden_cobrar(): void
+    {
+        // ADMIN y GERENTE conservan el permiso de cobro actual.
+        foreach (['ADMIN', 'GERENTE'] as $rolNombre) {
+            $usuario = $this->usuario($rolNombre);
+            $escena = $this->montarMesa($usuario, 1, 100, 1);
+
+            $this->cobrar($usuario, $escena['cuentas'][0], 100)
+                ->assertStatus(200)
+                ->assertJson(['exito' => true]);
+
+            $this->assertSame('PAGADA', DB::table('cuentas')->find($escena['cuentas'][0])->estado);
+        }
+    }
+
     /* ------------------------------------------------------------------
      | Mesa dividida
      | ------------------------------------------------------------------ */

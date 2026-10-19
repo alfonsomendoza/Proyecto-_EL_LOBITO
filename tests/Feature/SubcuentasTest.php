@@ -6,6 +6,7 @@ use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Tests\Feature\Concerns\CreaEsquemaTrasladosPagos;
 use Tests\TestCase;
 
 /*
@@ -24,6 +25,8 @@ use Tests\TestCase;
  */
 class SubcuentasTest extends TestCase
 {
+    use CreaEsquemaTrasladosPagos;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -194,6 +197,10 @@ class SubcuentasTest extends TestCase
             $t->timestamp('creado_en')->useCurrent();
             $t->unique(['origen_tipo', 'origen_id']);
         });
+
+        // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
+        // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.
+        $this->crearEsquemaTrasladosPagos();
     }
 
     private function usuario(string $rolNombre): User

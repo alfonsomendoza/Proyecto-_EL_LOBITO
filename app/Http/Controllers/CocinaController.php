@@ -123,9 +123,15 @@ class CocinaController extends Controller
                     throw new \RuntimeException('La línea no corresponde a cocina.');
                 }
 
-                // 2. La línea debe seguir activa (no anulada/cancelada).
+                // 2. La línea debe seguir activa (no anulada/cancelada) y con
+                //    unidades reales: una línea vaciada por un traslado
+                //    individual (cantidad 0) ya no es tarea de cocina.
                 if ($linea->estado !== 'ACTIVO') {
                     throw new \RuntimeException('La línea ya no está activa.');
+                }
+
+                if ((int) $linea->cantidad <= 0) {
+                    throw new \RuntimeException('La línea ya no tiene unidades en esta mesa.');
                 }
 
                 // 3. La comanda y la venta deben ser elegibles.
@@ -215,6 +221,11 @@ class CocinaController extends Controller
             ->join('mesas as m', 'm.id', '=', 'v.mesa_id')
             ->where('vd.estado', 'ACTIVO')
             ->where('p.requiere_cocina', 1)
+            // Traslado individual: una línea vaciada en origen (cantidad 0)
+            // sigue con su comanda y estado PENDIENTE, pero su comida ya
+            // está en la mesa destino: sin este filtro reaparecería en el
+            // monitor como tarea fantasma.
+            ->where('vd.cantidad', '>', 0)
             ->whereNotNull('vd.comanda_id')
             ->whereNotNull('vd.estado_preparacion')
             ->whereNotIn('c.estado', ['ANULADA', 'CANCELADA'])

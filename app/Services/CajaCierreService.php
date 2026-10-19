@@ -8,6 +8,7 @@ use App\Models\CajaGasto;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Lógica de negocio del Cierre de Caja (arqueo de turno).
@@ -139,6 +140,16 @@ class CajaCierreService
      * Resumen de ventas del turno separado por forma de cobro y por banco
      * (las tarjetas se agrupan por banco para contrastar con los vouchers).
      *
+     * COBROS CON PAGOS MIXTOS: cuando la cuenta tiene líneas en `pagos_cuenta`
+     * (tabla creada por 2026_10_18_000002), el resumen se calcula LÍNEA A
+     * LÍNEA: cada método aporta su importe en córdobas y el cambio (que
+     * siempre se entrega en efectivo) se descuenta una sola vez del efectivo
+     * para quedarse con el neto retenido en caja — el mismo criterio que ya
+     * aplicaba `cuentas.total` en los cobros de un solo método. Si la tabla
+     * todavía no existe (esquemas manuales de pruebas o despliegue sin
+     * migrar) se conserva íntegro el cálculo histórico por
+     * `cuentas.metodo_pago` + `cuentas.total`.
+     *
      * @return array{cuentas: Collection, cantidad: int, efectivo: float, tarjeta: float, transferencia: float, otro: float, tarjetas_por_banco: array<string, float>, total: float}
      */
     public function resumenVentas(CajaApertura $apertura, ?Carbon $fin = null): array
@@ -148,7 +159,52 @@ class CajaCierreService
         $totales = ['EFECTIVO' => 0.0, 'TARJETA' => 0.0, 'TRANSFERENCIA' => 0.0, 'OTRO' => 0.0];
         $tarjetasPorBanco = [];
 
+        // Líneas de pago reales de las cuentas del turno (una consulta sola).
+        $pagosPorCuenta = collect();
+
+        if (Schema::hasTable('pagos_cuenta') && $cuentas->isNotEmpty()) {
+            $pagosPorCuenta = DB::table('pagos_cuenta')
+                ->whereIn('cuenta_id', $cuentas->pluck('id'))
+                ->orderBy('id')
+                ->get()
+                ->groupBy(fn ($pago) => (int) $pago->cuenta_id);
+        }
+
         foreach ($cuentas as $cuenta) {
+            $lineas = $pagosPorCuenta->get((int) $cuenta->id);
+
+            if ($lineas !== null && $lineas->isNotEmpty()) {
+                // ---- Cobro con líneas de pago (mixtos o simples) ----
+                $ingresos = ['EFECTIVO' => 0.0, 'TARJETA' => 0.0, 'TRANSFERENCIA' => 0.0, 'OTRO' => 0.0];
+                $bancosDeLaCuenta = [];
+
+                foreach ($lineas as $linea) {
+                    $categoria = $this->clasificarMetodo($linea->metodo_pago);
+                    $ingresos[$categoria] += (float) $linea->monto_cordobas;
+
+                    if ($categoria === 'TARJETA') {
+                        $banco = trim((string) ($linea->banco ?? '')) ?: 'SIN BANCO';
+                        $bancosDeLaCuenta[$banco] = ($bancosDeLaCuenta[$banco] ?? 0.0) + (float) $linea->monto_cordobas;
+                    }
+                }
+
+                // El cambio (siempre en efectivo) no es ingreso: se entrega
+                // al cliente al salir de la gaveta. Se descuenta UNA vez.
+                $cambio = max(0.0, (float) ($cuenta->cambio ?? 0));
+                $ingresos['EFECTIVO'] = max(0.0, $ingresos['EFECTIVO'] - $cambio);
+
+                foreach ($ingresos as $categoria => $monto) {
+                    $totales[$categoria] += $monto;
+                }
+
+                foreach ($bancosDeLaCuenta as $banco => $monto) {
+                    $tarjetasPorBanco[$banco] = ($tarjetasPorBanco[$banco] ?? 0.0) + $monto;
+                }
+
+                continue;
+            }
+
+            // ---- Cobro histórico: un solo método sin líneas registradas ----
             $categoria = $this->clasificarMetodo($cuenta->metodo_pago ?? null);
             $monto = (float) $cuenta->total;
             $totales[$categoria] += $monto;

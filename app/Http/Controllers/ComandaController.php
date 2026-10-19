@@ -70,6 +70,11 @@ class ComandaController extends Controller
          * Los productos de la comanda viven en venta_detalles, enlazados
          * mediante comanda_id. Se incluyen únicamente los detalles activos.
          * Solo se muestran los productos que requieren cocina.
+         *
+         * `cantidad > 0` excluye las líneas vaciadas por un traslado
+         * individual (quedaron en 0 pero conservan la comanda original):
+         * esa comida ya está en la mesa destino, reimprimirla aquí
+         * duplicaría el pedido de cocina.
          */
         $detallesQuery = DB::table('venta_detalles')
             ->join(
@@ -80,6 +85,7 @@ class ComandaController extends Controller
             )
             ->where('venta_detalles.comanda_id', $id)
             ->where('venta_detalles.estado', 'ACTIVO')
+            ->where('venta_detalles.cantidad', '>', 0)
             ->where('productos.requiere_cocina', 1);
 
         if ($cuentaId > 0) {
@@ -163,6 +169,9 @@ class ComandaController extends Controller
         foreach ($comandas as $comanda) {
 
             // Los productos viven en venta_detalles, enlazados por comanda_id.
+            // `cantidad > 0` excluye las líneas vaciadas por un traslado
+            // individual: esa comida ya está en la mesa destino y no debe
+            // volver a salir a cocina.
             $detallesQuery = DB::table('venta_detalles')
                 ->join(
                     'productos',
@@ -175,6 +184,7 @@ class ComandaController extends Controller
                     $comanda->id
                 )
                 ->where('venta_detalles.estado', 'ACTIVO')
+                ->where('venta_detalles.cantidad', '>', 0)
                 ->where('productos.requiere_cocina', 1);
 
             if ($cuentaId > 0) {
@@ -263,6 +273,13 @@ class ComandaController extends Controller
          * fuera porque su estado pasa a CANCELADO) cuyo producto requiere
          * cocina. Se agrupa por producto para sumar las cantidades de las
          * distintas órdenes sin duplicar.
+         *
+         * Dos filtros del traslado individual:
+         *  - `cantidad > 0`: excluye las líneas de ORIGEN vaciadas al
+         *    trasladarse (esa comida ya está en la mesa destino).
+         *  - `comanda_id NOT NULL`: excluye las líneas que LLEGARON por
+         *    traslado: nacen sin comanda para que la cocina no las vuelva
+         *    a preparar. Una línea de cocina normal SIEMPRE tiene comanda.
          */
         $detallesQuery = DB::table('venta_detalles')
             ->join(
@@ -276,6 +293,8 @@ class ComandaController extends Controller
                 $ventaId
             )
             ->where('venta_detalles.estado', 'ACTIVO')
+            ->where('venta_detalles.cantidad', '>', 0)
+            ->whereNotNull('venta_detalles.comanda_id')
             ->where('productos.requiere_cocina', 1);
 
         if ($cuentaId > 0) {
@@ -340,6 +359,13 @@ class ComandaController extends Controller
      * modifica estados, cantidades o contadores.
      *
      * Solo permite platos de cocina activos (requiere_cocina = 1).
+     *
+     * TRASLADO INDIVIDUAL: las líneas que llegaron de otra mesa se crean
+     * SIN comanda_id, por lo que el JOIN con `comandas` no las encuentra y
+     * este método responde 404. Es el comportamiento deseado: un plato
+     * trasladado se imprime desde el POS de la mesa destino (que muestra el
+     * aviso «Este pedido fue trasladado a otra mesa»), nunca como
+     * reimpresión de cocina desde la mesa de origen.
      */
     public function imprimirPlato(int $detalleId)
     {

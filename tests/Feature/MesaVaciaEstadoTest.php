@@ -6,6 +6,7 @@ use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Tests\Feature\Concerns\CreaEsquemaTrasladosPagos;
 use Tests\TestCase;
 
 /*
@@ -26,6 +27,8 @@ use Tests\TestCase;
  */
 class MesaVaciaEstadoTest extends TestCase
 {
+    use CreaEsquemaTrasladosPagos;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -210,6 +213,10 @@ class MesaVaciaEstadoTest extends TestCase
             $t->integer('usuario_id')->nullable();
             $t->string('estado', 20)->default('EMITIDA');
         });
+
+        // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
+        // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.
+        $this->crearEsquemaTrasladosPagos();
     }
 
     private function usuario(string $rolNombre): User

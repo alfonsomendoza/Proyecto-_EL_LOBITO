@@ -8,9 +8,14 @@ use Illuminate\Support\Facades\Schema;
 
 trait CreaEsquemaCompleto
 {
+    use CreaEsquemaTrasladosPagos;
+
     protected function crearEsquemaCompleto(): void
     {
         foreach ([
+            'pagos_cuenta',
+            'traslado_detalles',
+            'traslados_cuenta',
             'movimientos_inventario',
             'inventario_producto',
             'comanda_detalles',
@@ -244,5 +249,9 @@ trait CreaEsquemaCompleto
             $t->text('observacion')->nullable();
             $t->timestamp('creado_en')->nullable();
         });
+
+        // Traslados (pos() consulta traslado_detalles), pagos mixtos y
+        // ajustes de cobro: replica 2026_10_18_000001 y 2026_10_18_000002.
+        $this->crearEsquemaTrasladosPagos();
     }
 }

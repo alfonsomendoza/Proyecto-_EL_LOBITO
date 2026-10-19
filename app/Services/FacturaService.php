@@ -34,11 +34,18 @@ use Illuminate\Support\Str;
  * con "SELECT MAX(...) + 1" introduciría una carrera entre dos cobros
  * simultáneos. En su lugar:
  *
- *  1. Se inserta la fila con un número provisional único (UUID).
+ *  1. Se inserta la fila con un número provisional único (marcador "TMP-"
+ *     + los 15 primeros caracteres del UUID, 19 caracteres en total: LA
+ *     COLUMNA ES varchar(20) EN MySQL REAL y no admite más. Un UUID completo
+ *     ("TMP-" + 36) provocaba el error 1406 Data too long en producción y
+ *     el cobro entero se revolvía).
  *  2. El número definitivo se deriva del `id` autoincremental de la propia
  *     fila, que el motor asigna de forma atómica: dos transacciones no pueden
  *     obtener el mismo id, luego no pueden obtener el mismo número.
  *  3. Se reemplaza el provisional por el definitivo (mismma transacción).
+ *
+ *  El marcador TMP- NUNCA persiste: o se reemplaza por FAC-#### dentro de la
+ *  misma transacción, o la transacción se revierte y la fila desaparece.
  *
  * Esto reproduce además la continuidad del histórico real (FAC-0001..FAC-0003
  * corresponden a los ids 1..3). Si un número resultara ocupado por un registro
@@ -58,27 +65,35 @@ class FacturaService
      *
      * @param  object  $cuenta  Fila de `cuentas` (debe estar recién pagada).
      * @param  object  $venta  Fila de `ventas` a la que pertenece la cuenta.
-     * @param  float  $total  Total cobrado (suma de los detalles no anulados).
+     * @param  float  $total  Total REALMENTE cobrado (consumo − descuento + propina).
      * @param  int  $usuarioId  Cajero que registró el cobro.
+     * @param  array  $ajustes  Ajustes opcionales del cobro
+     *                          (consumo, descuento, base, propina, total).
+     *                          Se guardan en el detalle JSON del comprobante.
      * @return object Factura emitida (id, numero_factura, estado).
      */
-    public function emitirPorCobro(object $cuenta, object $venta, float $total, int $usuarioId): object
+    public function emitirPorCobro(object $cuenta, object $venta, float $total, int $usuarioId, array $ajustes = []): object
     {
-        $lineas = $this->lineasDeLaCuenta((int) $cuenta->id);
+        $lineas = $this->detalleCuenta((int) $cuenta->id);
         $mesa = $this->descripcionMesa($venta, $cuenta);
 
         // `detalle_consumo` es JSON. Se conserva la clave "nota" porque el
         // ticket histórico y `FacturaController::ticket` ya la interpretan, y
         // se añade "lineas" con el detalle real para las facturas nuevas.
-        $detalleConsumo = json_encode([
+        // "ajustes" (si el cobro tuvo descuento/propina) deja constancia de
+        // cómo se llegó al total facturado: consumo − descuento + propina.
+        $detalleConsumo = json_encode(array_merge([
             'nota' => $this->resumenTexto($lineas, $mesa),
             'lineas' => $lineas,
             'cuenta' => (string) $cuenta->nombre,
-        ], JSON_UNESCAPED_UNICODE);
+        ], $ajustes !== [] ? ['ajustes' => $ajustes] : []), JSON_UNESCAPED_UNICODE);
 
-        // 1) Fila con número provisional único (ver docblock).
+        // 1) Fila con número provisional único (ver docblock). OJO: el
+        //    marcador debe caber en varchar(20) — por eso se trunca el UUID
+        //    a 15 caracteres; NO se amplía la columna (mantendría el formato
+        //    oficial FAC-#### del histórico y su índice UNIQUE).
         $id = DB::table('facturas')->insertGetId([
-            'numero_factura' => 'TMP-'.Str::uuid()->toString(),
+            'numero_factura' => 'TMP-'.substr(Str::uuid()->toString(), 0, 15),
             'venta_id' => (int) $venta->id,
             'cuenta_id' => (int) $cuenta->id,
             'mesa' => mb_substr($mesa, 0, 50),
@@ -125,11 +140,18 @@ class FacturaService
     }
 
     /**
-     * Detalle real de la cuenta, calculado con la MISMA fuente que el cobro:
-     * `cuenta_detalles` (sin anulados) unidas a `venta_detalles` y `productos`.
-     * Así el total de la factura siempre coincide con lo cobrado.
+     * Detalle real de la cuenta, calculado con la MISMA fuente que el cobro
+     * y la prefactura: `cuenta_detalles` (sin anulados) unidas a
+     * `venta_detalles` y `productos`. Así la prefactura, el cobro y la
+     * factura coinciden siempre (y ninguna incluye el consumo de otra
+     * subcuenta).
+     *
+     * PÚBLICO a propósito: `VentaController::prefactura()` reutiliza esta
+     * misma consulta para imprimir la cuenta antes de cobrarla.
+     *
+     * @return array<int, array{producto: string, cantidad: int, precio: float, subtotal: float}>
      */
-    private function lineasDeLaCuenta(int $cuentaId): array
+    public function detalleCuenta(int $cuentaId): array
     {
         return DB::table('cuenta_detalles as cd')
             ->join('venta_detalles as vd', 'vd.id', '=', 'cd.venta_detalle_id')

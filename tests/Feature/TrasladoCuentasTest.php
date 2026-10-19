@@ -6,6 +6,7 @@ use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Tests\Feature\Concerns\CreaEsquemaTrasladosPagos;
 use Tests\TestCase;
 
 /*
@@ -24,6 +25,8 @@ use Tests\TestCase;
  */
 class TrasladoCuentasTest extends TestCase
 {
+    use CreaEsquemaTrasladosPagos;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -154,6 +157,10 @@ class TrasladoCuentasTest extends TestCase
             $t->string('estado_previo', 255)->nullable();
             $t->timestamp('creado_en')->nullable();
         });
+
+        // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
+        // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.
+        $this->crearEsquemaTrasladosPagos();
     }
 
     private function usuario(string $rolNombre): User
@@ -378,12 +385,17 @@ class TrasladoCuentasTest extends TestCase
     }
 
     /**
-     * La acción publicada es de MESA COMPLETA y se etiqueta como tal.
+     * El panel publica DOS traslados distintos:
      *
-     * El POS usa UNA venta por mesa, por lo que no se ofrece un traslado por
-     * cuenta que en realidad movería toda la venta (sería engañoso).
+     *  1. Mesa completa (`data-mesa-numero`), para mover el pedido a otra mesa.
+     *  2. Por cuenta individual (`data-cuenta-nombre`), para mover SOLO el
+     *     consumo de una subcuenta respetando su historial propio.
+     *
+     * Este test antes aseguraba que NO existía el traslado por cuenta (cuando
+     * el POS no lo soportaba). Ahora ese botón es parte de la funcionalidad de
+     * subcuentas, así que se comprueba que se publica.
      */
-    public function test_panel_publica_traslado_de_mesa_completa_y_no_por_cuenta(): void
+    public function test_panel_publica_traslado_de_mesa_y_el_individual_por_cuenta(): void
     {
         $admin = $this->usuario('ADMIN');
         $e = $this->escenario();
@@ -391,14 +403,15 @@ class TrasladoCuentasTest extends TestCase
         $panel = $this->actingAs($admin)->get('/mesas/' . $e['origen'] . '/cuentas');
         $panel->assertStatus(200);
 
-        // Acción explícita de mesa completa. Se comprueba el marcado real del
-        // botón (data-mesa-numero) porque el texto "Trasladar" también aparece
-        // en el JavaScript, que se renderiza siempre.
+        // Acción de mesa completa. Se comprueba el marcado real del botón
+        // (data-mesa-numero) porque el texto "Trasladar" también aparece en el
+        // JavaScript, que se renderiza siempre.
         $panel->assertSee('Trasladar mesa');
         $panel->assertSee('data-mesa-numero');
 
-        // No queda ningún botón de traslado individual por cuenta.
-        $panel->assertDontSee('data-cuenta-nombre');
+        // Traslado INDIVIDUAL por cuenta: el botón solo se pinta para cuentas
+        // ABIERTAS con consumo, y se identifica por su nombre.
+        $panel->assertSee('data-cuenta-nombre');
 
         // Existe una cuenta ABIERTA de referencia para el traslado.
         $this->assertNotNull($panel->viewData('cuentaTrasladoId'));
