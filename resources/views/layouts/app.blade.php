@@ -68,8 +68,10 @@
                 </li>
             @endif
 
+            {{-- Ventas: abre el Monitor de mesas, que es el punto de entrada
+                 real del flujo de venta/POS (no existe una ruta "ventas"). --}}
             <li>
-                <a href="#">
+                <a href="{{ route('mesas.index') }}">
                     <i class="fas fa-shopping-cart"></i> Ventas
                 </a>
             </li>

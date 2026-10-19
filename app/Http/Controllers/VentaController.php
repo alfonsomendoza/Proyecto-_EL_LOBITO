@@ -2290,6 +2290,13 @@ class VentaController extends Controller
                     ->orderByDesc('id')
                     ->first();
 
+                // Estado de la mesa destino ANTES de bloquear: se compara con
+                // el estado ya bloqueado para detectar un cambio REAL de la
+                // mesa durante la petición (protección de concurrencia).
+                $mesaDestinoNav = DB::table('mesas')
+                    ->where('id', $mesaDestinoId)
+                    ->first();
+
                 // -------------------------------------------------------
                 // ORDEN GLOBAL DE BLOQUEO (igual que el resto del POS):
                 // ventas (id ASC) -> cuenta origen -> mesas (id ASC) ->
@@ -2354,8 +2361,18 @@ class VentaController extends Controller
                 }
 
                 // Coherencia entre lo leído sin bloquear y el estado ya
-                // bloqueado: si cambió entre medias, se rechaza y se pide
-                // reintento (nunca se procede sobre supuestos viejos).
+                // bloqueado: si la MESA cambió de estado durante la petición,
+                // se rechaza y se pide reintento (nunca se procede sobre
+                // supuestos viejos). Se compara el estado de la mesa, no la
+                // existencia de una venta: una mesa LIBRE con su venta todavía
+                // ACTIVA (POS abierto sin pedido, o venta vaciada por otro
+                // traslado) es un estado normal de la aplicación y NO es una
+                // carrera; rechazarlo hacía fallar siempre el traslado.
+                if ($mesaDestinoNav
+                    && (string) $mesaDestino->estado !== (string) $mesaDestinoNav->estado) {
+                    throw new \RuntimeException('La mesa destino cambió de estado. Vuelve a intentarlo.');
+                }
+
                 $ventaDestino = null;
 
                 if ($mesaDestino->estado === 'OCUPADA') {
@@ -2366,8 +2383,17 @@ class VentaController extends Controller
                     if (!$ventaDestino || !in_array($ventaDestino->estado, ['ACTIVA', 'ABIERTA'], true)) {
                         throw new \RuntimeException('La mesa destino está ocupada sin una venta activa. Vuelve a intentarlo.');
                     }
-                } elseif ($ventaDestinoNav && $ventasBloqueadas->has((int) $ventaDestinoNav->id)) {
-                    throw new \RuntimeException('La mesa destino cambió de estado. Vuelve a intentarlo.');
+                } elseif ($ventaDestinoNav) {
+                    // Mesa LIBRE con venta ACTIVA propia: se UNE a esa venta
+                    // (mismo criterio que al reabrir una mesa) para no crear
+                    // una SEGUNDA venta activa en la misma mesa. Si esa venta
+                    // dejó de estar activa entre lecturas (se cobró), se
+                    // ignora y se crea una nueva, porque la mesa sigue libre.
+                    $ventaCandidata = $ventasBloqueadas->get((int) $ventaDestinoNav->id);
+
+                    if ($ventaCandidata && in_array($ventaCandidata->estado, ['ACTIVA', 'ABIERTA'], true)) {
+                        $ventaDestino = $ventaCandidata;
+                    }
                 }
 
                 // -------------------------------------------------------
@@ -2390,6 +2416,10 @@ class VentaController extends Controller
                         'vd.precio_unitario',
                         'vd.notas as vd_notas',
                         'vd.estado as vd_estado',
+                        // Comanda y estado de cocina de la línea original: se
+                        // copian en el destino para que el monitor la muestre
+                        // en la mesa destino sin reiniciar la preparación.
+                        'vd.comanda_id',
                         'vd.estado_preparacion',
                     ]);
 
