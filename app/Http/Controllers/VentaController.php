@@ -3436,8 +3436,10 @@ class VentaController extends Controller
             'pagos.*.banco' => ['nullable', 'string', 'max:30'],
             'pagos.*.tasa_cambio' => ['nullable', 'numeric', 'gt:0'],
             'descuento' => ['nullable', 'numeric', 'min:0'],
+            'descuento_porcentaje' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'descuento_motivo' => ['nullable', 'string', 'max:255'],
             'propina' => ['nullable', 'numeric', 'min:0'],
+            'propina_porcentaje' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         // ------------------------------------------------------------
@@ -3445,8 +3447,21 @@ class VentaController extends Controller
         // ------------------------------------------------------------
         // Si no se envía nada, ambos son cero: no se aplica ningún ajuste
         // automático. MESERO ni COCINERO llegan aquí (paso 1).
-        $descuento = round((float) ($request->input('descuento') ?? 0), 2);
-        $propina = round((float) ($request->input('propina') ?? 0), 2);
+        //
+        // El ajuste llega como IMPORTE o como PORCENTAJE; `ajustesDesdePeticion`
+        // lo normaliza a importes en el SERVIDOR (misma fórmula que la
+        // prefactura), así el navegador nunca fija el total a cobrar.
+        $consumoAjuste = (float) DB::table('cuenta_detalles')
+            ->where('cuenta_id', $cuentaId)
+            ->where('eliminado', false)
+            ->sum('subtotal');
+
+        try {
+            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumoAjuste);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+
         $motivo = trim((string) ($request->input('descuento_motivo') ?? ''));
 
         if ($descuento < 0 || $propina < 0) {
@@ -3468,6 +3483,14 @@ class VentaController extends Controller
                 // las últimas cuentas y evita liberar la mesa dos veces (o ninguna).
                 $venta = DB::table('ventas')->where('id', $cuentaNav->venta_id)->lockForUpdate()->first();
                 if (!$venta) throw new \RuntimeException('La venta no existe.');
+
+                // La venta es el estado de negocio que manda: una cuenta
+                // ABIERTA dentro de una venta ya PAGADA/CANCELADA es un
+                // registro inconsistente y NO debe poder cobrarse. Se valida
+                // aquí, en el servidor, antes de tocar pagos o facturas.
+                if (!in_array($venta->estado, ['ACTIVA', 'ABIERTA'], true)) {
+                    throw new \RuntimeException('La venta ya está cerrada; la cuenta no se puede cobrar.');
+                }
 
                 $cuentas = DB::table('cuentas')
                     ->where('venta_id', $venta->id)
@@ -3596,13 +3619,19 @@ class VentaController extends Controller
 
                 // Una cuenta vacía no debe impedir el cierre: solo importan
                 // las cuentas abiertas que todavía tienen consumo pendiente.
-                // Lectura con bloqueo para ver el último estado confirmado.
-                $abiertas = DB::table('cuentas')
-                    ->where('venta_id', $venta->id)
-                    ->where('id', '!=', $cuentaId)
-                    ->where('estado', 'ABIERTA')
-                    ->where('total', '>', 0)
-                    ->lockForUpdate()
+                // La fuente de verdad es `cuenta_detalles` (igual que el
+                // cobro, la prefactura y la factura), NO `cuentas.total`, que
+                // es un resumen denormalizado y puede quedar desincronizado.
+                $abiertas = DB::table('cuentas as c')
+                    ->where('c.venta_id', $venta->id)
+                    ->where('c.id', '!=', $cuentaId)
+                    ->where('c.estado', 'ABIERTA')
+                    ->whereExists(function ($consulta) {
+                        $consulta->select(DB::raw(1))
+                            ->from('cuenta_detalles as cd')
+                            ->whereColumn('cd.cuenta_id', 'c.id')
+                            ->where('cd.eliminado', false);
+                    })
                     ->exists();
 
                 if (!$abiertas) {
@@ -3842,6 +3871,99 @@ class VentaController extends Controller
 
     /**
      * ============================================================
+     * AJUSTES DE COBRO: PORCENTAJE O IMPORTE (LECTURA/COBRO)
+     * ============================================================
+     *
+     * El descuento puede venir como porcentaje (`descuento_porcentaje`) o como
+     * importe (`descuento`). La propina, igual (`propina_porcentaje` o
+     * `propina`). Esta función normaliza ambas formas a IMPORTES redondeados,
+     * aplicando SIEMPRE la MISMA fórmula en el servidor:
+     *
+     *   descuento = consumo × descuento_porcentaje / 100
+     *   base      = consumo − descuento
+     *   propina   = base × propina_porcentaje / 100
+     *
+     * Reglas de negocio que NO se inventan aquí (ya existían en el cobro):
+     *  - Ni el porcentaje ni el importe pueden ser negativos.
+     *  - El descuento (porcentaje o importe) no puede superar el consumo.
+     *  - El porcentaje de descuento no puede pasar de 100 % (no se regala
+     *    más que el consumo); la propina no tiene tope, pero no puede ser
+     *    negativa.
+     *
+     * El redondeo es el del proyecto: `round(..., 2)` a dos decimales.
+     * El navegador nunca decide el importe final: si manda un porcentaje, el
+     * importe se recalcula aquí; si manda un importe, se acepta tal cual
+     * (siempre que pase las validaciones).
+     *
+     * @return array{0: float, 1: float} [descuento, propina] en córdobas.
+     *
+     * @throws \InvalidArgumentException si algún valor es inválido.
+     */
+    private function ajustesDesdePeticion(Request $request, float $consumo): array
+    {
+        $descuentoPorcentaje = $request->input('descuento_porcentaje');
+        $propinaPorcentaje = $request->input('propina_porcentaje');
+        $descuentoImporte = $request->input('descuento', 0);
+        $propinaImporte = $request->input('propina', 0);
+
+        // Si viene un porcentaje de descuento, manda sobre el importe.
+        if ($descuentoPorcentaje !== null && $descuentoPorcentaje !== '') {
+            if (!is_numeric($descuentoPorcentaje)) {
+                throw new \InvalidArgumentException('El porcentaje de descuento no es válido.');
+            }
+
+            $descuentoPorcentaje = (float) $descuentoPorcentaje;
+
+            if (!is_finite($descuentoPorcentaje) || $descuentoPorcentaje < 0 || $descuentoPorcentaje > 100) {
+                throw new \InvalidArgumentException('El porcentaje de descuento debe estar entre 0 y 100.');
+            }
+
+            $descuento = round($consumo * $descuentoPorcentaje / 100, 2);
+        } else {
+            if (!is_numeric($descuentoImporte)) {
+                throw new \InvalidArgumentException('El descuento no es válido.');
+            }
+
+            $descuento = round((float) $descuentoImporte, 2);
+        }
+
+        // La base que se usa para la propina es consumo − descuento.
+        $base = round($consumo - $descuento, 2);
+
+        if ($base < 0) {
+            throw new \InvalidArgumentException('El descuento no puede superar el consumo de la cuenta.');
+        }
+
+        // Si viene un porcentaje de propina, manda sobre el importe.
+        if ($propinaPorcentaje !== null && $propinaPorcentaje !== '') {
+            if (!is_numeric($propinaPorcentaje)) {
+                throw new \InvalidArgumentException('El porcentaje de propina no es válido.');
+            }
+
+            $propinaPorcentaje = (float) $propinaPorcentaje;
+
+            if (!is_finite($propinaPorcentaje) || $propinaPorcentaje < 0) {
+                throw new \InvalidArgumentException('El porcentaje de propina no puede ser negativo.');
+            }
+
+            $propina = round($base * $propinaPorcentaje / 100, 2);
+        } else {
+            if (!is_numeric($propinaImporte)) {
+                throw new \InvalidArgumentException('La propina no es válida.');
+            }
+
+            $propina = round((float) $propinaImporte, 2);
+        }
+
+        if (!is_finite($descuento) || !is_finite($propina) || $descuento < 0 || $propina < 0) {
+            throw new \InvalidArgumentException('El descuento y la propina no pueden ser negativos.');
+        }
+
+        return [$descuento, $propina];
+    }
+
+    /**
+     * ============================================================
      * PREFACTURA (SOLO LECTURA)
      * ============================================================
      *
@@ -3873,7 +3995,12 @@ class VentaController extends Controller
         }
 
         $venta = DB::table('ventas')->where('id', $cuenta->venta_id)->first();
-        $mesa = $venta ? DB::table('mesas')->where('id', $venta->mesa_id)->first() : null;
+
+        if (!$venta) {
+            abort(404, 'La cuenta no pertenece a una venta existente.');
+        }
+
+        $mesa = DB::table('mesas')->where('id', $venta->mesa_id)->first();
 
         // Detalles realmente asignados a ESTA cuenta (misma fuente que la
         // factura y el cobro): no duplica ni mezcla subcuentas.
@@ -3883,11 +4010,16 @@ class VentaController extends Controller
         // Ajustes previsualizados (query string del modal de cobro). Solo
         // ADMIN, GERENTE o CAJERO pueden anticipar un descuento o una propina;
         // para MESERO y COCINERO no se permiten ajustes (y no se persisten).
-        $descuento = round((float) $request->query('descuento', 0), 2);
-        $propina = round((float) $request->query('propina', 0), 2);
-
-        if ($descuento < 0 || $propina < 0 || $descuento > $consumo) {
-            abort(422, 'Los ajustes de la prefactura no son válidos.');
+        //
+        // El modal puede enviarlos como IMPORTE (`descuento`, `propina`) o como
+        // PORCENTAJE (`descuento_porcentaje`, `propina_porcentaje`). El
+        // porcentaje se convierte a importe EN EL SERVIDOR con la misma fórmula
+        // del cobro, de modo que el navegador nunca fija el importe final.
+        // Si se envían ambos, gana el porcentaje (más explícito).
+        try {
+            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumo);
+        } catch (\InvalidArgumentException $e) {
+            abort(422, $e->getMessage());
         }
 
         if ($descuento > 0 || $propina > 0) {
@@ -3902,6 +4034,14 @@ class VentaController extends Controller
         $base = round($consumo - $descuento, 2);
         $total = round($base + $propina, 2);
 
+        // El sistema guarda la propina como IMPORTE, no como porcentaje. Para
+        // la prefactura se muestra el porcentaje EFECTIVO sobre la base
+        // (propina / base). Si la base es cero no hay porcentaje fiable y se
+        // deja null para no inventar un valor.
+        $porcentajePropina = $base > 0
+            ? round(($propina / $base) * 100, 2)
+            : null;
+
         return view('ventas.prefactura', [
             'usuario' => $usuario,
             'mesa' => $mesa,
@@ -3912,6 +4052,7 @@ class VentaController extends Controller
             'descuento' => $descuento,
             'base' => $base,
             'propina' => $propina,
+            'porcentajePropina' => $porcentajePropina,
             'total' => $total,
             // Propina sugerida: 10 % de la misma base del cálculo.
             'propinaSugerida' => round($base * 0.10, 2),

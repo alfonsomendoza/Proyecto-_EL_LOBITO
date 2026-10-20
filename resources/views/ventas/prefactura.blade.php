@@ -41,12 +41,19 @@
             <tr>
                 <td><strong>Cant.</strong></td>
                 <td><strong>Producto</strong></td>
+                <td class="derecha"><strong>P. unit.</strong></td>
                 <td class="derecha"><strong>Subtotal</strong></td>
             </tr>
             @foreach ($lineas as $linea)
                 <tr>
                     <td>{{ (int) $linea['cantidad'] }}x</td>
-                    <td>{{ $linea['producto'] }}</td>
+                    <td>
+                        {{ $linea['producto'] }}
+                        @if (array_key_exists('requiere_cocina', $linea) && $linea['requiere_cocina'] !== null)
+                            <div class="sugerencia">Cocina: {{ $linea['requiere_cocina'] ? 'Sí' : 'No' }}</div>
+                        @endif
+                    </td>
+                    <td class="derecha">{{ number_format((float) $linea['precio'], 2) }}</td>
                     <td class="derecha">{{ number_format((float) $linea['subtotal'], 2) }}</td>
                 </tr>
             @endforeach
@@ -57,31 +64,35 @@
 
     <div class="linea"></div>
 
-    {{-- Desglose obligatorio: consumo, descuento, BASE usada para la propina,
-         propina y total final. Sin ajustes, la prefactura muestra solo consumo. --}}
+    {{-- Desglose completo: consumo, descuento (aunque sea cero), base usada
+         para la propina, propina con su porcentaje efectivo y total final. --}}
     <table>
         <tr>
             <td>Consumo:</td>
             <td class="derecha">C$ {{ number_format($consumo, 2) }}</td>
         </tr>
-        @if ($descuento > 0)
-            <tr>
-                <td>Descuento:</td>
-                <td class="derecha">− C$ {{ number_format($descuento, 2) }}</td>
-            </tr>
-        @endif
-        @if ($descuento > 0 || $propina > 0)
-            <tr>
-                <td>Base (consumo − descuento):</td>
-                <td class="derecha">C$ {{ number_format($base, 2) }}</td>
-            </tr>
-        @endif
-        @if ($propina > 0)
-            <tr>
-                <td>Propina:</td>
-                <td class="derecha">+ C$ {{ number_format($propina, 2) }}</td>
-            </tr>
-        @elseif ($descuento > 0 && $propinaSugerida > 0)
+        <tr>
+            <td>Descuento:</td>
+            <td class="derecha">
+                @if ($descuento > 0)− @endif C$ {{ number_format($descuento, 2) }}
+            </td>
+        </tr>
+        <tr>
+            <td>Base (consumo − descuento):</td>
+            <td class="derecha">C$ {{ number_format($base, 2) }}</td>
+        </tr>
+        <tr>
+            <td>
+                Propina:
+                @if ($porcentajePropina !== null)
+                    <span class="sugerencia">({{ number_format($porcentajePropina, 2) }}% de la base)</span>
+                @endif
+            </td>
+            <td class="derecha">
+                @if ($propina > 0)+ @endif C$ {{ number_format($propina, 2) }}
+            </td>
+        </tr>
+        @if ($propina <= 0 && $descuento > 0 && $propinaSugerida > 0)
             <tr>
                 <td class="sugerencia" colspan="2">Propina sugerida (10% de la base): C$ {{ number_format($propinaSugerida, 2) }} — no incluida.</td>
             </tr>

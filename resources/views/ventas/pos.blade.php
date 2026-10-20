@@ -2710,15 +2710,29 @@
 
                 // Ajustes (descuento/propina): ADMIN, GERENTE y CAJERO pueden aplicarlos.
                 // Si el rol no puede aplicarlos, el modal ni siquiera los muestra.
+                // El descuento y la propina se pueden introducir como PORCENTAJE
+                // (%) o como IMPORTE (C$): el servidor recalcula siempre.
                 const htmlAjustes = PUEDE_AJUSTAR_COBRO ? `
-                    <input id="descuento-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Descuento (C$)">
-                    <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
-                    <div style="font-size:12px;color:#555;margin:-4px 0 4px;">
-                        Propina sugerida (10% de la base): <strong id="propina-sugerida">C$ 0.00</strong>
-                        <button type="button" id="propina-sugerir" style="margin-left:6px;background:#6777ef;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Usar 10%</button>
-                        <button type="button" id="propina-quitar" style="margin-left:4px;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Quitar</button>
+                    <div style="text-align:left;font-size:12px;color:#555;border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
+                        <strong>Descuento</strong>
+                        <select id="descuento-modo" class="swal2-select" style="margin:4px 0;">
+                            <option value="porcentaje">Porcentaje (%)</option>
+                            <option value="importe">Importe fijo (C$)</option>
+                        </select>
+                        <input id="descuento-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Descuento (%)">
+                        <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
+
+                        <strong>Propina</strong>
+                        <select id="propina-modo" class="swal2-select" style="margin:4px 0;">
+                            <option value="porcentaje">Porcentaje (%)</option>
+                            <option value="importe">Importe fijo (C$)</option>
+                        </select>
+                        <input id="propina-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Propina (%)">
+                        <div style="margin:-4px 0 4px;">
+                            <button type="button" id="propina-sugerir" style="background:#6777ef;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Propina 15%</button>
+                            <button type="button" id="propina-quitar" style="margin-left:4px;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Quitar</button>
+                        </div>
                     </div>
-                    <input id="propina-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Propina (C$)">
                 ` : '';
 
                 // Catálogo de métodos (idéntico a VentaController::METODOS_PAGO).
@@ -2741,29 +2755,49 @@
                 };
 
                 const leerAjustes = () => {
-                    if (!PUEDE_AJUSTAR_COBRO) return { descuento: 0, motivo: '', propina: 0 };
+                    if (!PUEDE_AJUSTAR_COBRO) return { descuento: 0, motivo: '', propina: 0, descuentoPorcentaje: null, propinaPorcentaje: null };
                     const desc = document.getElementById('descuento-cobro');
                     const motivo = document.getElementById('motivo-cobro');
                     const prop = document.getElementById('propina-cobro');
+                    const modoDesc = (document.getElementById('descuento-modo') || {}).value || 'porcentaje';
+                    const modoProp = (document.getElementById('propina-modo') || {}).value || 'porcentaje';
+                    const descValor = Number(desc && desc.value || 0);
+                    const propValor = Number(prop && prop.value || 0);
                     return {
-                        descuento: Number(desc && desc.value || 0),
+                        descuentoPorcentaje: modoDesc === 'porcentaje' ? descValor : null,
+                        descuentoImporte: modoDesc === 'importe' ? descValor : 0,
                         motivo: motivo ? motivo.value.trim() : '',
-                        propina: Number(prop && prop.value || 0)
+                        propinaPorcentaje: modoProp === 'porcentaje' ? propValor : null,
+                        propinaImporte: modoProp === 'importe' ? propValor : 0
                     };
                 };
 
                 // Consumo → descuento → BASE (para la propina) → propina → total.
+                // La MISMA fórmula que aplica el servidor: así lo que se ve es lo
+                // que se cobra. El servidor vuelve a validar y recalcular.
                 const leerTotales = () => {
                     const consumo = leerConsumo();
                     const ajustes = leerAjustes();
-                    const base = Math.max(0, consumo - ajustes.descuento);
+
+                    const descuento = ajustes.descuentoPorcentaje !== null
+                        ? Math.round(consumo * ajustes.descuentoPorcentaje) / 100
+                        : Math.round(ajustes.descuentoImporte * 100) / 100;
+
+                    const base = Math.max(0, Math.round((consumo - descuento) * 100) / 100);
+
+                    const propina = ajustes.propinaPorcentaje !== null
+                        ? Math.round(base * ajustes.propinaPorcentaje) / 100
+                        : Math.round(ajustes.propinaImporte * 100) / 100;
+
                     return {
                         consumo: consumo,
-                        descuento: ajustes.descuento,
+                        descuento: descuento,
                         motivo: ajustes.motivo,
                         base: base,
-                        propina: ajustes.propina,
-                        total: base + ajustes.propina
+                        propina: propina,
+                        total: Math.round((base + propina) * 100) / 100,
+                        descuentoPorcentaje: ajustes.descuentoPorcentaje,
+                        propinaPorcentaje: ajustes.propinaPorcentaje
                     };
                 };
 
@@ -2776,15 +2810,14 @@
 
                     document.getElementById('resumen-cobro').innerHTML =
                         `Consumo: <strong>C$ ${t.consumo.toFixed(2)}</strong>` +
-                        (t.descuento > 0 ? ` · Descuento: <strong>− C$ ${t.descuento.toFixed(2)}</strong>` : '') +
+                        (t.descuento > 0
+                            ? ` · Descuento${t.descuentoPorcentaje !== null ? ` (${t.descuentoPorcentaje}%)` : ''}: <strong>− C$ ${t.descuento.toFixed(2)}</strong>`
+                            : '') +
                         ` · Base: C$ ${t.base.toFixed(2)}` +
-                        (t.propina > 0 ? ` · Propina: <strong>+ C$ ${t.propina.toFixed(2)}</strong>` : '') +
+                        (t.propina > 0
+                            ? ` · Propina${t.propinaPorcentaje !== null ? ` (${t.propinaPorcentaje}%)` : ''}: <strong>+ C$ ${t.propina.toFixed(2)}</strong>`
+                            : '') +
                         `<br>Total por cobrar: <strong>C$ ${t.total.toFixed(2)}</strong>`;
-
-                    if (PUEDE_AJUSTAR_COBRO) {
-                        const sugerida = document.getElementById('propina-sugerida');
-                        if (sugerida) sugerida.textContent = 'C$ ' + (t.base * 0.10).toFixed(2);
-                    }
 
                     document.getElementById('lista-lineas').innerHTML = lineasPago.length === 0
                         ? '<span style="color:#999;">Sin líneas de pago agregadas.</span>'
@@ -2905,7 +2938,7 @@
                         });
 
                         // Resumen, saldo y prefactura se recalculan en vivo.
-                        ['cuenta-cobro', 'descuento-cobro', 'motivo-cobro', 'propina-cobro'].forEach(id => {
+                        ['cuenta-cobro', 'descuento-cobro', 'motivo-cobro', 'propina-cobro', 'descuento-modo', 'propina-modo'].forEach(id => {
                             const campo = document.getElementById(id);
                             if (!campo) return;
                             campo.addEventListener('input', pintarCobro);
@@ -2913,18 +2946,52 @@
                         });
 
                         if (PUEDE_AJUSTAR_COBRO) {
+                            // Al cambiar de modalidad (porcentaje <-> importe) el
+                            // campo se LIMPIA y se reetiqueta. Así el mismo número
+                            // nunca se reinterpreta en silencio (un 10 % no pasa a
+                            // valer C$ 10): el cajero vuelve a capturar el valor en
+                            // la unidad correcta. El servidor SIEMPRE recalcula y es
+                            // la fuente de verdad.
+                            const refrescarPlaceholders = () => {
+                                const modoDesc = document.getElementById('descuento-modo').value;
+                                const modoProp = document.getElementById('propina-modo').value;
+                                document.getElementById('descuento-cobro').placeholder =
+                                    modoDesc === 'porcentaje' ? 'Descuento (%)' : 'Descuento (C$)';
+                                document.getElementById('propina-cobro').placeholder =
+                                    modoProp === 'porcentaje' ? 'Propina (%)' : 'Propina (C$)';
+                            };
+
+                            // Etiqueta + limpieza + repintado al cambiar de modalidad.
+                            const cambiarModo = (idCampo) => {
+                                document.getElementById(idCampo).value = '';
+                                refrescarPlaceholders();
+                                pintarCobro();
+                            };
+
+                            document.getElementById('descuento-modo').addEventListener('change', () => cambiarModo('descuento-cobro'));
+                            document.getElementById('propina-modo').addEventListener('change', () => cambiarModo('propina-cobro'));
+
                             const btnSugerir = document.getElementById('propina-sugerir');
                             const btnQuitar = document.getElementById('propina-quitar');
 
+                            // Atajos de propina: "Propina 15%" fija 15 % y "Quitar"
+                            // deja la propina en cero (campo vacío = 0). Se fuerzan
+                            // en modo porcentaje para que el valor sea inequívoco;
+                            // se pueden escribir otros porcentajes a mano.
                             if (btnSugerir) btnSugerir.addEventListener('click', () => {
-                                document.getElementById('propina-cobro').value = (leerTotales().base * 0.10).toFixed(2);
+                                document.getElementById('propina-modo').value = 'porcentaje';
+                                document.getElementById('propina-cobro').value = '15';
+                                refrescarPlaceholders();
                                 pintarCobro();
                             });
 
                             if (btnQuitar) btnQuitar.addEventListener('click', () => {
+                                // Se limpia el campo: vacío se interpreta como 0.
                                 document.getElementById('propina-cobro').value = '';
                                 pintarCobro();
                             });
+
+                            refrescarPlaceholders();
                         }
 
                         pintarCobro();
@@ -2936,11 +3003,19 @@
                             return Swal.showValidationMessage('Agregue al menos una línea de pago.');
                         }
 
+                        if (t.descuentoPorcentaje !== null && (t.descuentoPorcentaje < 0 || t.descuentoPorcentaje > 100)) {
+                            return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
+                        }
+
+                        if (t.propinaPorcentaje !== null && t.propinaPorcentaje < 0) {
+                            return Swal.showValidationMessage('El porcentaje de propina no puede ser negativo.');
+                        }
+
                         if (t.descuento > t.consumo) {
                             return Swal.showValidationMessage('El descuento no puede superar el consumo de la cuenta.');
                         }
 
-                        if (t.descuento < 0 || t.propina < 0) {
+                        if (!Number.isFinite(t.descuento) || !Number.isFinite(t.propina) || t.descuento < 0 || t.propina < 0) {
                             return Swal.showValidationMessage('El descuento y la propina no pueden ser negativos.');
                         }
 
@@ -2960,11 +3035,17 @@
                             return Swal.showValidationMessage('Los pagos con tarjeta no pueden exceder el total: el excedente solo se admite en efectivo.');
                         }
 
+                        // Se envían AMBAS formas: el porcentaje (si el modo es %)
+                        // y el importe resultante. El servidor prioriza el
+                        // porcentaje y recalcula el importe él mismo, así un
+                        // navegador manipulado no puede fijar el total.
                         return {
                             cuentaId: Number(document.getElementById('cuenta-cobro').value),
                             descuento: t.descuento,
+                            descuentoPorcentaje: t.descuentoPorcentaje,
                             motivo: t.motivo,
                             propina: t.propina,
+                            propinaPorcentaje: t.propinaPorcentaje,
                             lineas: lineasPago
                         };
                     }
@@ -2976,6 +3057,12 @@
                     form.append('_token', '{{ csrf_token() }}');
                     form.append('descuento', cobro.descuento.toFixed(2));
                     form.append('propina', cobro.propina.toFixed(2));
+                    if (cobro.descuentoPorcentaje !== null && cobro.descuentoPorcentaje !== undefined) {
+                        form.append('descuento_porcentaje', String(cobro.descuentoPorcentaje));
+                    }
+                    if (cobro.propinaPorcentaje !== null && cobro.propinaPorcentaje !== undefined) {
+                        form.append('propina_porcentaje', String(cobro.propinaPorcentaje));
+                    }
                     if (cobro.motivo) form.append('descuento_motivo', cobro.motivo);
 
                     // Una fila en pagos_cuenta POR LÍNEA (nunca concatenados).
