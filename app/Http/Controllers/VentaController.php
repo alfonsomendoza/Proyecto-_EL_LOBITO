@@ -60,6 +60,225 @@ class VentaController extends Controller
 
     /**
      * ============================================================
+     * MÓDULO DE VENTAS (cuentas pendientes de cobro e historial)
+     * ============================================================
+     *
+     * Página propia del módulo "Ventas": lista las cuentas ABIERTAS que
+     * quedan por cobrar y el historial de ventas PAGADAS.
+     *
+     * NO reimplementa el cobro: el botón "Cobrar" abre el POS acotado a esa
+     * cuenta (pos.index?cuenta=), donde vive el modal de cobro real
+     * (VentaController::pagarCuenta). Así se reutiliza la lógica existente.
+     *
+     * Autorización en el servidor: ADMIN, GERENTE y CAJERO (los mismos que
+     * pueden cobrar). MESERO y COCINERO NO acceden al módulo financiero.
+     */
+    public function panelVentas(Request $request)
+    {
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario?->rol?->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            abort(403, 'No tienes permiso para ver el módulo de ventas.');
+        }
+
+        // ------------------------------------------------------------
+        // 0. FILTRO DE FECHAS (Desde/Hasta) del historial de cobradas.
+        // ------------------------------------------------------------
+        // Se aplica SOLO al historial de ventas PAGADAS (es lo que se
+        // consulta por período). Las cuentas pendientes de cobro no son
+        // históricas: siempre se listan, sin importar el rango.
+        //
+        // La fecha de negocio de una venta cobrada es `ventas.fecha` (se
+        // escribe al abrir la venta, coincide con el día de operación). El
+        // rango es semiabierto: >= inicio(desde) y < inicio(hasta + 1 día),
+        // así se incluye completo el día Hasta aunque tenga hora.
+        $rango = $this->rangoFechas($request);
+
+        // ------------------------------------------------------------
+        // 1. CUENTAS PENDIENTES DE COBRO
+        // ------------------------------------------------------------
+        // Una cuenta está pendiente si está ABIERTA y su venta sigue
+        // ACTIVA/ABIERTA. El importe real se calcula con la suma de sus
+        // asignaciones NO eliminadas (misma fuente que el cobro y la
+        // prefactura), no con cuentas.total.
+        $pendientes = DB::table('cuentas')
+            ->join('ventas', 'ventas.id', '=', 'cuentas.venta_id')
+            ->leftJoin('mesas', 'mesas.id', '=', 'ventas.mesa_id')
+            ->where('cuentas.estado', 'ABIERTA')
+            ->whereIn('ventas.estado', ['ACTIVA', 'ABIERTA'])
+            ->orderBy('ventas.id')
+            ->orderBy('cuentas.id')
+            ->get([
+                'cuentas.id as cuenta_id',
+                'cuentas.nombre as cuenta_nombre',
+                'ventas.id as venta_id',
+                'ventas.mesa_id as mesa_id',
+                'ventas.fecha as fecha',
+                'mesas.numero as mesa_numero',
+            ]);
+
+        $totales = DB::table('cuenta_detalles')
+            ->where('eliminado', false)
+            ->groupBy('cuenta_id')
+            ->select('cuenta_id', DB::raw('SUM(subtotal) as total'))
+            ->pluck('total', 'cuenta_id');
+
+        $pendientes = $pendientes
+            ->map(function ($cuenta) use ($totales) {
+                $cuenta->total = round((float) ($totales[$cuenta->cuenta_id] ?? 0), 2);
+
+                return $cuenta;
+            })
+            // Una cuenta sin consumo (C$0) no es algo por cobrar: se omite,
+            // igual que hace el panel de cuentas de la mesa.
+            ->filter(fn ($cuenta) => $cuenta->total > 0)
+            ->values();
+
+        // ------------------------------------------------------------
+        // 2. HISTORIAL DE VENTAS PAGADAS (solo lectura)
+        // ------------------------------------------------------------
+        // Ahora se filtra por el rango de fechas cuando el usuario lo envía.
+        // El tope de 50 se mantiene solo cuando NO hay filtro (vista rápida
+        // por defecto); al filtrar se muestran TODAS las ventas del período
+        // para que los totales y la cantidad reflejen el rango completo.
+        $consultaPagadas = DB::table('ventas')
+            ->leftJoin('mesas', 'mesas.id', '=', 'ventas.mesa_id')
+            ->where('ventas.estado', 'PAGADA');
+
+        if ($rango['valido'] && $rango['activo']) {
+            $consultaPagadas
+                ->where('ventas.fecha', '>=', $rango['inicio'])
+                ->where('ventas.fecha', '<', $rango['finExclusivo']);
+        }
+
+        $pagadas = $consultaPagadas
+            ->orderByDesc('ventas.fecha')
+            ->orderByDesc('ventas.id')
+            // Sin filtro se limita a las últimas 50; con filtro se listan todas.
+            ->when(! ($rango['valido'] && $rango['activo']), fn ($q) => $q->limit(50))
+            ->get([
+                'ventas.id as venta_id',
+                'ventas.mesa_id as mesa_id',
+                'ventas.monto as monto',
+                'ventas.fecha as fecha',
+                'ventas.metodo_pago as metodo_pago',
+                'mesas.numero as mesa_numero',
+            ]);
+
+        // Totales del período MOSTRADO (misma fuente y mismo filtro que el
+        // listado): se calculan en el servidor, no se confía en el navegador.
+        $totalCobrado = round((float) $pagadas->sum('monto'), 2);
+        $cantidadCobradas = $pagadas->count();
+
+        // Debajo de cada venta pagada se muestran las facturas de sus
+        // cuentas/subcuentas. Así el historial distingue qué subcuenta se
+        // cobró y con qué comprobante, sin cambiar el total de la venta.
+        // Es solo lectura y usa la MISMA tabla `facturas` que el módulo de
+        // Facturas; no recalcula importes.
+        $cuentasCobradas = DB::table('facturas as f')
+            ->leftJoin('cuentas as c', 'c.id', '=', 'f.cuenta_id')
+            ->whereIn('f.venta_id', $pagadas->pluck('venta_id')->all())
+            ->whereNotNull('f.cuenta_id')
+            ->orderBy('f.id')
+            ->get([
+                'f.venta_id',
+                'f.numero_factura',
+                'f.cuenta_id',
+                'f.total',
+                'c.nombre as cuenta_nombre',
+            ])
+            ->groupBy('venta_id');
+
+        return view('ventas.index', compact(
+            'pendientes',
+            'pagadas',
+            'cuentasCobradas',
+            'rango',
+            'totalCobrado',
+            'cantidadCobradas'
+        ));
+    }
+
+    /**
+     * Interpreta los parámetros `desde`/`hasta` del módulo de Ventas.
+     *
+     * Devuelve:
+     *  - `activo`: hay un rango válido que debe aplicarse a la consulta.
+     *  - `valido`: los parámetros recibidos son fechas correctas.
+     *  - `inicio`/`finExclusivo`: límites semiabiertos del rango.
+     *  - `error`: mensaje para la vista cuando la entrada no es válida.
+     *
+     * Sin parámetros NO se filtra (comportamiento previo: últimas 50 PAGADAS).
+     *
+     * @return array{activo: bool, valido: bool, desde: string, hasta: string, inicio: ?\Carbon\Carbon, finExclusivo: ?\Carbon\Carbon, error: ?string}
+     */
+    private function rangoFechas(Request $request): array
+    {
+        $desde = trim((string) $request->query('desde', ''));
+        $hasta = trim((string) $request->query('hasta', ''));
+
+        $base = [
+            'activo' => false,
+            'valido' => true,
+            'desde' => $desde,
+            'hasta' => $hasta,
+            'inicio' => null,
+            'finExclusivo' => null,
+            'error' => null,
+        ];
+
+        // Sin filtros: no se aplica rango (vista por defecto).
+        if ($desde === '' && $hasta === '') {
+            return $base;
+        }
+
+        // Si solo llega una fecha, se completa con la otra para tratarlo como
+        // un día; si ninguna es válida, se reporta el error.
+        if ($desde === '') {
+            $desde = $hasta;
+        }
+        if ($hasta === '') {
+            $hasta = $desde;
+        }
+
+        if (! $this->esFechaValida($desde) || ! $this->esFechaValida($hasta)) {
+            return array_merge($base, [
+                'valido' => false,
+                'error' => 'Las fechas indicadas no son válidas.',
+            ]);
+        }
+
+        if ($desde > $hasta) {
+            return array_merge($base, [
+                'valido' => false,
+                'error' => 'La fecha "Desde" no puede ser posterior a la fecha "Hasta".',
+            ]);
+        }
+
+        return array_merge($base, [
+            'activo' => true,
+            'desde' => $desde,
+            'hasta' => $hasta,
+            'inicio' => \Carbon\Carbon::parse($desde)->startOfDay(),
+            'finExclusivo' => \Carbon\Carbon::parse($hasta)->startOfDay()->addDay(),
+        ]);
+    }
+
+    /** Valida una fecha con formato Y-m-d y calendario real. */
+    private function esFechaValida(string $fecha): bool
+    {
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
+            return false;
+        }
+
+        [$anio, $mes, $dia] = array_map('intval', explode('-', $fecha));
+
+        return checkdate($mes, $dia, $anio);
+    }
+
+    /**
+     * ============================================================
      * MOSTRAR POS DE UNA MESA
      * ============================================================
      *

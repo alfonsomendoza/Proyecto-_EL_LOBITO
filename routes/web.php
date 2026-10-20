@@ -9,6 +9,7 @@ use App\Http\Controllers\ClienteController;
 use App\Http\Controllers\CatalogoController;
 use App\Http\Controllers\FacturaController;
 use App\Http\Controllers\ResumenDiarioController;
+use App\Http\Controllers\ResumenPropinasController;
 use App\Http\Controllers\UsuarioController;
 use App\Http\Controllers\RolController;
 use App\Http\Controllers\MesaController;
@@ -88,6 +89,14 @@ Route::middleware(['auth'])->group(function () {
         ->name('reportes.resumen.ticket');
 
     // ------------------------------------------------------------------
+    // RESUMEN DE PROPINAS DEL DÍA (consulta administrativa de recapitulación).
+    // Solo ADMIN y GERENTE; el rol se valida SIEMPRE en el controlador.
+    // Es de SOLO LECTURA: no paga ni marca propinas.
+    // ------------------------------------------------------------------
+    Route::get('/reportes/propinas', [ResumenPropinasController::class, 'index'])
+        ->name('reportes.propinas');
+
+    // ------------------------------------------------------------------
     // HISTORIAL DE FACTURAS.
     // ADMIN y GERENTE listan e imprimen; CAJERO solo imprime una factura.
     // El rol se valida SIEMPRE en FacturaController. Es de SOLO LECTURA.
@@ -109,6 +118,12 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/catalogo/api', [CatalogoController::class, 'storeOrUpdate'])
         ->name('catalogo.api');
+
+    // Módulo de Ventas: cuentas pendientes de cobro e historial de pagadas.
+    // La autorización real (ADMIN/GERENTE/CAJERO) se valida en el controlador;
+    // el MESERO trabaja desde el Monitor y no accede al cobro.
+    Route::get('/ventas', [VentaController::class, 'panelVentas'])
+        ->name('ventas.index');
 
     Route::get('/usuarios', [UsuarioController::class, 'index'])
         ->name('usuarios.index');

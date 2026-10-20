@@ -44,7 +44,12 @@
                 <a href="{{ route('clientes.index') }}" style="text-decoration: none; background: #17a2b8; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-address-book"></i> Clientes</a>
             @endif
 
-            <span title="Próximamente" style="background: #adb5bd; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600; cursor: not-allowed; opacity: 0.7;"><i class="fas fa-shopping-cart"></i> Ventas</span>
+            {{-- Ventas: cuentas pendientes de cobro e historial. Solo ADMIN,
+                 GERENTE y CAJERO (igual que el menú lateral); el MESERO no
+                 recibe acceso al cobro. Autorización real en el controlador. --}}
+            @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO']))
+                <a href="{{ route('ventas.index') }}" style="text-decoration: none; background: var(--color-primary); color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-shopping-cart"></i> Ventas</a>
+            @endif
 
             @if (in_array($rol, ['ADMIN', 'GERENTE']))
                 <a href="{{ route('facturas.index') }}" style="text-decoration: none; background: #34495e; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-file-invoice"></i> Historial Facturas</a>
@@ -68,6 +73,8 @@
                 <a href="{{ route('backups.index') }}" style="text-decoration: none; background: #495057; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-database"></i> Copias de Seguridad</a>
 
                 <a href="{{ route('reportes.resumen') }}" style="text-decoration: none; background: #2c3e50; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-box"></i> Operaciones</a>
+
+                <a href="{{ route('reportes.propinas') }}" style="text-decoration: none; background: #16a085; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-hand-holding-dollar"></i> Propinas</a>
             @endif
 
             {{-- Catálogo de roles: solo ADMIN. La autorización real se valida

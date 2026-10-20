@@ -68,13 +68,17 @@
                 </li>
             @endif
 
-            {{-- Ventas: abre el Monitor de mesas, que es el punto de entrada
-                 real del flujo de venta/POS (no existe una ruta "ventas"). --}}
-            <li>
-                <a href="{{ route('mesas.index') }}">
-                    <i class="fas fa-shopping-cart"></i> Ventas
-                </a>
-            </li>
+            {{-- Ventas: módulo de cuentas pendientes de cobro e historial.
+                 Solo ADMIN, GERENTE y CAJERO. El MESERO trabaja desde el
+                 Monitor y no accede al cobro; la autorización real se valida
+                 en VentaController::panelVentas (403 para el resto). --}}
+            @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO']))
+                <li>
+                    <a href="{{ route('ventas.index') }}" class="{{ request()->routeIs('ventas.*') ? 'active' : '' }}">
+                        <i class="fas fa-shopping-cart"></i> Ventas
+                    </a>
+                </li>
+            @endif
 
             @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO']))
                 <li>
@@ -117,6 +121,11 @@
                 <li>
                     <a href="{{ route('reportes.resumen') }}" class="{{ request()->routeIs('reportes.resumen*') ? 'active' : '' }}">
                         <i class="fas fa-box"></i> Operaciones
+                    </a>
+                </li>
+                <li>
+                    <a href="{{ route('reportes.propinas') }}" class="{{ request()->routeIs('reportes.propinas*') ? 'active' : '' }}">
+                        <i class="fas fa-hand-holding-dollar"></i> Propinas
                     </a>
                 </li>
                 @if (in_array($rol, ['ADMIN', 'GERENTE']))

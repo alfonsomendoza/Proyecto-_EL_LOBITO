@@ -10,13 +10,12 @@ use Tests\TestCase;
 /**
  * Navegación del menú lateral.
  *
- * Regresión: el acceso "Ventas" del sidebar era un ancla muerta (`href="#"`):
- * al pulsarlo no cambiaba la URL ni se abría ninguna página. Debe apuntar al
- * Monitor de mesas (`mesas.index`), que es el punto de entrada real del flujo
- * de venta/POS.
+ * El acceso "Ventas" del sidebar apunta al módulo propio de Ventas
+ * (`ventas.index`), no al Monitor de mesas. Además, ese acceso NO debe
+ * mostrarse al MESERO: su operación es el Monitor y no el módulo financiero.
  *
- * La autorización se valida en el backend (MesaController), no en la vista:
- * por eso aquí también se comprueba el acceso directo por URL.
+ * La autorización se valida en el backend (VentaController::panelVentas),
+ * no en la vista: por eso aquí también se comprueba el acceso directo por URL.
  */
 class NavegacionMenuTest extends TestCase
 {
@@ -59,7 +58,7 @@ class NavegacionMenuTest extends TestCase
         return null;
     }
 
-    public function test_el_acceso_ventas_del_menu_apunta_al_monitor_de_mesas(): void
+    public function test_el_acceso_ventas_del_menu_apunta_al_modulo_de_ventas(): void
     {
         $admin = $this->usuario('ADMIN');
 
@@ -67,9 +66,21 @@ class NavegacionMenuTest extends TestCase
 
         $href = $this->hrefDelMenu($html, 'Ventas');
 
-        $this->assertNotNull($href, 'El menú lateral debe incluir el acceso "Ventas".');
+        $this->assertNotNull($href, 'El menú lateral debe incluir el acceso "Ventas" para ADMIN.');
         $this->assertNotSame('#', $href, 'El acceso "Ventas" no debe ser un ancla muerta.');
-        $this->assertSame(route('mesas.index'), $href);
+        $this->assertSame(route('ventas.index'), $href);
+    }
+
+    public function test_el_mesero_no_ve_el_acceso_ventas_en_el_menu(): void
+    {
+        $mesero = $this->usuario('MESERO');
+
+        $html = $this->actingAs($mesero)->get('/inicio')->assertStatus(200)->getContent();
+
+        $this->assertNull(
+            $this->hrefDelMenu($html, 'Ventas'),
+            'El MESERO no debe ver el acceso "Ventas": su operación es el Monitor.'
+        );
     }
 
     public function test_el_monitor_de_mesas_se_muestra_con_sus_datos(): void
