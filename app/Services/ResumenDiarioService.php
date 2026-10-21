@@ -100,29 +100,191 @@ class ResumenDiarioService
      *
      * @return array<string, mixed>
      */
-    public function resumenDelDia(string $fecha, ?string $cajero = null): array
+    public function aperturasDelRango(string $fechaInicio, string $fechaFin, ?string $cajero = null): Collection
+    {
+        $query = CajaApertura::query()
+            ->whereBetween(DB::raw('DATE(fecha)'), [$fechaInicio, $fechaFin])
+            ->orderBy('fecha')
+            ->orderBy('id');
+
+        if ($this->cajeroValido($cajero)) {
+            $query->where('cajero', $cajero);
+        }
+
+        return $query->get();
+    }
+
+    public function cajerosDisponiblesRango(string $fechaInicio, string $fechaFin): Collection
+    {
+        return CajaApertura::query()
+            ->whereBetween(DB::raw('DATE(fecha)'), [$fechaInicio, $fechaFin])
+            ->whereNotNull('cajero')
+            ->where('cajero', '!=', '')
+            ->orderBy('cajero')
+            ->distinct()
+            ->pluck('cajero');
+    }
+
+    public function resumenPorRango(string $fechaInicio, string $fechaFin, ?string $cajero = null): array
     {
         $etiquetaCajero = $this->cajeroValido($cajero) ? (string) $cajero : 'TODOS';
 
-        if (! $this->esFechaValida($fecha)) {
+        if (! $this->esFechaValida($fechaInicio) || ! $this->esFechaValida($fechaFin)) {
             return [
                 'exito' => false,
-                'error' => 'La fecha indicada no es válida.',
-                'fecha' => $fecha,
+                'error' => 'Las fechas indicadas no son válidas.',
+                'fecha' => $fechaInicio,
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin,
                 'cajero' => $etiquetaCajero,
             ];
         }
 
-        $aperturas = $this->aperturasDelDia($fecha, $cajero);
+        if ($fechaInicio > $fechaFin) {
+            [$fechaInicio, $fechaFin] = [$fechaFin, $fechaInicio];
+        }
+
+        $aperturas = $this->aperturasDelRango($fechaInicio, $fechaFin, $cajero);
 
         if ($aperturas->isEmpty()) {
             return [
                 'exito' => false,
-                'error' => 'No se encontraron turnos de caja para la fecha y cajero seleccionados.',
-                'fecha' => $fecha,
+                'error' => 'No se encontraron turnos de caja para el rango de fechas seleccionado.',
+                'fecha' => $fechaInicio,
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin,
                 'cajero' => $etiquetaCajero,
             ];
         }
+
+        $todas = $this->aperturasOrdenadas();
+        $ids = $aperturas->pluck('id')->map(fn ($id) => (int) $id)->all();
+
+        $gastos = DB::table('caja_gastos')->whereIn('apertura_id', $ids)->get();
+
+        $totales = [
+            'monto_apertura' => 0.0,
+            'efectivo' => 0.0,
+            'tarjeta' => 0.0,
+            'transferencia' => 0.0,
+            'otro' => 0.0,
+            'cambios' => 0.0,
+            'otros_ingresos' => 0.0,
+            'retiros' => 0.0,
+            'gastos_activos' => 0.0,
+            'gastos_anulados' => 0.0,
+            'cantidad_gastos_anulados' => 0,
+            'ventas_anuladas' => 0.0,
+            'cantidad_ventas_anuladas' => 0,
+            'cantidad_cuentas' => 0,
+        ];
+
+        $tarjetasPorBanco = [];
+        $turnos = [];
+
+        foreach ($aperturas as $apertura) {
+            $fin = $this->finDeTurno($apertura, $todas);
+            $ventas = $this->cierre->resumenVentas($apertura, $fin);
+            $cierreVigente = $this->cierre->cierreVigente((int) $apertura->id);
+
+            $egresosTurno = 0.0;
+            $otrosIngresosTurno = (float) ($cierreVigente->otros_ingresos ?? 0);
+            $retirosTurno = (float) ($cierreVigente->retiros ?? 0);
+
+            $cambiosTurno = 0.0;
+            foreach ($ventas['cuentas'] as $cuenta) {
+                $cambiosTurno += (float) ($cuenta->cambio ?? 0);
+            }
+
+            $anuladas = $this->ventasAnuladasEnVentana($apertura, $fin);
+
+            foreach ($gastos as $gasto) {
+                if ((int) $gasto->apertura_id !== (int) $apertura->id) {
+                    continue;
+                }
+
+                if (strtoupper((string) $gasto->estado) === 'ANULADO') {
+                    $totales['gastos_anulados'] += (float) $gasto->monto;
+                    $totales['cantidad_gastos_anulados']++;
+                } else {
+                    $totales['gastos_activos'] += (float) $gasto->monto;
+                    $egresosTurno += (float) $gasto->monto;
+                }
+            }
+
+            foreach ($ventas['tarjetas_por_banco'] as $banco => $monto) {
+                $tarjetasPorBanco[$banco] = ($tarjetasPorBanco[$banco] ?? 0.0) + $monto;
+            }
+
+            $totales['monto_apertura'] += (float) $apertura->monto_inicial;
+            $totales['efectivo'] += $ventas['efectivo'];
+            $totales['tarjeta'] += $ventas['tarjeta'];
+            $totales['transferencia'] += $ventas['transferencia'];
+            $totales['otro'] += $ventas['otro'];
+            $totales['cambios'] += $cambiosTurno;
+            $totales['otros_ingresos'] += $otrosIngresosTurno;
+            $totales['retiros'] += $retirosTurno;
+            $totales['cantidad_cuentas'] += $ventas['cantidad'];
+            $totales['ventas_anuladas'] += $anuladas['monto'];
+            $totales['cantidad_ventas_anuladas'] += $anuladas['cantidad'];
+
+            $turnos[] = [
+                'apertura' => $apertura,
+                'inicio' => $this->cierre->inicioTurno($apertura),
+                'fin' => $fin,
+                'estado' => strtoupper((string) $apertura->estado),
+                'cierre' => $cierreVigente,
+                'ventas' => $ventas,
+                'egresos' => $egresosTurno,
+                'otros_ingresos' => $otrosIngresosTurno,
+                'retiros' => $retirosTurno,
+                'cambios' => $cambiosTurno,
+                'ventas_anuladas' => $anuladas,
+            ];
+        }
+
+        $efectivoEsperado = $totales['monto_apertura']
+            + $totales['efectivo']
+            + $totales['otros_ingresos']
+            - $totales['gastos_activos']
+            - $totales['retiros'];
+
+        $totalVentas = $totales['efectivo'] + $totales['tarjeta'] + $totales['transferencia'] + $totales['otro'];
+
+        return [
+            'exito' => true,
+            'fecha' => $fechaInicio,
+            'fecha_inicio' => $fechaInicio,
+            'fecha_fin' => $fechaFin,
+            'cajero' => $etiquetaCajero,
+            'aperturas' => $aperturas,
+            'turnos' => $turnos,
+            'cantidad_turnos' => count($turnos),
+            'cajeros' => $aperturas->pluck('cajero')->filter()->unique()->values()->all(),
+            'total_monto_apertura' => round($totales['monto_apertura'], 2),
+            'efectivo' => round($totales['efectivo'], 2),
+            'tarjeta' => round($totales['tarjeta'], 2),
+            'transferencia' => round($totales['transferencia'], 2),
+            'otro' => round($totales['otro'], 2),
+            'tarjetas_por_banco' => $tarjetasPorBanco,
+            'total_ventas' => round($totalVentas, 2),
+            'gastos_activos' => round($totales['gastos_activos'], 2),
+            'gastos_anulados' => round($totales['gastos_anulados'], 2),
+            'cantidad_gastos_anulados' => $totales['cantidad_gastos_anulados'],
+            'otros_ingresos' => round($totales['otros_ingresos'], 2),
+            'retiros' => round($totales['retiros'], 2),
+            'cambios_entregados' => round($totales['cambios'], 2),
+            'ventas_anuladas' => round($totales['ventas_anuladas'], 2),
+            'cantidad_ventas_anuladas' => $totales['cantidad_ventas_anuladas'],
+            'cantidad_cuentas' => $totales['cantidad_cuentas'],
+            'efectivo_esperado' => round($efectivoEsperado, 2),
+        ];
+    }
+
+    public function resumenDelDia(string $fecha, ?string $cajero = null): array
+    {
+        return $this->resumenPorRango($fecha, $fecha, $cajero);
+    }
 
         $todas = $this->aperturasOrdenadas();
         $ids = $aperturas->pluck('id')->map(fn ($id) => (int) $id)->all();
@@ -248,6 +410,11 @@ class ResumenDiarioService
             'efectivo_esperado' => $efectivoEsperado,
             'turnos' => $turnos,
         ];
+    }
+
+    public function resumenDelDia(string $fecha, ?string $cajero = null): array
+    {
+        return $this->resumenPorRango($fecha, $fecha, $cajero);
     }
 
     /* ------------------------------------------------------------------

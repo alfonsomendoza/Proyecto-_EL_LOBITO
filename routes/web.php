@@ -43,10 +43,9 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/caja/apertura', function () {
         // Autorización en servidor: la pantalla de caja muestra montos.
-        // COCINERO no debe acceder. Se conserva el acceso de los demás roles.
         $rol = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
 
-        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true)) {
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
             abort(403, 'No tienes permiso para acceder a la caja.');
         }
 
@@ -56,8 +55,14 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/caja/apertura', [CajaAperturaController::class, 'registrarApertura'])
         ->name('caja.abrir');
 
+    Route::post('/caja/aperturas/{id}/anular', [CajaAperturaController::class, 'anular'])
+        ->name('caja.apertura.anular');
+
     Route::get('/caja/ticket-apertura', [CajaAperturaController::class, 'imprimirTicketApertura'])
         ->name('caja.ticket_apertura');
+
+    Route::get('/caja/historial', [CajaAperturaController::class, 'historial'])
+        ->name('caja.historial');
 
     // ------------------------------------------------------------------
     // CIERRE DE CAJA (arqueo del turno).
@@ -118,6 +123,18 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/catalogo/api', [CatalogoController::class, 'storeOrUpdate'])
         ->name('catalogo.api');
+
+    // Importación de productos por CSV en dos pasos: primero se analiza el
+    // archivo (sin escribir) y después se confirma la vista previa. La
+    // autorización real (ADMIN/GERENTE) se valida en el controlador.
+    Route::get('/catalogo/importar/plantilla', [CatalogoController::class, 'plantillaImportacion'])
+        ->name('catalogo.importar.plantilla');
+
+    Route::post('/catalogo/importar/previsualizar', [CatalogoController::class, 'previsualizarImportacion'])
+        ->name('catalogo.importar.previsualizar');
+
+    Route::post('/catalogo/importar/confirmar', [CatalogoController::class, 'confirmarImportacion'])
+        ->name('catalogo.importar.confirmar');
 
     // Módulo de Ventas: cuentas pendientes de cobro e historial de pagadas.
     // La autorización real (ADMIN/GERENTE/CAJERO) se valida en el controlador;

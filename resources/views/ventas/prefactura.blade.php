@@ -22,7 +22,8 @@
 <body>
     <div class="centro">
         <h2>RESTAURANTE EL LOBITO</h2>
-        <p><strong>PREFACTURA</strong></p>
+        <p><strong>PREFACTURA - SIMULACIÓN TEMPORAL</strong></p>
+        <p style="font-size:10px;">NO ES FACTURA FISCAL - VALORES ESTIMADOS - SIN EFECTOS EN BASE DE DATOS</p>
     </div>
 
     <table>

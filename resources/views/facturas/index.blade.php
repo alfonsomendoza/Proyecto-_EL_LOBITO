@@ -61,6 +61,7 @@
                         <th style="padding:10px 12px;">N° Factura</th>
                         <th style="padding:10px 12px;">Fecha</th>
                         <th style="padding:10px 12px;">Mesa</th>
+                        <th style="padding:10px 12px;">Cuenta</th>
                         <th style="padding:10px 12px;">Cliente</th>
                         <th style="padding:10px 12px;">Cajero</th>
                         <th style="padding:10px 12px;">Método</th>
@@ -75,6 +76,13 @@
                             <td style="padding:10px 12px;"><strong>{{ $factura->numero_factura }}</strong></td>
                             <td style="padding:10px 12px;">{{ $factura->fecha_emision ? \Illuminate\Support\Carbon::parse($factura->fecha_emision)->format('d/m/Y H:i') : '--' }}</td>
                             <td style="padding:10px 12px;">{{ $factura->mesa }}</td>
+                            <td style="padding:10px 12px;">
+                                @if (!empty($factura->cuenta_id))
+                                    {{ $factura->cuenta_nombre ?? 'Cuenta' }} <small style="color:#6c757d;">(#{{ $factura->cuenta_id }})</small>
+                                @else
+                                    <span style="color:#aaa;">--</span>
+                                @endif
+                            </td>
                             <td style="padding:10px 12px;">{{ $factura->cliente ?? '--' }}</td>
                             <td style="padding:10px 12px;">{{ $factura->cajero ?? '--' }}</td>
                             <td style="padding:10px 12px;">
@@ -99,7 +107,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="9" style="text-align:center; padding:24px; color:#888;">
+                            <td colspan="10" style="text-align:center; padding:24px; color:#888;">
                                 No hay facturas que coincidan con los filtros.
                             </td>
                         </tr>

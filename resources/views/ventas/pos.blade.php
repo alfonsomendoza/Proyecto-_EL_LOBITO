@@ -2657,39 +2657,229 @@
      * una cuenta (?cuenta=) se imprime esa misma; si no, se elige entre las
      * cuentas abiertas con consumo de la mesa.
      */
-    function abrirPrefactura() {
+    function abrirPrefacturaUrl(cuentaId, params) {
         const URL_BASE_PREFACTURA = '{{ url("/pos/cuentas") }}';
-        const urlDe = cuentaId => URL_BASE_PREFACTURA + '/' + encodeURIComponent(cuentaId) + '/prefactura';
+        let url = URL_BASE_PREFACTURA + '/' + encodeURIComponent(cuentaId) + '/prefactura';
+        if (params && Object.keys(params).length) {
+            const qs = new URLSearchParams(params).toString();
+            if (qs) {
+                url += '?' + qs;
+            }
+        }
+        window.open(url, '_blank');
+    }
 
+    function abrirPrefacturaModalCuenta(cuentaId, consumo) {
+        Swal.fire({
+            title: 'Imprimir prefactura',
+            html: `<div style="text-align:left;font-size:12px;">
+                <div><strong>Cuenta:</strong> ${cuentaId}</div>
+                <div style="border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
+                    <label style="display:block;"><strong>Descuento</strong></label>
+                    <select id="pref-desc-modo" class="swal2-select" style="margin:4px 0;width:100%;">
+                        <option value="porcentaje">Porcentaje (%)</option>
+                        <option value="importe">Importe fijo (C$)</option>
+                    </select>
+                    <input id="pref-desc" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Descuento (%)" autocomplete="off">
+                    <label style="display:block;margin-top:6px;"><strong>Propina</strong></label>
+                    <select id="pref-prop-modo" class="swal2-select" style="margin:4px 0;width:100%;">
+                        <option value="porcentaje">Porcentaje (%)</option>
+                        <option value="importe">Importe fijo (C$)</option>
+                    </select>
+                    <input id="pref-prop" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Propina (%)" autocomplete="off">
+                    <div id="pref-resumen" style="margin-top:8px;font-size:12px;color:#333;"></div>
+                </div>
+                <p style="font-size:11px;color:#666;margin-top:6px;">Documento de consulta: NO es factura fiscal. Valores temporales, sin persistencia.</p>
+            </div>`,
+            showCancelButton: true,
+            confirmButtonText: 'Abrir e imprimir',
+            cancelButtonText: 'Cancelar',
+            didOpen: () => {
+                const modoD = document.getElementById('pref-desc-modo');
+                const modoP = document.getElementById('pref-prop-modo');
+                const inpD = document.getElementById('pref-desc');
+                const inpP = document.getElementById('pref-prop');
+                const res = document.getElementById('pref-resumen');
+                const refrescar = () => {
+                    modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
+                    modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
+                    let desc = 0, prop = 0;
+                    const vd = parseFloat(inpD.value);
+                    if (!isNaN(vd) && vd >= 0) {
+                        desc = modoD.value === 'porcentaje' ? (Number(consumo || 0) * vd / 100) : vd;
+                    }
+                    const vp = parseFloat(inpP.value);
+                    if (!isNaN(vp) && vp >= 0) {
+                        prop = modoP.value === 'porcentaje' ? ((Number(consumo || 0) - desc) * vp / 100) : vp;
+                    }
+                    desc = Math.max(0, Math.min(desc, Number(consumo || 0)));
+                    prop = Math.max(0, prop);
+                    const base = Math.max(0, Number(consumo || 0) - desc);
+                    const totalEst = base + prop;
+                    res.innerHTML = `Consumo: C$ ${Number(consumo || 0).toFixed(2)}<br>Descuento: C$ ${desc.toFixed(2)}<br>Base: C$ ${base.toFixed(2)}<br>Propina: C$ ${prop.toFixed(2)}<br><strong>Total estimado: C$ ${totalEst.toFixed(2)}</strong><br><em style="color:#666;">Estimado, no confirmado</em>`;
+                };
+                modoD.addEventListener('change', () => { inpD.value = ''; refrescar(); });
+                modoP.addEventListener('change', () => { inpP.value = ''; refrescar(); });
+                inpD.addEventListener('input', refrescar);
+                inpP.addEventListener('input', refrescar);
+                refrescar();
+            },
+            preConfirm: () => {
+                const modoD = document.getElementById('pref-desc-modo').value;
+                const modoP = document.getElementById('pref-prop-modo').value;
+                const inpD = document.getElementById('pref-desc').value;
+                const inpP = document.getElementById('pref-prop').value;
+                const params = {};
+                if (inpD !== '' && !isNaN(parseFloat(inpD))) {
+                    if (modoD === 'porcentaje') {
+                        params.descuento_porcentaje = inpD;
+                    } else {
+                        params.descuento = inpD;
+                    }
+                }
+                if (inpP !== '' && !isNaN(parseFloat(inpP))) {
+                    if (modoP === 'porcentaje') {
+                        params.propina_porcentaje = inpP;
+                    } else {
+                        params.propina = inpP;
+                    }
+                }
+                return { cuentaId: Number(cuentaId), params };
+            }
+        }).then(resultado => {
+            if (!resultado.isConfirmed || !resultado.value) {
+                return;
+            }
+            abrirPrefacturaUrl(resultado.value.cuentaId, resultado.value.params);
+        });
+    }
+
+    function abrirPrefactura() {
         const campoCuenta = document.getElementById('cuenta-actual-id');
-
         if (campoCuenta && campoCuenta.value) {
-            window.open(urlDe(campoCuenta.value), '_blank');
+            fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
+                .then(response => response.json())
+                .then(data => {
+                    const c = (data.cuentas || []).find(x => String(x.id) === String(campoCuenta.value));
+                    abrirPrefacturaModalCuenta(campoCuenta.value, c ? c.total : 0);
+                })
+                .catch(() => {
+                    abrirPrefacturaModalCuenta(campoCuenta.value, 0);
+                });
             return;
         }
 
         fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
             .then(response => response.json())
             .then(data => {
-                const abiertas = (data.cuentas || []).filter(cuenta => cuenta.estado === 'ABIERTA' && Number(cuenta.total) > 0);
-                if (!abiertas.length) throw new Error('No hay cuentas con consumo por cobrar.');
+                const abiertas = (data.cuentas || []).filter(cuenta => cuenta.estado === 'ABIERTA');
+                if (!abiertas.length) {
+                    throw new Error('No hay cuentas abiertas para imprimir prefactura.');
+                }
 
-                const opciones = abiertas.map(cuenta => `<option value="${cuenta.id}">${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total).toFixed(2)}</option>`).join('');
+                const opciones = abiertas.map(cuenta => `<option value="${cuenta.id}" data-total="${cuenta.total || 0}">${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total || 0).toFixed(2)}</option>`).join('');
 
                 Swal.fire({
                     title: 'Imprimir prefactura',
-                    html: `<select id="cuenta-prefactura" class="swal2-select">${opciones}</select>
-                        <p style="font-size:12px;color:#666;">Documento de consulta: NO es factura fiscal y NO marca la cuenta como pagada.</p>`,
+                    html: `<div style="text-align:left;font-size:12px;">
+                        <label style="display:block;margin-bottom:4px;">Cuenta</label>
+                        <select id="cuenta-prefactura" class="swal2-select" style="width:100%;margin:4px 0;">${opciones}</select>
+                        <div style="border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
+                            <label style="display:block;"><strong>Descuento</strong></label>
+                            <select id="pref-desc-modo" class="swal2-select" style="margin:4px 0;width:100%;">
+                                <option value="porcentaje">Porcentaje (%)</option>
+                                <option value="importe">Importe fijo (C$)</option>
+                            </select>
+                            <input id="pref-desc" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Descuento (%)" autocomplete="off">
+                            <label style="display:block;margin-top:6px;"><strong>Propina</strong></label>
+                            <select id="pref-prop-modo" class="swal2-select" style="margin:4px 0;width:100%;">
+                                <option value="porcentaje">Porcentaje (%)</option>
+                                <option value="importe">Importe fijo (C$)</option>
+                            </select>
+                            <input id="pref-prop" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Propina (%)" autocomplete="off">
+                            <div id="pref-resumen" style="margin-top:8px;font-size:12px;color:#333;"></div>
+                        </div>
+                        <p style="font-size:11px;color:#666;margin-top:6px;">Documento de consulta: NO es factura fiscal. Valores temporales, sin persistencia.</p>
+                    </div>`,
                     showCancelButton: true,
                     confirmButtonText: 'Abrir e imprimir',
                     cancelButtonText: 'Cancelar',
-                    preConfirm: () => Number(document.getElementById('cuenta-prefactura').value)
+                    didOpen: () => {
+                        const selCuenta = document.getElementById('cuenta-prefactura');
+                        const modoD = document.getElementById('pref-desc-modo');
+                        const modoP = document.getElementById('pref-prop-modo');
+                        const inpD = document.getElementById('pref-desc');
+                        const inpP = document.getElementById('pref-prop');
+                        const res = document.getElementById('pref-resumen');
+                        const refrescar = () => {
+                            modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
+                            modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
+                            const consumo = Number(selCuenta.options[selCuenta.selectedIndex]?.dataset?.total || 0);
+                            let desc = 0, prop = 0;
+                            const vd = parseFloat(inpD.value);
+                            if (!isNaN(vd) && vd >= 0) {
+                                desc = modoD.value === 'porcentaje' ? (consumo * vd / 100) : vd;
+                            }
+                            const vp = parseFloat(inpP.value);
+                            if (!isNaN(vp) && vp >= 0) {
+                                prop = modoP.value === 'porcentaje' ? ((consumo - desc) * vp / 100) : vp;
+                            }
+                            desc = Math.max(0, Math.min(desc, consumo));
+                            prop = Math.max(0, prop);
+                            const base = Math.max(0, consumo - desc);
+                            const totalEst = base + prop;
+                            res.innerHTML = `Consumo: C$ ${consumo.toFixed(2)}<br>Descuento: C$ ${desc.toFixed(2)}<br>Base: C$ ${base.toFixed(2)}<br>Propina: C$ ${prop.toFixed(2)}<br><strong>Total estimado: C$ ${totalEst.toFixed(2)}</strong><br><em style="color:#666;">Estimado, no confirmado</em>`;
+                        };
+                        selCuenta.addEventListener('change', refrescar);
+                        modoD.addEventListener('change', () => { inpD.value = ''; refrescar(); });
+                        modoP.addEventListener('change', () => { inpP.value = ''; refrescar(); });
+                        inpD.addEventListener('input', refrescar);
+                        inpP.addEventListener('input', refrescar);
+                        refrescar();
+                    },
+                    preConfirm: () => {
+                        const cuentaId = Number(document.getElementById('cuenta-prefactura').value);
+                        const modoD = document.getElementById('pref-desc-modo').value;
+                        const modoP = document.getElementById('pref-prop-modo').value;
+                        const inpD = document.getElementById('pref-desc').value;
+                        const inpP = document.getElementById('pref-prop').value;
+                        const params = {};
+                        if (inpD !== '' && !isNaN(parseFloat(inpD))) {
+                            if (modoD === 'porcentaje') {
+                                params.descuento_porcentaje = inpD;
+                            } else {
+                                params.descuento = inpD;
+                            }
+                        }
+                        if (inpP !== '' && !isNaN(parseFloat(inpP))) {
+                            if (modoP === 'porcentaje') {
+                                params.propina_porcentaje = inpP;
+                            } else {
+                                params.propina = inpP;
+                            }
+                        }
+                        return { cuentaId, params };
+                    }
                 }).then(resultado => {
-                    if (!resultado.isConfirmed || !resultado.value) return;
-                    window.open(urlDe(resultado.value), '_blank');
+                    if (!resultado.isConfirmed || !resultado.value) {
+                        return;
+                    }
+                    abrirPrefacturaUrl(resultado.value.cuentaId, resultado.value.params);
                 });
             })
             .catch(error => Swal.fire('Prefactura', error.message, 'warning'));
+    }
+
+    function abrirPrefacturaModal(cuentaId) {
+        fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
+            .then(r => r.json())
+            .then(data => {
+                const c = (data.cuentas || []).find(x => String(x.id) === String(cuentaId));
+                abrirPrefacturaModalCuenta(cuentaId, c ? c.total : 0);
+            })
+            .catch(() => {
+                abrirPrefacturaModalCuenta(cuentaId, 0);
+            });
     }
 
     function cobrarCuenta() {

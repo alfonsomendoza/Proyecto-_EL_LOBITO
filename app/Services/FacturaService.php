@@ -149,7 +149,7 @@ class FacturaService
      * PÚBLICO a propósito: `VentaController::prefactura()` reutiliza esta
      * misma consulta para imprimir la cuenta antes de cobrarla.
      *
-     * @return array<int, array{producto: string, cantidad: int, precio: float, subtotal: float}>
+     * @return array<int, array{producto: string, cantidad: int, precio: float, subtotal: float, requiere_cocina: ?bool}>
      */
     public function detalleCuenta(int $cuentaId): array
     {
@@ -159,12 +159,24 @@ class FacturaService
             ->where('cd.cuenta_id', $cuentaId)
             ->where('cd.eliminado', false)
             ->orderBy('cd.id')
-            ->get(['cd.cantidad', 'vd.precio_unitario', 'cd.subtotal', 'p.nombre as producto'])
+            ->get([
+                'cd.cantidad',
+                'vd.precio_unitario',
+                'cd.subtotal',
+                'p.nombre as producto',
+                'p.requiere_cocina',
+            ])
             ->map(fn ($fila) => [
                 'producto' => (string) ($fila->producto ?? 'Producto'),
                 'cantidad' => (int) $fila->cantidad,
                 'precio' => (float) $fila->precio_unitario,
                 'subtotal' => (float) $fila->subtotal,
+                // Se lee del producto en la base de datos; nunca de un valor
+                // enviado por el navegador. Si el producto ya no existe, se
+                // devuelve null y la vista omite la indicación.
+                'requiere_cocina' => $fila->requiere_cocina === null
+                    ? null
+                    : (bool) $fila->requiere_cocina,
             ])
             ->all();
     }

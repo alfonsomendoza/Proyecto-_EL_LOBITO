@@ -9,6 +9,7 @@ use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Auth;
 
 /**
  * Lógica de negocio del Cierre de Caja (arqueo de turno).
@@ -378,6 +379,9 @@ class CajaCierreService
 
         try {
             return DB::transaction(function () use ($aperturaId, $otrosIngresos, $conteoLocal, $conteoDolares, $tasaCambio, $retiros, $observaciones, $usuarioId) {
+                if (Schema::hasTable('caja_bloqueo')) {
+                    DB::table('caja_bloqueo')->where('id', 1)->lockForUpdate()->get();
+                }
                 $apertura = CajaApertura::query()
                     ->where('id', $aperturaId)
                     ->lockForUpdate()
@@ -473,8 +477,13 @@ class CajaCierreService
      *
      * @return array{exito: bool, codigo: int, mensaje?: string, error?: string}
      */
-    public function anularCierre(int $cierreId): array
+    public function anularCierre(int $cierreId, ?string $motivo = null, ?int $usuarioId = null): array
     {
+        $motivo = trim((string) $motivo);
+        if ($motivo === '') {
+            return ['exito' => false, 'codigo' => 422, 'error' => 'El motivo de anulación es obligatorio.'];
+        }
+
         $cierre = CajaCierre::find($cierreId);
 
         if (! $cierre) {
@@ -486,7 +495,22 @@ class CajaCierreService
         }
 
         try {
-            DB::transaction(function () use ($cierre) {
+            DB::transaction(function () use ($cierre, $motivo, $usuarioId) {
+                if (Schema::hasTable('caja_bloqueo')) {
+                    DB::table('caja_bloqueo')->where('id', 1)->lockForUpdate()->get();
+                }
+
+                // Verificar que no hay otra apertura activa distinta
+                $otraAbierta = CajaApertura::query()
+                    ->where('estado', 'ABIERTA')
+                    ->where('id', '!=', $cierre->apertura_id)
+                    ->lockForUpdate()
+                    ->exists();
+                if ($otraAbierta) {
+                    throw new \Exception('Ya existe otra caja abierta actualmente.');
+                }
+
+                $estadoAnterior = $cierre->estado;
                 CajaCierre::query()->where('id', $cierre->id)->update(['estado' => 'ANULADO']);
 
                 $vigentes = CajaCierre::query()
@@ -495,20 +519,35 @@ class CajaCierreService
                     ->count();
 
                 if ($vigentes === 0) {
-                    // Solo reabrimos si no hay ya otra caja abierta.
-                    $otraAbierta = CajaApertura::query()
-                        ->where('estado', 'ABIERTA')
-                        ->where('id', '!=', $cierre->apertura_id)
-                        ->exists();
+                    CajaApertura::query()
+                        ->where('id', $cierre->apertura_id)
+                        ->update(['estado' => 'ABIERTA']);
+                }
 
-                    if (! $otraAbierta) {
-                        CajaApertura::query()
-                            ->where('id', $cierre->apertura_id)
-                            ->update(['estado' => 'ABIERTA']);
-                    }
+                if (Schema::hasTable('anulaciones_caja_auditoria')) {
+                    $usuario = $usuarioId ?: Auth::id();
+                    $rol = Auth::check() ? strtoupper((string) (Auth::user()->rol->nombre ?? '')) : null;
+                    DB::table('anulaciones_caja_auditoria')->insert([
+                        'tipo' => 'cierre',
+                        'registro_original_id' => (int) $cierre->id,
+                        'apertura_id' => (int) $cierre->apertura_id,
+                        'cierre_id' => (int) $cierre->id,
+                        'fecha_anulacion' => now(),
+                        'usuario_id' => $usuario,
+                        'rol' => $rol,
+                        'motivo' => $motivo,
+                        'estado_anterior' => $estadoAnterior,
+                        'estado_resultante' => 'ANULADO',
+                        'referencia_json' => json_encode(['apertura_id' => (int) $cierre->apertura_id]),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
                 }
             });
         } catch (\Throwable $e) {
+            if (str_contains($e->getMessage(), 'Ya existe otra caja abierta')) {
+                return ['exito' => false, 'codigo' => 409, 'error' => $e->getMessage()];
+            }
             return ['exito' => false, 'codigo' => 500, 'error' => 'No fue posible anular el cierre.'];
         }
 

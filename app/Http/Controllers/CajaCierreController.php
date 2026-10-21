@@ -156,7 +156,12 @@ class CajaCierreController extends Controller
             return $this->noAutorizado('Solo ADMIN y GERENTE pueden anular un cierre.');
         }
 
-        $resultado = $this->service->anularCierre($id);
+        $motivo = trim((string) request()->input('motivo', ''));
+        if ($motivo === '') {
+            return response()->json(['exito' => false, 'codigo' => 422, 'error' => 'El motivo de anulación es obligatorio.'], 422);
+        }
+
+        $resultado = $this->service->anularCierre($id, $motivo, Auth::id());
 
         return response()->json($resultado, $resultado['codigo'] ?? 200);
     }

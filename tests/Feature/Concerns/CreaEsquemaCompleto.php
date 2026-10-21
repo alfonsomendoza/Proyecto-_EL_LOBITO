@@ -71,6 +71,15 @@ trait CreaEsquemaCompleto
         Schema::create('categorias', function (Blueprint $t) {
             $t->increments('id');
             $t->string('nombre', 100);
+            // Columna real de `categorias`: permite desactivar una categoría
+            // sin borrarla ni borrar sus productos.
+            $t->boolean('activa')->default(true);
+            // Auditoría de la última desactivación y reactivación. Son
+            // nullable porque las categorías anteriores no tienen historial.
+            $t->integer('desactivado_por')->nullable();
+            $t->timestamp('desactivado_en')->nullable();
+            $t->integer('reactivado_por')->nullable();
+            $t->timestamp('reactivado_en')->nullable();
         });
 
         Schema::create('productos', function (Blueprint $t) {
@@ -218,6 +227,37 @@ trait CreaEsquemaCompleto
             $t->text('conteo_json')->nullable();
             $t->string('estado', 20)->default('ABIERTA');
             $t->integer('usuario_id')->nullable();
+        });
+        DB::table('caja_apertura')->insertOrIgnore([
+            'id' => 1,
+            'fecha' => now(),
+            'cajero' => 'TEST',
+            'turno' => '1',
+            'caja_id' => 1,
+            'monto_inicial' => 0,
+            'estado' => 'ABIERTA',
+            'usuario_id' => 1,
+        ]);
+
+        Schema::create('caja_bloqueo', function (Blueprint $t) {
+            $t->integer('id')->primary();
+        });
+        DB::table('caja_bloqueo')->insertOrIgnore(['id' => 1]);
+
+        Schema::create('anulaciones_caja_auditoria', function (Blueprint $t) {
+            $t->id();
+            $t->string('tipo', 20)->index();
+            $t->unsignedBigInteger('registro_original_id')->index();
+            $t->unsignedBigInteger('apertura_id')->nullable()->index();
+            $t->unsignedBigInteger('cierre_id')->nullable()->index();
+            $t->dateTime('fecha_anulacion')->index();
+            $t->unsignedBigInteger('usuario_id')->nullable()->index();
+            $t->string('rol', 20)->nullable();
+            $t->text('motivo');
+            $t->string('estado_anterior', 20)->nullable();
+            $t->string('estado_resultante', 20)->nullable();
+            $t->json('referencia_json')->nullable();
+            $t->timestamps();
         });
 
         Schema::create('configuraciones', function (Blueprint $t) {

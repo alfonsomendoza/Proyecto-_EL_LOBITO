@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Módulo "Historial Facturas" → listado e impresión de facturas de venta.
@@ -59,9 +60,14 @@ class FacturaController extends Controller
                 'f.id',
                 'f.numero_factura',
                 'f.mesa',
+                'f.cuenta_id',
                 'f.total',
                 'f.fecha_emision',
                 'f.estado',
+                // Nombre de la cuenta/subcuenta cobrada. Es NULL en las
+                // facturas históricas del PHP puro (una sola cuenta por
+                // venta), por eso se muestra como "—" en el historial.
+                'c.nombre as cuenta_nombre',
                 DB::raw('COALESCE(c.metodo_pago, v.metodo_pago) as metodo_pago'),
                 DB::raw('COALESCE(c.banco, v.banco) as banco'),
                 'u.nombre as cajero',
@@ -135,10 +141,48 @@ class FacturaController extends Controller
             ? $decodificado['lineas']
             : [];
 
+        // Desglose de ajustes que FacturaService persistió al cobrar:
+        // consumo, descuento, base, propina y total. Es la MISMA fuente que
+        // usa la prefactura, así el ticket no recalcula con otra fórmula.
+        $ajustes = is_array($decodificado) && isset($decodificado['ajustes']) && is_array($decodificado['ajustes'])
+            ? $decodificado['ajustes']
+            : [];
+
+        // Nombre de la cuenta/subcuenta cobrada. Las facturas nuevas lo traen
+        // del JOIN con `cuentas`; las históricas pueden traerlo en el JSON.
+        $cuentaNombre = $factura->cuenta_nombre ?? null;
+        if ($cuentaNombre === null && is_array($decodificado)) {
+            $cuentaNombre = $decodificado['cuenta'] ?? null;
+        }
+
+        // Pagos reales del cobro (pagos mixtos incluidos). Solo se consultan
+        // cuando la factura tiene cuenta; las históricas con cuenta_id = NULL
+        // se imprimen con el resumen de `ventas`. La tabla existe en la base
+        // real (migración 2026_10_18_000002); se protege por si un esquema
+        // antiguo de pruebas no la tuviera.
+        $pagos = collect();
+
+        if (! empty($factura->cuenta_id) && Schema::hasTable('pagos_cuenta')) {
+            $pagos = DB::table('pagos_cuenta')
+                ->where('cuenta_id', (int) $factura->cuenta_id)
+                ->orderBy('id')
+                ->get([
+                    'metodo_pago',
+                    'banco',
+                    'moneda',
+                    'monto',
+                    'tasa_cambio',
+                    'monto_cordobas',
+                ]);
+        }
+
         return view('facturas.ticket', [
             'factura' => $factura,
             'textoConsumo' => $textoConsumo,
             'lineas' => $lineas,
+            'ajustes' => $ajustes,
+            'cuentaNombre' => $cuentaNombre,
+            'pagos' => $pagos,
         ]);
     }
 
@@ -161,6 +205,7 @@ class FacturaController extends Controller
             ->leftJoin('usuarios as u', 'u.id', '=', 'f.usuario_id')
             ->select(
                 'f.*',
+                'c.nombre as cuenta_nombre',
                 DB::raw('COALESCE(c.metodo_pago, v.metodo_pago) as metodo_pago'),
                 DB::raw('COALESCE(c.banco, v.banco) as banco'),
                 DB::raw('COALESCE(c.monto_recibido, v.monto_recibido) as monto_recibido'),

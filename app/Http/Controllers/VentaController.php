@@ -661,20 +661,33 @@ class VentaController extends Controller
 
 
             // ----------------------------------------------------
-            // 9. OBTENER PRODUCTOS ACTIVOS
+            // 9. OBTENER PRODUCTOS DISPONIBLES PARA NUEVAS VENTAS
             // ----------------------------------------------------
+            // Solo productos activos cuya categoría también esté activa.
+            // Un producto sin categoría (categoria_id NULL) sigue disponible.
+            // Desactivar una categoría NO borra el producto: solo deja de
+            // ofrecerse aquí. Las líneas ya agregadas a una venta/cuenta no se
+            // tocan (se cargan aparte desde venta_detalles).
 
             $productos = DB::table('productos')
-                ->where('activo', 1)
-                ->orderBy('nombre')
+                ->leftJoin('categorias', 'categorias.id', '=', 'productos.categoria_id')
+                ->where('productos.activo', 1)
+                ->where(function ($q) {
+                    $q->whereNull('productos.categoria_id')
+                        ->orWhere('categorias.activa', 1);
+                })
+                ->orderBy('productos.nombre')
+                ->select('productos.*')
                 ->get();
 
 
             // ----------------------------------------------------
-            // 10. OBTENER CATEGORÍAS
+            // 10. OBTENER CATEGORÍAS ACTIVAS
             // ----------------------------------------------------
+            // Las categorías desactivadas no se ofrecen para nuevas ventas.
 
             $categorias = DB::table('categorias')
+                ->where('activa', 1)
                 ->orderBy('nombre')
                 ->get();
 
@@ -1090,6 +1103,15 @@ class VentaController extends Controller
                     if (!$cuenta) throw new \RuntimeException('No existe una cuenta abierta para agregar el pedido.');
                 }
 
+                // Categorías activas según la BASE DE DATOS (no el navegador).
+                // Una categoría desactivada no puede usarse para NUEVAS ventas,
+                // aunque la petición se manipule y envíe el id del producto.
+                $categoriasActivas = DB::table('categorias')
+                    ->where('activa', 1)
+                    ->pluck('id')
+                    ->map(fn ($id) => (int) $id)
+                    ->all();
+
                 // Primero validamos todo el carrito y separamos lo que va a cocina
                 // (productos.requiere_cocina = 1) de lo que no. La fuente de verdad
                 // es siempre la columna productos.requiere_cocina.
@@ -1101,6 +1123,15 @@ class VentaController extends Controller
                     $producto = DB::table('productos')->where('id', (int) ($item['id'] ?? 0))->where('activo', 1)->first();
                     $cantidad = (int) ($item['cantidad'] ?? 0);
                     if (!$producto || $cantidad <= 0) throw new \RuntimeException('El pedido contiene un producto inválido.');
+
+                    // Validación de categoría en backend: si el producto tiene
+                    // categoría, esta debe existir y estar activa. Los productos
+                    // sin categoría siguen vendiéndose como antes.
+                    if ($producto->categoria_id !== null
+                        && !in_array((int) $producto->categoria_id, $categoriasActivas, true)) {
+                        throw new \RuntimeException('El producto "'.$producto->nombre.'" pertenece a una categoría desactivada y no está disponible para la venta.');
+                    }
+
                     $subtotal = $cantidad * (float) $producto->precio;
                     $requiereCocina = ((int) $producto->requiere_cocina === 1);
 

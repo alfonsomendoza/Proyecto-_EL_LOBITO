@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class MesaController extends Controller
 {
@@ -145,6 +146,26 @@ class MesaController extends Controller
                     return ['estado' => 'mesa_inexistente'];
                 }
 
+                // Validación de caja abierta (solo escrituras de consumo)
+                if (Schema::hasTable('caja_bloqueo')) {
+                    try {
+                        DB::table('caja_bloqueo')->where('id', 1)->lockForUpdate()->get();
+                    } catch (\Throwable $e) {
+                        // Si no existe el registro singleton, continuar sin bloquearlo
+                    }
+                }
+                $aperturaAbierta = false;
+                if (Schema::hasTable('caja_apertura')) {
+                    try {
+                        $aperturaAbierta = DB::table('caja_apertura')->where('estado', 'ABIERTA')->lockForUpdate()->exists();
+                    } catch (\Throwable $e) {
+                        $aperturaAbierta = DB::table('caja_apertura')->where('estado', 'ABIERTA')->exists();
+                    }
+                }
+                if (!$aperturaAbierta) {
+                    return ['estado' => 'caja_cerrada'];
+                }
+
                 // 4. Venta activa de ESTA mesa (nunca de otra).
                 $venta = DB::table('ventas')
                     ->where('mesa_id', $mesaId)
@@ -266,10 +287,11 @@ class MesaController extends Controller
                 ], 409);
             }
 
+            $ventaIdResp = $resultado['venta_id'] ?? $resultado['id_venta'] ?? ($ventaId ?? null);
             return response()->json([
                 'exito' => true,
                 'mensaje' => 'Mesa lista para tomar el pedido.',
-                'venta_id' => $resultado['venta_id'],
+                'venta_id' => $ventaIdResp,
             ]);
         } catch (\Throwable $e) {
             // Falla inesperada: se registra y se responde 500. La transacción

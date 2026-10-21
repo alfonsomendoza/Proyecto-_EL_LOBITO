@@ -70,6 +70,8 @@ class CuentaPrincipalDivisionTest extends TestCase
         Schema::create('categorias', function (Blueprint $t) {
             $t->increments('id');
             $t->string('nombre', 100);
+            // Columna real: desactivar una categoría no borra sus productos.
+            $t->boolean('activa')->default(true);
         });
 
         Schema::create('productos', function (Blueprint $t) {
