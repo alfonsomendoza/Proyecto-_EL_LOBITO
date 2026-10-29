@@ -1,0 +1,998 @@
+# MÓDULO MESAS → VENTAS → COMANDAS → PREFACTURA → FACTURA
+
+Estamos desarrollando un POS de restaurante en Laravel 12.69.2, PHP 8.2 y MySQL.
+
+El sistema es multiusuario y debe soportar simultáneamente:
+
+* ADMIN
+* GERENTE
+* CAJERO
+* Múltiples MESEROS
+
+La implementación debe respetar la arquitectura existente y no romper login, sesiones, usuarios, caja, clientes ni catálogo.
+
+---
+
+# 1. COMANDA DE COCINA
+
+La comanda de cocina es exclusivamente para los productos que necesitan preparación en cocina.
+
+## NO deben aparecer en la comanda:
+
+* Bebidas
+* Gaseosas
+* Cervezas
+* Agua
+* Café si está definido como producto de barra
+* Cualquier producto configurado como NO_COCINA
+
+Las bebidas y demás productos que no requieren cocina deben permanecer en la venta, pero **no deben imprimirse en la comanda de cocina**.
+
+---
+
+# 2. CLASIFICACIÓN DE PRODUCTOS
+
+El catálogo debe permitir identificar si un producto requiere cocina.
+
+Por ejemplo:
+
+```text
+Producto             Cocina
+--------------------------------
+Pollo asado          SI
+Hamburguesa          SI
+Ensalada             SI
+Pizza                SI
+Gaseosa              NO
+Agua                 NO
+Cerveza              NO
+```
+
+No asumir por el nombre del producto si va a cocina.
+
+La decisión debe venir de una propiedad del producto, por ejemplo:
+
+```text
+requiere_cocina
+```
+
+o adaptar el nombre al campo que ya exista en el catálogo.
+
+---
+
+# 3. EJEMPLO DE PEDIDO
+
+Mesa 5:
+
+```text
+2 Pollo asado
+1 Ensalada
+2 Gaseosas
+1 Agua
+```
+
+Al enviar el pedido:
+
+### COMANDA DE COCINA
+
+Debe imprimir:
+
+```text
+================================
+          EL LOBITO
+       COMANDA DE COCINA
+================================
+
+COMANDA #001
+MESA: 5
+MESERO: JUAN
+FECHA: 20/09/2026
+HORA: 11:30 AM
+
+--------------------------------
+
+2 x POLLO ASADO
+
+1 x ENSALADA
+
+--------------------------------
+```
+
+Las bebidas:
+
+```text
+2 Gaseosas
+1 Agua
+```
+
+NO aparecen en la comanda.
+
+Pero sí quedan registradas en la venta.
+
+---
+
+# 4. NUEVO PEDIDO
+
+Si posteriormente el cliente pide:
+
+```text
+1 Hamburguesa
+2 Gaseosas
+```
+
+se debe crear una nueva comanda:
+
+```text
+COMANDA #002
+```
+
+La comanda #002 debe imprimir:
+
+```text
+1 x HAMBURGUESA
+```
+
+Las 2 gaseosas NO aparecen.
+
+No se debe volver a imprimir automáticamente la #001.
+
+Debe quedar:
+
+```text
+COMANDA #001
+2 Pollo
+1 Ensalada
+
+COMANDA #002
+1 Hamburguesa
+```
+
+Cada comanda es histórica e independiente.
+
+---
+
+# 5. REIMPRESIÓN DE COMANDAS
+
+Debe existir historial de comandas.
+
+Ejemplo:
+
+```text
+Mesa 5
+
+Comanda #001    [Ver] [Reimprimir]
+Comanda #002    [Ver] [Reimprimir]
+```
+
+Si se reimprime #001:
+
+```text
+→ imprimir solamente #001
+```
+
+No crear una nueva comanda.
+
+Registrar la reimpresión para auditoría.
+
+---
+
+# 6. BEBIDAS
+
+Las bebidas forman parte de la venta.
+
+Ejemplo:
+
+```text
+VENTA #125
+Mesa 5
+
+2 Pollo asado
+1 Ensalada
+2 Gaseosas
+1 Agua
+```
+
+Pero solamente:
+
+```text
+2 Pollo asado
+1 Ensalada
+```
+
+fueron enviados a cocina.
+
+Las bebidas deben aparecer posteriormente en la prefactura y factura.
+
+---
+
+# 7. PREFACTURA
+
+Debe existir una opción para imprimir una **PREFACTURA** de la mesa.
+
+La prefactura NO es una factura fiscal/documento final.
+
+Su objetivo es mostrar al cliente el consumo antes de realizar el pago.
+
+Ejemplo:
+
+```text
+================================
+          EL LOBITO
+           PREFACTURA
+================================
+
+MESA: 5
+MESERO: JUAN
+FECHA: 20/09/2026
+
+--------------------------------
+CANT  DESCRIPCIÓN       PRECIO
+--------------------------------
+
+2     Pollo asado       400.00
+1     Ensalada          120.00
+2     Gaseosa            80.00
+1     Agua               30.00
+
+--------------------------------
+SUBTOTAL                1,030.00
+
+IMPUESTO                  XXX.XX
+
+TOTAL                   1,XXX.XX
+--------------------------------
+
+*** PREFACTURA ***
+Documento no válido como factura
+================================
+```
+
+Adaptar impuestos y formato a la configuración real del sistema.
+
+---
+
+# 8. LA PREFACTURA DEBE MOSTRAR TODO EL CONSUMO
+
+A diferencia de la comanda:
+
+### Comanda
+
+Solamente:
+
+```text
+Productos de cocina
+```
+
+### Prefactura
+
+Debe mostrar:
+
+```text
+Comida
+Bebidas
+Otros productos
+Cantidades
+Precios
+Subtotal
+Impuestos
+Total
+```
+
+Es decir:
+
+```text
+COMANDA ≠ PREFACTURA
+```
+
+---
+
+# 9. LA PREFACTURA NO DEBE CERRAR LA MESA
+
+Imprimir la prefactura NO significa que la mesa fue pagada.
+
+Después de imprimirla:
+
+```text
+Mesa 5
+↓
+Estado: POR PAGAR
+```
+
+o el estado equivalente definido en el sistema.
+
+La venta continúa abierta hasta que el cajero procese el pago.
+
+---
+
+# 10. FLUJO COMPLETO
+
+El flujo debe ser:
+
+```text
+MESERO
+   ↓
+Abre Mesa
+   ↓
+Crea/abre Venta
+   ↓
+Agrega productos
+   ↓
+   ├── Productos de cocina
+   │       ↓
+   │   COMANDA #001
+   │       ↓
+   │   IMPRESIÓN COCINA
+   │
+   └── Bebidas
+           ↓
+       quedan en VENTA
+```
+
+Si el cliente pide más:
+
+```text
+Agregar nuevos productos
+        ↓
+Separar productos nuevos
+        ↓
+Productos de cocina
+        ↓
+COMANDA #002
+        ↓
+IMPRESIÓN
+```
+
+Cuando el cliente solicita la cuenta:
+
+```text
+Mesa
+ ↓
+PREFACTURA
+ ↓
+Impresión
+ ↓
+Cliente revisa consumo
+ ↓
+Cajero
+ ↓
+Pago
+ ↓
+FACTURA
+ ↓
+Mesa se cierra
+```
+
+---
+
+# 11. PREFACTURA NO DEBE CONVERTIRSE EN FACTURA AUTOMÁTICAMENTE
+
+Son operaciones diferentes.
+
+```text
+PREFACTURA
+    ↓
+Solo consulta/cuenta previa
+    ↓
+No paga
+    ↓
+No cierra mesa
+
+FACTURA
+    ↓
+Pago
+    ↓
+Registro del método de pago
+    ↓
+Cierra venta
+    ↓
+Libera mesa
+```
+
+---
+
+# 12. FACTURA
+
+La factura debe generarse únicamente cuando el cajero procesa el pago.
+
+Debe contener los productos completos de la venta:
+
+```text
+Comida
+Bebidas
+Otros productos
+```
+
+La factura debe incluir los datos correspondientes al cliente y los datos fiscales configurados en el sistema.
+
+No utilizar la comanda como fuente de la factura.
+
+La fuente de la factura debe ser:
+
+```text
+VENTA
++
+DETALLES DE VENTA
+```
+
+---
+
+# 13. MUY IMPORTANTE: NO DUPLICAR PRODUCTOS
+
+Los productos enviados a cocina deben quedar registrados como parte de la venta.
+
+Si una venta tiene:
+
+```text
+2 Pollo
+1 Ensalada
+2 Gaseosas
+```
+
+y posteriormente se agrega:
+
+```text
+1 Hamburguesa
+2 Gaseosas
+```
+
+la venta tendrá:
+
+```text
+2 Pollo
+1 Ensalada
+2 Gaseosas
+1 Hamburguesa
+2 Gaseosas
+```
+
+Pero las comandas serán:
+
+```text
+#001
+2 Pollo
+1 Ensalada
+
+#002
+1 Hamburguesa
+```
+
+Las bebidas nunca aparecen en las comandas si están marcadas como `requiere_cocina = 0`.
+
+---
+
+# 14. MULTIUSUARIO
+
+Debe funcionar correctamente con varios usuarios simultáneos.
+
+Ejemplo:
+
+```text
+ADMIN
+GERENTE
+CAJERO
+MESERO 1
+MESERO 2
+MESERO 3
+```
+
+Cada sesión debe permanecer aislada.
+
+No utilizar variables globales para almacenar la mesa o venta actual.
+
+La información debe estar relacionada mediante IDs:
+
+```text
+usuario_id
+mesa_id
+venta_id
+comanda_id
+```
+
+Validar permisos siempre en backend.
+
+No confiar únicamente en JavaScript.
+
+---
+
+# 15. CONCURRENCIA
+
+Debe prevenirse que dos usuarios puedan modificar incorrectamente la misma mesa o generar pedidos duplicados.
+
+Utilizar transacciones cuando corresponda.
+
+Por ejemplo, al enviar una comanda:
+
+```text
+BEGIN TRANSACTION
+
+Obtener venta
+Validar estado
+Obtener productos nuevos
+Crear comanda
+Crear detalles de comanda
+Actualizar estado correspondiente
+
+COMMIT
+```
+
+Si ocurre un error:
+
+```text
+ROLLBACK
+```
+
+---
+
+# 16. AUDITORÍA
+
+No eliminar físicamente una comanda que ya fue enviada a cocina.
+
+Guardar:
+
+```text
+comanda_id
+venta_id
+mesa_id
+usuario_id
+fecha
+hora
+estado
+fecha_impresion
+usuario_impresion
+cantidad_reimpresiones
+```
+
+Para cancelaciones posteriores, utilizar estados/auditoría.
+
+---
+
+# 17. PERMISOS
+
+## MESERO
+
+Puede:
+
+* Abrir mesa.
+* Crear venta.
+* Agregar productos.
+* Enviar productos nuevos a cocina.
+* Imprimir comandas según permisos.
+* Solicitar/imprimir prefactura.
+
+No puede modificar/eliminar libremente productos que ya fueron enviados a cocina.
+
+## CAJERO
+
+Puede:
+
+* Consultar venta.
+* Imprimir prefactura.
+* Cobrar.
+* Procesar diferentes métodos de pago.
+* Generar factura.
+* Cerrar la mesa después del pago.
+
+No debe poder alterar arbitrariamente el pedido.
+
+## GERENTE
+
+Puede:
+
+* Supervisar ventas.
+* Autorizar eliminaciones/cancelaciones.
+* Consultar comandas.
+* Reimprimir.
+* Supervisar mesas.
+
+## ADMIN
+
+Acceso completo.
+
+---
+
+# 18. REGLA FUNDAMENTAL
+
+Mantener siempre esta separación:
+
+```text
+┌──────────────────────────────────────┐
+│              VENTA                   │
+│                                      │
+│  Comida                              │
+│  Bebidas                             │
+│  Otros productos                     │
+└──────────────────┬───────────────────┘
+                   │
+          ┌────────┴────────┐
+          │                 │
+          ▼                 ▼
+      COMANDAS          PREFACTURA
+      DE COCINA             │
+          │                 │
+          │                 ▼
+          │              CLIENTE
+          │                 │
+          │                 ▼
+          │              PAGO
+          │                 │
+          │                 ▼
+          │              FACTURA
+          │                 │
+          └─────────────────┘
+                    │
+                    ▼
+               MESA CERRADA
+```
+
+## REGLAS ABSOLUTAS
+
+1. Las bebidas NO se imprimen en cocina.
+2. Los productos de cocina SÍ generan comanda.
+3. Cada envío nuevo genera una comanda independiente.
+4. Una comanda anterior nunca se modifica para agregar productos nuevos.
+5. Reimprimir una comanda no crea otra comanda.
+6. La prefactura muestra todo el consumo y precios.
+7. La prefactura NO es una factura.
+8. La prefactura NO cierra la mesa.
+9. La factura se genera después del pago.
+10. La factura utiliza la venta como fuente, no las comandas.
+11. Una venta puede tener múltiples comandas.
+12. Una venta puede tener comida y bebidas aunque las bebidas no tengan comanda.
+13. Mantener auditoría.
+14. Mantener aislamiento entre sesiones de diferentes usuarios.
+15. No romper los módulos existentes.
+
+Antes de implementar, revisar las tablas, modelos, controladores y vistas existentes para reutilizar la estructura actual y evitar duplicaciones.
+
+Todo código nuevo debe estar comentado.
+# REQUISITO CRÍTICO: DIVISIÓN DE MESAS Y CUENTAS
+
+Agregar al diseño del módulo Mesas → Ventas → Comandas → Prefactura → Factura la posibilidad de **dividir una mesa/cuenta**, porque algunos clientes pueden querer pagar por adelantado solamente su parte del consumo.
+
+## OBJETIVO
+
+Una mesa no debe estar limitada obligatoriamente a una única cuenta.
+
+Debe ser posible dividir el consumo de una mesa en varias cuentas independientes.
+
+Ejemplo:
+
+```text
+MESA 5
+Total actual: C$1,500
+
+        ↓ DIVIDIR
+
+MESA/CUENTA 5-A
+Cliente 1
+C$500
+PAGADA
+
+MESA/CUENTA 5-B
+Cliente 2
+C$400
+PAGADA
+
+MESA/CUENTA 5-C
+Cliente 3
+C$600
+PENDIENTE
+```
+
+La división debe conservar la relación con la mesa original y con la venta original.
+
+---
+
+# PAGO POR ADELANTADO
+
+Debe ser posible que un cliente pague solamente los productos que le corresponden antes de que los demás clientes terminen.
+
+Ejemplo:
+
+```text
+Mesa 5
+
+Cliente A:
+2 Pollo
+2 Gaseosas
+
+Cliente B:
+1 Pizza
+1 Agua
+
+Cliente C:
+1 Hamburguesa
+1 Gaseosa
+```
+
+El Cliente A solicita pagar.
+
+El sistema debe permitir:
+
+```text
+Seleccionar productos del Cliente A
+        ↓
+Crear cuenta dividida
+        ↓
+Generar prefactura
+        ↓
+Procesar pago
+        ↓
+Generar factura
+        ↓
+Marcar esa cuenta como PAGADA
+```
+
+Los productos de B y C permanecen pendientes.
+
+---
+
+# NO CERRAR TODA LA MESA
+
+Si una parte de la mesa paga, NO se debe cerrar toda la mesa.
+
+Ejemplo:
+
+```text
+MESA 5
+
+Cuenta A → PAGADA
+Cuenta B → PENDIENTE
+Cuenta C → PENDIENTE
+```
+
+La mesa continúa activa.
+
+Solamente cuando todas las cuentas/partes estén pagadas:
+
+```text
+Cuenta A → PAGADA
+Cuenta B → PAGADA
+Cuenta C → PAGADA
+             ↓
+        MESA CERRADA
+             ↓
+        Mesa disponible
+```
+
+---
+
+# PRODUCTOS
+
+Los productos deben poder asignarse a una cuenta dividida.
+
+Ejemplo:
+
+```text
+Venta original #100
+
+Detalle 1 → 2 Pollo
+Detalle 2 → 1 Pizza
+Detalle 3 → 3 Gaseosas
+Detalle 4 → 1 Agua
+```
+
+Después de dividir:
+
+```text
+Cuenta A
+2 Pollo
+1 Gaseosa
+
+Cuenta B
+1 Pizza
+2 Gaseosas
+
+Cuenta C
+1 Agua
+```
+
+Cada cuenta debe saber exactamente qué productos le pertenecen.
+
+---
+
+# NO DUPLICAR PRODUCTOS
+
+Un mismo detalle de venta no debe poder cobrarse dos veces accidentalmente.
+
+El backend debe validar que un producto/cantidad ya asignado a una cuenta pagada no pueda volver a cobrarse.
+
+Si se divide una cantidad:
+
+```text
+3 Gaseosas
+```
+
+debe ser posible distribuirla correctamente:
+
+```text
+Cuenta A → 1
+Cuenta B → 2
+```
+
+El total de cantidades asignadas nunca puede superar la cantidad original.
+
+---
+
+# PREFACTURA
+
+Cada cuenta dividida debe poder generar su propia prefactura.
+
+Ejemplo:
+
+```text
+MESA 5
+CUENTA 5-A
+
+2 Pollo
+1 Gaseosa
+
+Subtotal
+Impuesto
+TOTAL
+```
+
+La prefactura debe mostrar únicamente los productos pertenecientes a esa cuenta.
+
+No debe mostrar los productos de las demás cuentas.
+
+---
+
+# FACTURA
+
+Cuando una cuenta dividida se paga:
+
+```text
+Cuenta 5-A
+     ↓
+Pago
+     ↓
+Factura de esa cuenta
+     ↓
+Cuenta 5-A = PAGADA
+```
+
+Las otras cuentas permanecen abiertas.
+
+---
+
+# COMANDAS DE COCINA
+
+La división de cuentas NO debe romper el sistema de comandas.
+
+Las comandas siguen perteneciendo a los productos enviados a cocina.
+
+Ejemplo:
+
+```text
+Mesa 5
+Venta #100
+
+Comanda #001
+2 Pollo
+1 Pizza
+
+Comanda #002
+1 Hamburguesa
+```
+
+Si posteriormente se divide la cuenta:
+
+```text
+Cuenta A
+2 Pollo
+
+Cuenta B
+1 Pizza
+1 Hamburguesa
+```
+
+Las comandas históricas NO deben modificarse.
+
+La división de la cuenta y las comandas son conceptos diferentes.
+
+---
+
+# IDENTIFICACIÓN
+
+La arquitectura debe permitir identificar:
+
+```text
+mesa_id
+venta_id
+cuenta_id
+detalle_venta_id
+usuario_id
+```
+
+No utilizar solamente el número de mesa para identificar una cuenta.
+
+Una mesa puede tener varias cuentas activas.
+
+---
+
+# ESTADOS
+
+Considerar estados como:
+
+```text
+MESA:
+LIBRE
+OCUPADA
+POR_PAGAR
+
+CUENTA:
+ABIERTA
+POR_PAGAR
+PAGADA
+CANCELADA
+```
+
+Adaptar estos estados a la arquitectura existente si ya existen equivalentes.
+
+---
+
+# MULTIUSUARIO
+
+Debe funcionar correctamente con varios usuarios simultáneamente.
+
+Ejemplo:
+
+```text
+Mesero 1 → Mesa 5
+Mesero 2 → Mesa 8
+Mesero 3 → Mesa 10
+Cajero → cobrando cuenta 5-A
+Gerente → supervisando
+```
+
+No permitir que una sesión vea o modifique accidentalmente la cuenta de otra mesa.
+
+Las validaciones deben realizarse en backend.
+
+---
+
+# CONCURRENCIA
+
+La división de una cuenta y el pago deben utilizar transacciones cuando corresponda.
+
+Debe evitarse:
+
+```text
+Dos cajeros
+    ↓
+Intentan cobrar
+la misma cuenta
+    ↓
+DOBLE PAGO
+```
+
+Antes de confirmar el pago, el backend debe comprobar que la cuenta todavía esté pendiente.
+
+Utilizar mecanismos apropiados de transacción/bloqueo para evitar condiciones de carrera.
+
+---
+
+# REGLA FUNDAMENTAL
+
+El diseño debe soportar:
+
+```text
+UNA MESA
+   ↓
+UNA VENTA
+   ↓
+VARIAS CUENTAS
+   ↓
+CADA CUENTA
+   ├── Productos propios
+   ├── Prefactura propia
+   ├── Pago propio
+   └── Factura propia
+```
+
+Pero todas las cuentas siguen relacionadas con la misma mesa original.
+
+La mesa solamente vuelve a estar LIBRE cuando todas las cuentas pendientes hayan sido pagadas o cerradas correctamente.
+
+Antes de implementar, revisar la arquitectura actual y adaptar este requisito sin duplicar tablas, modelos o funcionalidades existentes.

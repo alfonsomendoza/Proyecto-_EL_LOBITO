@@ -6,6 +6,7 @@ use App\Services\Backup\CompositeDumper;
 use App\Services\Backup\DatabaseDumper;
 use App\Services\Backup\MysqldumpDumper;
 use App\Services\Backup\PdoDumper;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -33,6 +34,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        // Forzar protocolo HTTPS cuando las peticiones vengan a través de Ngrok / Reverse Proxy
+        if (request()->header('x-forwarded-proto') === 'https' || request()->secure()) {
+            URL::forceScheme('https');
+        }
     }
 }

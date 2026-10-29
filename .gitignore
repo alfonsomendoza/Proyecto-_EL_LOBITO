@@ -150,3 +150,101 @@ tmp_fix.txt
 MEMORIA_OPENCODE.md
 /dumps/
 /sistemadecaja
+
+
+# ==========================================================
+# LARAVEL (Core)
+# ==========================================================
+/vendor/
+/node_modules/
+/public/build/
+/public/hot
+/storage/*.key
+/storage/pail/
+/bootstrap/cache/*.php
+
+# ==========================================================
+# VARIABLES DE ENTORNO Y CREDENCIALES
+# ==========================================================
+.env
+.env.*
+!.env.example
+!.env.testing
+/auth.json
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ==========================================================
+# CACHE, TESTS Y LOGS
+# ==========================================================
+/storage/logs/
+*.log
+.phpunit.cache
+.phpunit.result.cache
+
+# ==========================================================
+# ARCHIVOS DE IDE / EDITOR
+# ==========================================================
+/.vscode/
+/.idea/
+/.fleet/
+/.nova/
+/.zed/
+.phpactor.json
+*.swp
+*.swo
+
+# ==========================================================
+# SISTEMA OPERATIVO
+# ==========================================================
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ==========================================================
+# INFRAESTRUCTURA Y DOCKER (Exclusivo Local)
+# ==========================================================
+/.devcontainer/
+/compose.yaml
+/Dockerfile
+
+# ==========================================================
+# BACKUPS, DUMPS Y ARCHIVOS TEMPORALES
+# ==========================================================
+/dumps/
+/respaldo-config-20261027-222653/
+*.sql
+*.sql.gz
+*.dump
+*.bak
+*.backup
+*.tmp
+*.temp
+*.cache
+~$*
+
+# ==========================================================
+# DOCUMENTACIÓN LOCAL E INTELIGENCIA ARTIFICIAL (IA)
+# ==========================================================
+/skills/
+/docs/
+/AGENTS.md
+/MEMORY.md
+/SKILL.md
+/AI_CONTEXT.md
+/CLAUDE.md
+/sistemadecajaMEMORIA_OPENCODE.md
+MEMORIA_OPENCODE.copia.md
+MEMORIA_OPENCODE.md
+agent2.md
+tmp_fix.txt
+
+# ==========================================================
+# OTROS (Legado)
+# ==========================================================
+Homestead.json
+Homestead.yaml
+/sistemadecaja

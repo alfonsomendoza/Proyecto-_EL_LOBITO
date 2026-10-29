@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+!.env.testing
+.git
+vendor
+node_modules
+public/build
+public/hot
+storage/logs/*
+bootstrap/cache/*.php
+*.sql
+*.sql.gz
+*.dump
+*.bak
+*.backup
