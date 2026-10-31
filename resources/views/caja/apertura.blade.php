@@ -32,7 +32,7 @@
                 @php $formato = $den < 1 ? '0.50' : number_format($den, 2); @endphp
                 <div style="display:flex; justify-content:space-between; margin-bottom:10px; align-items:center;">
                     <label style="width:100px;">C$ {{ $formato }}:</label>
-                    <input type="number" data-den="{{ $den }}" name="apertura_b[{{ $den }}]" value="0" class="calc-apertura" min="0" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px;">
+                    <input type="number" data-den="{{ $den }}" name="apertura_b[{{ $den }}]" value="0" class="calc-apertura" min="0" step="1" inputmode="numeric" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px;">
                 </div>
             @endforeach
 
@@ -63,29 +63,48 @@ document.addEventListener('DOMContentLoaded', function() {
     function calcularTotal() {
         let total = 0;
         inputs.forEach(input => {
-            const cantidad = parseInt(input.value) || 0;
-            const denominacion = parseFloat(input.getAttribute('data-den'));
+            const cantidad = numeroEstricto(input.value === '' ? '0' : input.value, 0) ?? 0;
+            const denominacion = Number(input.getAttribute('data-den'));
             total += (cantidad * denominacion);
         });
         lblTotal.textContent = total.toFixed(2);
         return total;
     }
 
+    function hayCantidadInvalida() {
+        return Array.from(inputs).some(input => {
+            return numeroEstricto(input.value === '' ? '0' : input.value, 0) === null;
+        });
+    }
+
     inputs.forEach(input => input.addEventListener('input', calcularTotal));
 
     form.addEventListener('submit', function(e) {
         e.preventDefault();
-        
+
+        if (hayCantidadInvalida()) {
+            Swal.fire('Atención', 'Las cantidades de billetes y monedas deben ser números enteros, sin letras ni notación científica.', 'warning');
+            return;
+        }
+
+        const totalMonto = calcularTotal();
+
+        // La columna real es DECIMAL(12,2): si el conteo la desborda, no se
+        // envía (el backend también lo rechaza).
+        if (totalMonto > 9999999999.99) {
+            Swal.fire('Atención', 'El total del conteo supera el máximo permitido (C$ 9,999,999,999.99).', 'warning');
+            return;
+        }
+
         let conteo = {};
         inputs.forEach(input => {
-            const cantidad = parseInt(input.value) || 0;
+            const cantidad = numeroEstricto(input.value === '' ? '0' : input.value, 0) ?? 0;
             const denominacion = input.getAttribute('data-den');
             if (cantidad > 0) {
                 conteo[denominacion] = cantidad;
             }
         });
 
-        const totalMonto = calcularTotal();
         const formData = new FormData();
         formData.append('_token', document.querySelector('input[name="_token"]').value); 
         formData.append('fecha', document.getElementById('hora_apertura_input').value);

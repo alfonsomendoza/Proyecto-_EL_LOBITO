@@ -509,6 +509,100 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
         $this->assertSame('ABIERTA', DB::table('cuentas')->find($escena['cuenta_a'])->estado);
     }
 
+    public function test_cobro_rechaza_montos_y_porcentajes_con_formato_invalido(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        $lineaValida = $this->linea('EFECTIVO_CORDOBA', 300);
+        $lineaInvalida = $lineaValida;
+        $lineaInvalida['monto'] = '1e3';
+
+        $casos = [
+            ['descuento_porcentaje' => 'e'],
+            ['descuento_porcentaje' => '0e'],
+            ['descuento_porcentaje' => '0e13212312132121'],
+            ['descuento_porcentaje' => '1e3'],
+            ['descuento_porcentaje' => '10abc'],
+            ['descuento_porcentaje' => '25aasasdasdasdasasd'],
+            ['descuento_porcentaje' => '--10'],
+            ['descuento_porcentaje' => '10%%'],
+            ['descuento_porcentaje' => '-10'],
+            ['descuento_porcentaje' => '10.999'],
+            ['propina_porcentaje' => '0e13212312132121'],
+            ['propina_porcentaje' => '25aasasdasdasdasasd'],
+            ['propina_porcentaje' => '10%%'],
+            ['propina' => '1e3'],
+            ['propina' => '-5'],
+            ['descuento' => '1e3'],
+            ['descuento' => '10abc'],
+            ['descuento' => '10000000000'],
+            ['propina' => '10000000000'],
+            ['descuento_porcentaje' => '101'],
+            ['monto_recibido' => '1e3'],
+            ['monto_recibido' => '100000000'],
+            ['pagos' => [$lineaInvalida]],
+            ['pagos' => [[
+                'clave_operacion' => 'pago-monto-enorme',
+                'metodo_pago' => 'EFECTIVO_CORDOBA',
+                'monto' => '10000000000',
+            ]]],
+        ];
+
+        foreach ($casos as $caso) {
+            $this->actingAs($cajero)
+                ->postJson(route('pos.cuentas.pagar', $escena['cuenta_a']), $caso + [
+                    'pagos' => [$lineaValida],
+                ])
+                ->assertStatus(422);
+        }
+
+        $this->assertSame(0, DB::table('facturas')->count());
+        $this->assertSame(0, DB::table('pagos_cuenta')->count());
+        $this->assertSame('ABIERTA', DB::table('cuentas')->find($escena['cuenta_a'])->estado);
+    }
+
+    public function test_descuento_y_propina_vacios_se_tratan_como_sin_ajuste(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // Los ajustes son opcionales: vacío = sin descuento ni propina.
+        // No debe convertirse un valor INVÁLIDO en cero (eso se prueba aparte).
+        $this->actingAs($cajero)->post(route('pos.cuentas.pagar', $escena['cuenta_a']), [
+            'descuento' => '',
+            'propina' => '',
+            'pagos' => [$this->linea('EFECTIVO_CORDOBA', 300)],
+        ])->assertStatus(200);
+
+        $factura = DB::table('facturas')->where('cuenta_id', $escena['cuenta_a'])->sole();
+        $detalle = $this->detalleFactura($factura->id);
+
+        $this->assertSame(300.0, (float) $factura->total);
+        $this->assertSame(0.0, (float) $detalle['ajustes']['descuento']);
+        $this->assertSame(0.0, (float) $detalle['ajustes']['propina']);
+    }
+
+    public function test_cobro_acepta_porcentajes_escritos_con_simbolo_de_porcentaje(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // Consumo 300; descuento 10% = 30; base 270; propina 10% = 27; total 297.
+        $this->actingAs($cajero)->post(route('pos.cuentas.pagar', $escena['cuenta_a']), [
+            'descuento_porcentaje' => '10%',
+            'propina_porcentaje' => '10%',
+            'pagos' => [$this->linea('EFECTIVO_CORDOBA', 297)],
+        ])->assertStatus(200);
+
+        $factura = DB::table('facturas')->where('cuenta_id', $escena['cuenta_a'])->sole();
+        $detalle = $this->detalleFactura($factura->id);
+
+        $this->assertSame(297.0, (float) $factura->total);
+        $this->assertSame(30.0, (float) $detalle['ajustes']['descuento']);
+        $this->assertSame(27.0, (float) $detalle['ajustes']['propina']);
+    }
+
     public function test_una_sola_cuenta_con_descuento_propina_y_pagos_mixtos_queda_pagada(): void
     {
         $cajero = $this->usuario('CAJERO');
@@ -768,6 +862,39 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
                 'propina_porcentaje' => -5,
             ]))
             ->assertStatus(422);
+    }
+
+    public function test_prefactura_rechaza_porcentajes_con_formato_invalido(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        foreach (['e', '0e', '0e13212312132121', '1e3', '10abc', '25aasasdasdasdasasd', '--10', '10%%', '-5', '10.999'] as $valor) {
+            $this->actingAs($cajero)
+                ->get(route('pos.cuentas.prefactura', [
+                    'cuentaId' => $escena['cuenta_a'],
+                    'propina_porcentaje' => $valor,
+                ]))
+                ->assertStatus(422);
+        }
+    }
+
+    public function test_prefactura_acepta_porcentaje_con_simbolo(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // Consumo 300; descuento 10% = 30; base 270; propina 10% = 27; total 297.
+        $this->actingAs($cajero)
+            ->get(route('pos.cuentas.prefactura', [
+                'cuentaId' => $escena['cuenta_a'],
+                'descuento_porcentaje' => '10%',
+                'propina_porcentaje' => '10%',
+            ]))
+            ->assertStatus(200)
+            ->assertSee('30.00')
+            ->assertSee('27.00')
+            ->assertSee('297.00');
     }
 
     public function test_cobro_con_propina_fija_en_el_servidor(): void

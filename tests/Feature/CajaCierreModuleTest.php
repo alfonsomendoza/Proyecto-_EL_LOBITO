@@ -361,6 +361,39 @@ class CajaCierreModuleTest extends TestCase
         $this->get(route('caja.cierre'))->assertRedirect(route('login'));
     }
 
+    public function test_apertura_rechaza_montos_con_formato_invalido(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        $invalidos = [
+            'e',
+            '0e',
+            '0e13212312132121',
+            '1e3',
+            '10abc',
+            '25aasasdasdasdasasd',
+            '--10',
+            '-10',
+            '10.999',
+            '10000000000',
+        ];
+
+        foreach ($invalidos as $valor) {
+            $this->actingAs($admin)
+                ->postJson(route('caja.abrir'), ['monto_inicial' => $valor])
+                ->assertStatus(422);
+        }
+
+        $this->assertDatabaseCount('caja_apertura', 0);
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.abrir'), ['monto_inicial' => '10.50'])
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertDatabaseHas('caja_apertura', ['usuario_id' => $admin->id, 'estado' => 'ABIERTA']);
+    }
+
     public function test_mesero_no_puede_cerrar_caja(): void
     {
         $this->apertura('ABIERTA');
@@ -586,6 +619,21 @@ class CajaCierreModuleTest extends TestCase
      | 4. Reglas de cierre
      | ------------------------------------------------------------------ */
 
+    public function test_script_global_no_registra_envio_duplicado_de_apertura_y_cierre(): void
+    {
+        // El envío de estos dos formularios lo maneja cada vista con su propio
+        // `fetch`. Si script.js volviera a registrar `manejarEnvio`, un solo
+        // clic dispararía DOS peticiones HTTP.
+        $script = file_get_contents(public_path('script.js'));
+
+        $this->assertStringNotContainsString("manejarEnvio('formApertura')", $script);
+        $this->assertStringNotContainsString("manejarEnvio('formCierre')", $script);
+
+        // Las vistas conservan su manejador propio (validaciones y mensajes).
+        $this->assertStringContainsString("getElementById('formApertura')", file_get_contents(resource_path('views/caja/apertura.blade.php')));
+        $this->assertStringContainsString("getElementById('formCierre')", file_get_contents(resource_path('views/caja/cierre.blade.php')));
+    }
+
     public function test_no_se_puede_cerrar_sin_caja_abierta(): void
     {
         $this->actingAs($this->usuario('CAJERO'))
@@ -621,6 +669,47 @@ class CajaCierreModuleTest extends TestCase
         $this->actingAs($admin)
             ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 0, 'conteo_local' => $this->conteoLocalCero()])
             ->assertStatus(422);
+
+        $this->assertDatabaseCount('caja_cierre', 0);
+    }
+
+    public function test_campos_numericos_con_formato_invalido_son_rechazados(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $this->apertura('ABIERTA', now()->subHour()->format('Y-m-d H:i:s'), 1000, $admin->id);
+
+        $conteo = $this->conteoLocalCero();
+
+        $casos = [
+            ['tasa_cambio' => 'e'],
+            ['tasa_cambio' => '0e'],
+            ['tasa_cambio' => '0e13212312132121'],
+            ['tasa_cambio' => '1e3'],
+            ['tasa_cambio' => '10abc'],
+            ['tasa_cambio' => '-36.5'],
+            ['tasa_cambio' => '36.50001'],
+            ['tasa_cambio' => '1000000'],
+            ['tasa_cambio' => '36.5', 'otros_ingresos' => 'e'],
+            ['tasa_cambio' => '36.5', 'otros_ingresos' => '1e3'],
+            ['tasa_cambio' => '36.5', 'otros_ingresos' => '10.999'],
+            ['tasa_cambio' => '36.5', 'otros_ingresos' => '10000000000'],
+            ['tasa_cambio' => '36.5', 'retiros' => '10abc'],
+            ['tasa_cambio' => '36.5', 'retiros' => '-5'],
+            ['tasa_cambio' => '36.5', 'retiros' => '5.999'],
+            ['tasa_cambio' => '36.5', 'retiros' => '10000000000'],
+            ['tasa_cambio' => '36.5', 'conteo_local' => array_merge($conteo, ['1000' => 'e'])],
+            ['tasa_cambio' => '36.5', 'conteo_local' => array_merge($conteo, ['1000' => '1e3'])],
+            ['tasa_cambio' => '36.5', 'conteo_local' => array_merge($conteo, ['1000' => '1.5'])],
+            ['tasa_cambio' => '36.5', 'conteo_local' => array_merge($conteo, ['1000' => '10000000'])],
+            ['tasa_cambio' => '36.5', 'conteo_dolar' => array_merge($conteo, ['100' => '0e123'])],
+            ['tasa_cambio' => '36.5', 'conteo_dolar' => array_merge($conteo, ['100' => '10000000'])],
+        ];
+
+        foreach ($casos as $caso) {
+            $this->actingAs($admin)
+                ->postJson(route('caja.cierre.registrar'), $caso)
+                ->assertStatus(422);
+        }
 
         $this->assertDatabaseCount('caja_cierre', 0);
     }
@@ -929,7 +1018,7 @@ class CajaCierreModuleTest extends TestCase
             $cierreId = (int) CajaCierre::latest('id')->first()->id;
 
             $this->actingAs($usuario)
-                ->post(route('caja.cierre.anular', $cierreId))
+                ->post(route('caja.cierre.anular', $cierreId), ['motivo' => 'Cierre registrado por error'])
                 ->assertStatus(200)
                 ->assertJson(['exito' => true]);
 
@@ -959,9 +1048,53 @@ class CajaCierreModuleTest extends TestCase
     public function test_anular_un_cierre_inexistente_devuelve_404(): void
     {
         $this->actingAs($this->usuario('ADMIN'))
-            ->post(route('caja.cierre.anular', 9999))
+            ->post(route('caja.cierre.anular', 9999), ['motivo' => 'Prueba de cierre inexistente'])
             ->assertStatus(404)
             ->assertJson(['exito' => false]);
+    }
+
+    public function test_no_se_puede_anular_un_cierre_sin_motivo(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura('ABIERTA', now()->subHour()->format('Y-m-d H:i:s'), 1000, $admin->id);
+
+        $this->actingAs($admin)->postJson(route('caja.cierre.registrar'), [
+            'tasa_cambio' => 36.5,
+            'conteo_local' => $this->conteoLocalCero(),
+        ])->assertStatus(200);
+
+        $cierreId = (int) CajaCierre::latest('id')->first()->id;
+
+        // Sin motivo (o solo espacios) el backend responde 422 y NO anula.
+        foreach (['', '   '] as $motivoInvalido) {
+            $this->actingAs($admin)
+                ->post(route('caja.cierre.anular', $cierreId), ['motivo' => $motivoInvalido])
+                ->assertStatus(422)
+                ->assertJson(['exito' => false]);
+        }
+
+        $this->assertNotSame('ANULADO', CajaCierre::find($cierreId)->estado);
+        $this->assertSame('CERRADA', CajaApertura::find($aperturaId)->estado);
+    }
+
+    public function test_anular_con_motivo_valido_conserva_el_motivo_en_la_respuesta(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $this->apertura('ABIERTA', now()->subHour()->format('Y-m-d H:i:s'), 1000, $admin->id);
+
+        $this->actingAs($admin)->postJson(route('caja.cierre.registrar'), [
+            'tasa_cambio' => 36.5,
+            'conteo_local' => $this->conteoLocalCero(),
+        ])->assertStatus(200);
+
+        $cierreId = (int) CajaCierre::latest('id')->first()->id;
+
+        $this->actingAs($admin)
+            ->post(route('caja.cierre.anular', $cierreId), ['motivo' => '  Turno duplicado  '])
+            ->assertStatus(200)
+            ->assertJson(['exito' => true]);
+
+        $this->assertSame('ANULADO', CajaCierre::find($cierreId)->estado);
     }
 
     public function test_no_se_puede_anular_dos_veces_el_mismo_cierre(): void
@@ -971,10 +1104,10 @@ class CajaCierreModuleTest extends TestCase
         $this->actingAs($admin)->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()]);
         $cierreId = (int) CajaCierre::latest('id')->first()->id;
 
-        $this->actingAs($admin)->post(route('caja.cierre.anular', $cierreId))->assertStatus(200);
+        $this->actingAs($admin)->post(route('caja.cierre.anular', $cierreId), ['motivo' => 'Primera anulación'])->assertStatus(200);
 
         $this->actingAs($admin)
-            ->post(route('caja.cierre.anular', $cierreId))
+            ->post(route('caja.cierre.anular', $cierreId), ['motivo' => 'Segundo intento'])
             ->assertStatus(409)
             ->assertJson(['exito' => false]);
     }

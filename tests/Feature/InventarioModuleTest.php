@@ -363,6 +363,68 @@ class InventarioModuleTest extends TestCase
         $this->assertSame(0, DB::table('movimientos_inventario')->count());
     }
 
+    public function test_campos_numericos_de_inventario_rechazan_notacion_cientifica_y_letras(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $p = $this->producto(true);
+
+        $invalidos = [
+            'e',
+            '0e',
+            '0e13212312132121',
+            '1e3',
+            '10abc',
+            '25aasasdasdasdasasd',
+            '--10',
+            '-3',
+            '10.1234',
+            '1000000000',
+        ];
+
+        foreach ($invalidos as $valor) {
+            $this->actingAs($admin)
+                ->postJson('/inventario/'.$p.'/carga-inicial', ['cantidad' => $valor])
+                ->assertStatus(422);
+
+            $this->actingAs($admin)
+                ->postJson('/inventario/'.$p.'/ajuste', [
+                    'tipo' => 'AJUSTE_ENTRADA',
+                    'cantidad' => $valor,
+                ])
+                ->assertStatus(422);
+
+            $this->actingAs($admin)
+                ->postJson('/inventario/'.$p.'/minimo', ['stock_minimo' => $valor])
+                ->assertStatus(422);
+        }
+
+        $this->assertSame(0, DB::table('movimientos_inventario')->count());
+        $this->assertSame(0, DB::table('inventario_producto')->where('producto_id', $p)->count());
+    }
+
+    public function test_inventario_acepta_hasta_tres_decimales(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $p = $this->producto(true);
+
+        $this->actingAs($admin)
+            ->postJson('/inventario/'.$p.'/carga-inicial', ['cantidad' => '10.125'])
+            ->assertStatus(200);
+
+        $this->actingAs($admin)
+            ->postJson('/inventario/'.$p.'/ajuste', [
+                'tipo' => 'AJUSTE_ENTRADA',
+                'cantidad' => '0.125',
+            ])
+            ->assertStatus(200);
+
+        $this->actingAs($admin)
+            ->postJson('/inventario/'.$p.'/minimo', ['stock_minimo' => '1.125'])
+            ->assertStatus(200);
+
+        $this->assertSame(10.25, $this->stock($p));
+    }
+
     /** Carga inicial rechazada cuando el producto no controla stock. */
     public function test_carga_inicial_rechazada_sin_control_de_stock(): void
     {

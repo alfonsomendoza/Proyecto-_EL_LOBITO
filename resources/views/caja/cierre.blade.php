@@ -109,7 +109,7 @@
                 <h4 style="color:var(--color-primary, #34495e); border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:14px; font-size:14px;">Moneda Extranjera (USD)</h4>
                 <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
                     <label style="font-weight:bold; font-size:13px; width:130px;">Tasa de Cambio:</label>
-                    <input type="number" id="tasa_cambio" name="tasa_cambio" value="36.50" step="0.0001" min="0.0001"
+                    <input type="number" id="tasa_cambio" name="tasa_cambio" value="36.50" step="0.0001" min="0.0001" max="999999.9999"
                            class="calc-cierre" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px; text-align:right;">
                 </div>
                 @foreach (\App\Services\CajaCierreService::DENOMINACIONES_DOLAR as $den)
@@ -134,12 +134,12 @@
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
                     <div style="flex:1; min-width:180px;">
                         <label style="display:block; margin-bottom:5px; font-weight:bold; font-size:13px;">Otros ingresos (C$):</label>
-                        <input type="number" id="otros_ingresos" name="otros_ingresos" value="0" step="0.01" min="0" class="calc-cierre"
+                        <input type="number" id="otros_ingresos" name="otros_ingresos" value="0" step="0.01" min="0" max="9999999999.99" class="calc-cierre"
                                style="width:100%; padding:8px; border:1px solid #ddd; border-radius:4px;">
                     </div>
                     <div style="flex:1; min-width:180px;">
                         <label style="display:block; margin-bottom:5px; font-weight:bold; font-size:13px;">Retiros de efectivo (C$):</label>
-                        <input type="number" id="retiros" name="retiros" value="0" step="0.01" min="0" class="calc-cierre"
+                        <input type="number" id="retiros" name="retiros" value="0" step="0.01" min="0" max="9999999999.99" class="calc-cierre"
                                style="width:100%; padding:8px; border:1px solid #ddd; border-radius:4px;">
                     </div>
                 </div>
@@ -246,24 +246,32 @@ document.addEventListener('DOMContentLoaded', function () {
     const ventasEfectivo = {{ $ventasEfectivo }};
     const totalEgresos = {{ $totalEgresos }};
 
-    const num = (el) => parseFloat(el.value) || 0;
+    const num = (el, decimales = 2) => {
+        if (!el) return 0;
+        const valor = numeroEstricto(el.value === '' ? '0' : el.value, decimales);
+        return valor === null ? 0 : valor;
+    };
+
+    function cantidadConteo(input) {
+        return numeroEstricto(input.value === '' ? '0' : input.value, 0) ?? 0;
+    }
 
     function calcular() {
         let contado = 0;
         inputs.forEach(input => {
-            const cantidad = parseInt(input.value) || 0;
+            const cantidad = cantidadConteo(input);
             if (input.getAttribute('data-moneda') === 'local') {
-                contado += cantidad * parseFloat(input.getAttribute('data-den'));
+                contado += cantidad * Number(input.getAttribute('data-den'));
             }
         });
 
         // Dólares convertidos a córdobas con la tasa indicada.
-        const tasa = num(document.getElementById('tasa_cambio'));
+        const tasa = num(document.getElementById('tasa_cambio'), 4);
         let dolares = 0;
         inputs.forEach(input => {
             if (input.getAttribute('data-moneda') === 'dolar') {
-                const cantidad = parseInt(input.value) || 0;
-                dolares += cantidad * parseFloat(input.getAttribute('data-den'));
+                const cantidad = cantidadConteo(input);
+                dolares += cantidad * Number(input.getAttribute('data-den'));
             }
         });
         contado += dolares * tasa;
@@ -294,8 +302,36 @@ document.addEventListener('DOMContentLoaded', function () {
     inputs.forEach(input => input.addEventListener('input', calcular));
     calcular();
 
+    function validarNumeros() {
+        for (const input of inputs) {
+            if (input.getAttribute('data-moneda') && numeroEstricto(input.value === '' ? '0' : input.value, 0) === null) {
+                return 'Las cantidades del conteo deben ser números enteros, sin letras ni notación científica.';
+            }
+        }
+
+        const tasa = document.getElementById('tasa_cambio');
+        if (tasa && (numeroMaximo(tasa.value, 4, 999999.9999) === null || Number(tasa.value) <= 0)) {
+            return 'La tasa de cambio debe ser un número mayor que cero, con hasta 4 decimales y como máximo 999,999.9999.';
+        }
+
+        for (const id of ['otros_ingresos', 'retiros']) {
+            const campo = document.getElementById(id);
+            if (campo && numeroMaximo(campo.value === '' ? '0' : campo.value, 2, 9999999999.99) === null) {
+                return 'Los otros ingresos y los retiros deben ser números, con hasta 2 decimales y un máximo de C$ 9,999,999,999.99.';
+            }
+        }
+
+        return null;
+    }
+
     form.addEventListener('submit', function (evento) {
         evento.preventDefault();
+
+        const errorNumerico = validarNumeros();
+        if (errorNumerico) {
+            Swal.fire('Atención', errorNumerico, 'warning');
+            return;
+        }
 
         Swal.fire({ title: 'Cerrando caja...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
 
@@ -331,6 +367,16 @@ document.addEventListener('DOMContentLoaded', function () {
                 title: '¿Anular este cierre?',
                 text: 'El cierre quedará ANULADO y el turno volverá a quedar abierto.',
                 icon: 'warning',
+                input: 'textarea',
+                inputLabel: 'Motivo de la anulación (obligatorio)',
+                inputPlaceholder: 'Explica por qué se anula este cierre...',
+                inputAttributes: { maxlength: 500 },
+                inputValidator: function (valor) {
+                    if (!valor || valor.trim() === '') {
+                        return 'Debes escribir el motivo de la anulación.';
+                    }
+                    return null;
+                },
                 showCancelButton: true,
                 confirmButtonColor: '#d33',
                 cancelButtonColor: '#3085d6',
@@ -341,6 +387,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 const fd = new FormData();
                 fd.append('_token', '{{ csrf_token() }}');
+                // El backend exige `motivo` (CajaCierreController::anular); sin
+                // él responde 422 y no anula nada.
+                fd.append('motivo', (res.value || '').trim());
 
                 fetch('{{ route("caja.cierre.anular", "ID") }}'.replace('ID', id), {
                     method: 'POST',

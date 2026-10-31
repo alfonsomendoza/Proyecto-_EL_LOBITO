@@ -103,14 +103,20 @@ Route::middleware(['auth'])->group(function () {
 
     // ------------------------------------------------------------------
     // HISTORIAL DE FACTURAS.
-    // ADMIN y GERENTE listan e imprimen; CAJERO solo imprime una factura.
-    // El rol se valida SIEMPRE en FacturaController. Es de SOLO LECTURA.
+    // ADMIN y GERENTE listan, imprimen y anulan; CAJERO solo imprime.
+    // El rol se valida SIEMPRE en FacturaController.
     // ------------------------------------------------------------------
     Route::get('/facturas', [FacturaController::class, 'index'])
         ->name('facturas.index');
 
     Route::get('/facturas/ticket', [FacturaController::class, 'ticket'])
         ->name('facturas.ticket');
+
+    // Anulación de factura (solo ADMIN y GERENTE, motivo obligatorio,
+    // dentro de transacción). No es solo lectura: marca la factura ANULADA,
+    // reabre su cuenta para corregir el cobro y registra auditoría.
+    Route::post('/facturas/{factura}/anular', [FacturaController::class, 'anular'])
+        ->name('facturas.anular');
 
     Route::get('/clientes', [ClienteController::class, 'index'])
         ->name('clientes.index');

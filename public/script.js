@@ -1,5 +1,165 @@
 'use strict';
 
+// ---------------------------------------------------------------------------
+// Validación numérica estricta (cliente)
+// ---------------------------------------------------------------------------
+// Acepta únicamente números escritos en formato convencional: dígitos y, si
+// el campo lo permite, un punto decimal con la precisión indicada. Rechaza
+// notación científica ("1e3", "0e123"), letras y signos.
+function numeroEstricto(valor, decimales = 2) {
+    const texto = String(valor ?? '').trim();
+    if (texto === '') return null;
+    const patron = decimales > 0
+        ? new RegExp('^\\d+(?:\\.\\d{1,' + decimales + '})?$')
+        : /^\d+$/;
+
+    if (!patron.test(texto)) return null;
+
+    const numero = Number(texto);
+    return Number.isFinite(numero) ? numero : null;
+}
+
+function numeroPorcentaje(valor, decimales = 2) {
+    let texto = String(valor ?? '').trim();
+    if (texto === '') return null;
+
+    if (texto.endsWith('%') && (texto.match(/%/g) || []).length === 1) {
+        texto = texto.slice(0, -1).trim();
+    }
+
+    return numeroEstricto(texto, decimales);
+}
+
+/**
+ * Igual que numeroEstricto pero además exige que no supere `maximo`.
+ * Se usa para no dar por válido un valor que la columna DECIMAL real no
+ * puede almacenar (evita que el usuario lo vea como cantidad correcta).
+ */
+function numeroMaximo(valor, decimales, maximo) {
+    const numero = numeroEstricto(valor, decimales);
+    if (numero === null || numero > maximo) return null;
+    return numero;
+}
+
+window.numeroEstricto = numeroEstricto;
+window.numeroPorcentaje = numeroPorcentaje;
+window.numeroMaximo = numeroMaximo;
+
+(function () {
+    const teclasBloqueadas = ['e', 'E', '+', '-'];
+
+    function esCampoNumerico(campo) {
+        if (!(campo instanceof HTMLInputElement)) return false;
+        if (campo.type === 'number') return true;
+        if (campo.classList.contains('input-entero') ||
+            campo.classList.contains('input-decimal') ||
+            campo.classList.contains('input-moneda') ||
+            campo.classList.contains('input-porcentaje')) return true;
+        if (campo.dataset && (campo.dataset.tipo === 'entero' || campo.dataset.tipo === 'decimal' || campo.dataset.tipo === 'porcentaje')) return true;
+        return false;
+    }
+
+    function tipoCampo(campo) {
+        if (campo.classList.contains('input-entero') || campo.dataset?.tipo === 'entero' || campo.step === '1') {
+            return 'entero';
+        }
+        if (campo.classList.contains('input-porcentaje') || campo.dataset?.tipo === 'porcentaje' || campo.id?.includes('porcentaje') || campo.id?.includes('desc') || campo.id?.includes('prop')) {
+            return 'porcentaje';
+        }
+        return 'decimal';
+    }
+
+    document.addEventListener('keydown', function (evento) {
+        const campo = evento.target;
+        if (!esCampoNumerico(campo)) return;
+        if (teclasBloqueadas.includes(evento.key)) {
+            evento.preventDefault();
+        }
+    });
+
+    document.addEventListener('beforeinput', function (evento) {
+        const campo = evento.target;
+        if (!esCampoNumerico(campo)) return;
+
+        if (!evento.data || evento.inputType?.startsWith('delete') || evento.inputType?.startsWith('history')) {
+            return;
+        }
+
+        const data = evento.data;
+        const tipo = tipoCampo(campo);
+
+        if (/[eE+\-]/.test(data)) {
+            evento.preventDefault();
+            return;
+        }
+
+        const valorActual = campo.value;
+        const inicioSel = campo.selectionStart ?? valorActual.length;
+        const finSel = campo.selectionEnd ?? valorActual.length;
+        const nuevoValor = valorActual.slice(0, inicioSel) + data + valorActual.slice(finSel);
+
+        if (tipo === 'entero') {
+            if (!/^\d*$/.test(nuevoValor)) {
+                evento.preventDefault();
+            }
+        } else if (tipo === 'porcentaje') {
+            if (!/^\d*(?:\.\d*)?%?$/.test(nuevoValor)) {
+                evento.preventDefault();
+            }
+        } else {
+            if (!/^\d*(?:\.\d*)?$/.test(nuevoValor)) {
+                evento.preventDefault();
+            }
+        }
+    });
+
+    document.addEventListener('paste', function (evento) {
+        const campo = evento.target;
+        if (!esCampoNumerico(campo)) return;
+
+        const portapapeles = evento.clipboardData || window.clipboardData;
+        const texto = (portapapeles ? portapapeles.getData('text') : '').trim();
+        if (!texto) return;
+
+        const tipo = tipoCampo(campo);
+        let valido = false;
+
+        if (tipo === 'entero') {
+            valido = /^\d+$/.test(texto);
+        } else if (tipo === 'porcentaje') {
+            valido = /^\d+(?:\.\d+)?%?$/.test(texto);
+        } else {
+            valido = /^\d+(?:\.\d+)?$/.test(texto);
+        }
+
+        if (!valido) {
+            evento.preventDefault();
+        }
+    });
+
+    document.addEventListener('blur', function (evento) {
+        const campo = evento.target;
+        if (!esCampoNumerico(campo)) return;
+
+        const valor = campo.value.trim();
+        if (valor === '') {
+            campo.classList.remove('is-invalid');
+            return;
+        }
+
+        const tipo = tipoCampo(campo);
+        const esValido = tipo === 'porcentaje'
+            ? numeroPorcentaje(valor, 2) !== null
+            : (tipo === 'entero' ? numeroEstricto(valor, 0) !== null : numeroEstricto(valor, 4) !== null);
+
+        if (!esValido) {
+            campo.classList.add('is-invalid');
+        } else {
+            campo.classList.remove('is-invalid');
+        }
+    }, true);
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
 
     // 1. Calculadora en tiempo real (C$ locales + desglose de USD convertidos a C$)
@@ -14,7 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const coincidencia = campo.name.match(/(?:apertura_b|b_)\[?([\d\.]+)\]?/);
                 if (coincidencia) {
                     const valorDenominacion = parseFloat(coincidencia[1]);
-                    const cantidad = parseInt(campo.value) || 0;
+                    const cantidad = numeroEstricto(campo.value === '' ? '0' : campo.value, 0) ?? 0;
                     total += (valorDenominacion * cantidad);
                 }
             });
@@ -27,13 +187,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     const match = campo.name.match(/\[([\d\.]+)\]/);
                     if (match) {
                         const valorDolar = parseFloat(match[1]);
-                        const cantidad = parseInt(campo.value) || 0;
+                        const cantidad = numeroEstricto(campo.value === '' ? '0' : campo.value, 0) ?? 0;
                         totalDolares += (valorDolar * cantidad);
                     }
                 });
 
                 const inputTasa = document.getElementById('tasa_cambio');
-                const tasa = inputTasa ? (parseFloat(inputTasa.value) || 0) : 0;
+                const tasa = inputTasa ? (numeroEstricto(inputTasa.value === '' ? '0' : inputTasa.value, 4) ?? 0) : 0;
 
                 total += (totalDolares * tasa);
             }
@@ -512,7 +672,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const actualizarPreview = () => {
         if (!selectMetodoPago) return;
         const metodo = selectMetodoPago.value;
-        const montoVenta = parseFloat(inputMontoVenta.value) || 0;
+        const montoVenta = numeroEstricto(inputMontoVenta.value === '' ? '0' : inputMontoVenta.value, 2) ?? 0;
 
         if (metodo === 'TARJETA_DEBITO' || metodo === 'TARJETA_CREDITO') {
             lblMontoCobrarTarjeta.textContent = montoVenta.toFixed(2);
@@ -521,10 +681,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const montoRecibido = parseFloat(inputMontoRecibido.value) || 0;
+        const montoRecibido = numeroEstricto(inputMontoRecibido.value === '' ? '0' : inputMontoRecibido.value, 2) ?? 0;
         let recibidoEnCordobas = montoRecibido;
         if (metodo === 'EFECTIVO_DOLAR') {
-            const tasa = parseFloat(inputTasaCambioVenta.value) || 0;
+            const tasa = numeroEstricto(inputTasaCambioVenta.value === '' ? '0' : inputTasaCambioVenta.value, 4) ?? 0;
             recibidoEnCordobas = montoRecibido * tasa;
         }
 
@@ -552,17 +712,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const validarVenta = () => {
         if (!selectMetodoPago) return null;
         const metodo = selectMetodoPago.value;
-        const montoVenta = parseFloat(inputMontoVenta.value) || 0;
+        const montoVenta = numeroEstricto(inputMontoVenta.value === '' ? '0' : inputMontoVenta.value, 2) ?? 0;
 
         if (metodo === 'TARJETA_DEBITO' || metodo === 'TARJETA_CREDITO') {
             if (!selectBancoVenta.value) return 'Selecciona el banco de la tarjeta.';
             return null;
         }
 
-        const montoRecibido = parseFloat(inputMontoRecibido.value) || 0;
+        const montoRecibido = numeroEstricto(inputMontoRecibido.value === '' ? '0' : inputMontoRecibido.value, 2) ?? 0;
         let recibidoEnCordobas = montoRecibido;
         if (metodo === 'EFECTIVO_DOLAR') {
-            const tasa = parseFloat(inputTasaCambioVenta.value) || 0;
+            const tasa = numeroEstricto(inputTasaCambioVenta.value === '' ? '0' : inputTasaCambioVenta.value, 4) ?? 0;
             if (tasa <= 0) return 'Indica la tasa de cambio.';
             recibidoEnCordobas = montoRecibido * tasa;
         }
@@ -574,9 +734,10 @@ document.addEventListener('DOMContentLoaded', () => {
         return null;
     };
 
-    manejarEnvio('formApertura');
+    // `formApertura` y `formCierre` NO se registran aquí: sus vistas ya tienen
+    // su propio handler `submit` con `fetch` a una ruta Laravel real. Registrar
+    // `manejarEnvio` además provocaría DOS peticiones por cada envío.
     manejarEnvio('formGastos');
-    manejarEnvio('formCierre');
     manejarEnvio('formVentas', validarVenta);
 
     // 4. Recuperar estado de la apertura actual

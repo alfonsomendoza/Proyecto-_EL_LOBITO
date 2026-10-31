@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\CajaApertura;
 use App\Models\CajaCierre;
+use App\Rules\NumeroEstricto;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -37,9 +38,10 @@ class CajaAperturaController extends Controller
         }
 
         $request->validate([
-            'monto_inicial' => 'required|numeric|min:0',
+            'monto_inicial' => ['required', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
         ], [
-            'monto_inicial.min' => 'El fondo de apertura no puede ser negativo.'
+            'monto_inicial.min' => 'El fondo de apertura no puede ser negativo.',
+            'monto_inicial.max' => 'El fondo de apertura supera el máximo permitido (C$ 9,999,999,999.99).',
         ]);
 
         try {

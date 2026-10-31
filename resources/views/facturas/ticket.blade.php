@@ -26,6 +26,7 @@
             'EFECTIVO_USD' => 'Efectivo USD',
             'TARJETA_DEBITO' => 'Tarjeta de débito',
             'TARJETA_CREDITO' => 'Tarjeta de crédito',
+            'TRANSFERENCIA' => 'Transferencia bancaria',
         ];
 
         // Desglose persistido por FacturaService al cobrar. Son los mismos
@@ -129,7 +130,9 @@
             @foreach ($pagos as $pago)
                 <tr>
                     <td>
-                        {{ $etiquetasPago[$pago->metodo_pago] ?? $pago->metodo_pago }}@if (!empty($pago->banco)) · {{ $pago->banco }}@endif:
+                        {{ $etiquetasPago[$pago->metodo_pago] ?? $pago->metodo_pago }}
+                        @if (!empty($pago->banco)) · {{ $pago->banco }}@endif
+                        @if (!empty($pago->numero_transferencia)) · N° {{ $pago->numero_transferencia }}@endif:
                     </td>
                     <td class="derecha">
                         @if (($pago->moneda ?? 'NIO') === 'USD')

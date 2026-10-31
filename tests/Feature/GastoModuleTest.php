@@ -234,6 +234,56 @@ class GastoModuleTest extends TestCase
         $this->assertDatabaseCount('caja_gastos', 0);
     }
 
+    public function test_montos_con_notacion_cientifica_o_caracteres_invalidos_son_rechazados(): void
+    {
+        $this->apertura('ABIERTA');
+        $usuario = $this->usuario('CAJERO');
+
+        $invalidos = [
+            'e',
+            '0e',
+            '0e13212312132121',
+            '1e3',
+            '10abc',
+            '25aasasdasdasdasasd',
+            '--10',
+            '10%%',
+            '10.125',
+            '-10',
+            '1,5',
+            '10000000000',
+        ];
+
+        foreach ($invalidos as $valor) {
+            $this->actingAs($usuario)
+                ->postJson(route('gastos.store'), [
+                    'conceptos' => ['Prueba de validación'],
+                    'montos' => [$valor],
+                ])
+                ->assertStatus(422);
+        }
+
+        $this->assertDatabaseCount('caja_gastos', 0);
+    }
+
+    public function test_montos_validos_con_hasta_dos_decimales_son_aceptados(): void
+    {
+        $this->apertura('ABIERTA');
+        $usuario = $this->usuario('CAJERO');
+
+        foreach (['10', '10.50', '0.01'] as $valor) {
+            $this->actingAs($usuario)
+                ->postJson(route('gastos.store'), [
+                    'conceptos' => ['Gasto válido'],
+                    'montos' => [$valor],
+                ])
+                ->assertStatus(200)
+                ->assertJson(['exito' => true]);
+        }
+
+        $this->assertDatabaseCount('caja_gastos', 3);
+    }
+
     public function test_registro_multifila_es_transaccional(): void
     {
         $usuario = $this->usuario('CAJERO');

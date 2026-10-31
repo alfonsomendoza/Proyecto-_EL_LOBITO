@@ -251,6 +251,38 @@ class VentasPanelTest extends TestCase
         $this->assertStringContainsString(route('pos.index', $mesa).'?cuenta='.$cuenta, $html);
     }
 
+    /**
+     * Regresión de la cuenta 46: el POS usa `numeroEstricto` y
+     * `numeroPorcentaje` dentro de sus scripts inline (prefactura). Esas
+     * funciones viven en `public/script.js`, por lo que el layout debe
+     * cargar el archivo ANTES del contenido de la vista. Si vuelve a
+     * colocarse al final del body, los scripts inline fallan con
+     * "Uncaught ReferenceError: numeroEstricto is not defined".
+     */
+    public function test_el_layout_carga_script_js_antes_del_script_del_pos(): void
+    {
+        $mesa = $this->crearMesa('13');
+        $venta = $this->crearVenta($mesa, 'ACTIVA');
+        $cuenta = $this->crearCuenta($venta, 'Principal');
+        $this->asignarConsumo($cuenta, $venta, 40.00);
+
+        $html = $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('pos.index', $mesa).'?cuenta='.$cuenta)
+            ->assertStatus(200)
+            ->getContent();
+
+        $posScript = strpos($html, 'function abrirPrefacturaModalCuenta');
+        $cargaScript = strpos($html, 'script.js?v=');
+
+        $this->assertNotFalse($cargaScript, 'El layout debe cargar public/script.js.');
+        $this->assertNotFalse($posScript, 'El POS debe definir abrirPrefacturaModalCuenta.');
+        $this->assertLessThan(
+            $posScript,
+            $cargaScript,
+            'script.js debe cargarse antes del script inline que usa numeroEstricto/numeroPorcentaje.'
+        );
+    }
+
     /* ------------------------------------------------------------------
      | 5. Filtro Desde/Hasta del historial de ventas cobradas
      | ------------------------------------------------------------------ */

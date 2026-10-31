@@ -2703,13 +2703,31 @@
                 const refrescar = () => {
                     modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
                     modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
+                    const descTexto = inpD.value.trim();
+                    const propTexto = inpP.value.trim();
                     let desc = 0, prop = 0;
-                    const vd = parseFloat(inpD.value);
-                    if (!isNaN(vd) && vd >= 0) {
+                    const vd = descTexto === ''
+                        ? 0
+                        : (modoD.value === 'porcentaje' ? numeroPorcentaje(descTexto, 2) : numeroEstricto(descTexto, 2));
+                    if (vd === null) {
+                        res.innerHTML = '<span style="color:#b91c1c;">Descuento inválido: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
+                        return;
+                    }
+                    if (modoD.value === 'porcentaje' && vd > 100) {
+                        res.innerHTML = '<span style="color:#b91c1c;">El porcentaje de descuento debe estar entre 0 y 100.</span>';
+                        return;
+                    }
+                    if (vd >= 0) {
                         desc = modoD.value === 'porcentaje' ? (Number(consumo || 0) * vd / 100) : vd;
                     }
-                    const vp = parseFloat(inpP.value);
-                    if (!isNaN(vp) && vp >= 0) {
+                    const vp = propTexto === ''
+                        ? 0
+                        : (modoP.value === 'porcentaje' ? numeroPorcentaje(propTexto, 2) : numeroEstricto(propTexto, 2));
+                    if (vp === null) {
+                        res.innerHTML = '<span style="color:#b91c1c;">Propina inválida: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
+                        return;
+                    }
+                    if (vp >= 0) {
                         prop = modoP.value === 'porcentaje' ? ((Number(consumo || 0) - desc) * vp / 100) : vp;
                     }
                     desc = Math.max(0, Math.min(desc, Number(consumo || 0)));
@@ -2730,18 +2748,29 @@
                 const inpD = document.getElementById('pref-desc').value;
                 const inpP = document.getElementById('pref-prop').value;
                 const params = {};
-                if (inpD !== '' && !isNaN(parseFloat(inpD))) {
+                if (inpD !== '') {
+                    const vd = modoD === 'porcentaje' ? numeroPorcentaje(inpD, 2) : numeroEstricto(inpD, 2);
+                    if (vd === null) {
+                        return Swal.showValidationMessage('El descuento debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                    }
+                    if (modoD === 'porcentaje' && (vd < 0 || vd > 100)) {
+                        return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
+                    }
                     if (modoD === 'porcentaje') {
-                        params.descuento_porcentaje = inpD;
+                        params.descuento_porcentaje = vd;
                     } else {
-                        params.descuento = inpD;
+                        params.descuento = vd;
                     }
                 }
-                if (inpP !== '' && !isNaN(parseFloat(inpP))) {
+                if (inpP !== '') {
+                    const vp = modoP === 'porcentaje' ? numeroPorcentaje(inpP, 2) : numeroEstricto(inpP, 2);
+                    if (vp === null) {
+                        return Swal.showValidationMessage('La propina debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                    }
                     if (modoP === 'porcentaje') {
-                        params.propina_porcentaje = inpP;
+                        params.propina_porcentaje = vp;
                     } else {
-                        params.propina = inpP;
+                        params.propina = vp;
                     }
                 }
                 return { cuentaId: Number(cuentaId), params };
@@ -2815,13 +2844,31 @@
                             modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
                             modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
                             const consumo = Number(selCuenta.options[selCuenta.selectedIndex]?.dataset?.total || 0);
+                            const descTexto = inpD.value.trim();
+                            const propTexto = inpP.value.trim();
                             let desc = 0, prop = 0;
-                            const vd = parseFloat(inpD.value);
-                            if (!isNaN(vd) && vd >= 0) {
+                            const vd = descTexto === ''
+                                ? 0
+                                : (modoD.value === 'porcentaje' ? numeroPorcentaje(descTexto, 2) : numeroEstricto(descTexto, 2));
+                            if (vd === null) {
+                                res.innerHTML = '<span style="color:#b91c1c;">Descuento inválido: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
+                                return;
+                            }
+                            if (modoD.value === 'porcentaje' && vd > 100) {
+                                res.innerHTML = '<span style="color:#b91c1c;">El porcentaje de descuento debe estar entre 0 y 100.</span>';
+                                return;
+                            }
+                            if (vd >= 0) {
                                 desc = modoD.value === 'porcentaje' ? (consumo * vd / 100) : vd;
                             }
-                            const vp = parseFloat(inpP.value);
-                            if (!isNaN(vp) && vp >= 0) {
+                            const vp = propTexto === ''
+                                ? 0
+                                : (modoP.value === 'porcentaje' ? numeroPorcentaje(propTexto, 2) : numeroEstricto(propTexto, 2));
+                            if (vp === null) {
+                                res.innerHTML = '<span style="color:#b91c1c;">Propina inválida: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
+                                return;
+                            }
+                            if (vp >= 0) {
                                 prop = modoP.value === 'porcentaje' ? ((consumo - desc) * vp / 100) : vp;
                             }
                             desc = Math.max(0, Math.min(desc, consumo));
@@ -2844,18 +2891,29 @@
                         const inpD = document.getElementById('pref-desc').value;
                         const inpP = document.getElementById('pref-prop').value;
                         const params = {};
-                        if (inpD !== '' && !isNaN(parseFloat(inpD))) {
+                        if (inpD !== '') {
+                            const vd = modoD === 'porcentaje' ? numeroPorcentaje(inpD, 2) : numeroEstricto(inpD, 2);
+                            if (vd === null) {
+                                return Swal.showValidationMessage('El descuento debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                            }
+                            if (modoD === 'porcentaje' && (vd < 0 || vd > 100)) {
+                                return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
+                            }
                             if (modoD === 'porcentaje') {
-                                params.descuento_porcentaje = inpD;
+                                params.descuento_porcentaje = vd;
                             } else {
-                                params.descuento = inpD;
+                                params.descuento = vd;
                             }
                         }
-                        if (inpP !== '' && !isNaN(parseFloat(inpP))) {
+                        if (inpP !== '') {
+                            const vp = modoP === 'porcentaje' ? numeroPorcentaje(inpP, 2) : numeroEstricto(inpP, 2);
+                            if (vp === null) {
+                                return Swal.showValidationMessage('La propina debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                            }
                             if (modoP === 'porcentaje') {
-                                params.propina_porcentaje = inpP;
+                                params.propina_porcentaje = vp;
                             } else {
-                                params.propina = inpP;
+                                params.propina = vp;
                             }
                         }
                         return { cuentaId, params };
@@ -2909,7 +2967,7 @@
                             <option value="porcentaje">Porcentaje (%)</option>
                             <option value="importe">Importe fijo (C$)</option>
                         </select>
-                        <input id="descuento-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Descuento (%)">
+                        <input id="descuento-cobro" class="swal2-input" type="number" min="0" max="9999999999.99" step="0.01" placeholder="Descuento (%)">
                         <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
 
                         <strong>Propina</strong>
@@ -2917,7 +2975,7 @@
                             <option value="porcentaje">Porcentaje (%)</option>
                             <option value="importe">Importe fijo (C$)</option>
                         </select>
-                        <input id="propina-cobro" class="swal2-input" type="number" min="0" step="0.01" placeholder="Propina (%)">
+                        <input id="propina-cobro" class="swal2-input" type="number" min="0" max="9999999999.99" step="0.01" placeholder="Propina (%)">
                         <div style="margin:-4px 0 4px;">
                             <button type="button" id="propina-sugerir" style="background:#6777ef;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Propina 15%</button>
                             <button type="button" id="propina-quitar" style="margin-left:4px;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Quitar</button>
@@ -2930,10 +2988,12 @@
                     EFECTIVO_CORDOBA: 'Efectivo C$',
                     EFECTIVO_USD: 'Efectivo USD',
                     TARJETA_DEBITO: 'Tarjeta débito',
-                    TARJETA_CREDITO: 'Tarjeta crédito'
+                    TARJETA_CREDITO: 'Tarjeta crédito',
+                    TRANSFERENCIA: 'Transferencia bancaria'
                 };
                 const esEfectivo = metodo => metodo === 'EFECTIVO_CORDOBA' || metodo === 'EFECTIVO_USD';
                 const esTarjeta = metodo => metodo === 'TARJETA_DEBITO' || metodo === 'TARJETA_CREDITO';
+                const esTransferencia = metodo => metodo === 'TRANSFERENCIA';
 
                 // Estado del modal: las líneas de pago que se van agregando.
                 let lineasPago = [];
@@ -2951,14 +3011,18 @@
                     const prop = document.getElementById('propina-cobro');
                     const modoDesc = (document.getElementById('descuento-modo') || {}).value || 'porcentaje';
                     const modoProp = (document.getElementById('propina-modo') || {}).value || 'porcentaje';
-                    const descValor = Number(desc && desc.value || 0);
-                    const propValor = Number(prop && prop.value || 0);
+                    const descValor = (desc && desc.value !== '')
+                        ? (modoDesc === 'porcentaje' ? numeroPorcentaje(desc.value, 2) : numeroEstricto(desc.value, 2))
+                        : 0;
+                    const propValor = (prop && prop.value !== '')
+                        ? (modoProp === 'porcentaje' ? numeroPorcentaje(prop.value, 2) : numeroEstricto(prop.value, 2))
+                        : 0;
                     return {
-                        descuentoPorcentaje: modoDesc === 'porcentaje' ? descValor : null,
-                        descuentoImporte: modoDesc === 'importe' ? descValor : 0,
+                        descuentoPorcentaje: modoDesc === 'porcentaje' ? (descValor === null ? Number.NaN : descValor) : null,
+                        descuentoImporte: modoDesc === 'importe' ? (descValor === null ? Number.NaN : descValor) : 0,
                         motivo: motivo ? motivo.value.trim() : '',
-                        propinaPorcentaje: modoProp === 'porcentaje' ? propValor : null,
-                        propinaImporte: modoProp === 'importe' ? propValor : 0
+                        propinaPorcentaje: modoProp === 'porcentaje' ? (propValor === null ? Number.NaN : propValor) : null,
+                        propinaImporte: modoProp === 'importe' ? (propValor === null ? Number.NaN : propValor) : 0
                     };
                 };
 
@@ -3060,6 +3124,7 @@
                                 <option value="EFECTIVO_USD">Efectivo (dólares USD)</option>
                                 <option value="TARJETA_DEBITO">Tarjeta de débito</option>
                                 <option value="TARJETA_CREDITO">Tarjeta de crédito</option>
+                                <option value="TRANSFERENCIA">Transferencia bancaria</option>
                             </select>
                             <select id="banco-linea" class="swal2-select" style="display:none;">
                                 <option value="">Seleccionar banco…</option>
@@ -3068,8 +3133,13 @@
                                 <option value="BAC">BAC</option>
                                 <option value="Lafise">Lafise</option>
                             </select>
+                            <select id="moneda-linea" class="swal2-select" style="display:none;">
+                                <option value="NIO">Córdobas (C$)</option>
+                                <option value="USD">Dólares (US$)</option>
+                            </select>
+                            <input id="numero-transferencia-linea" class="swal2-input" type="text" placeholder="Número de transferencia (solo dígitos)" style="display:none;" maxlength="64">
                             <input id="tasa-linea" class="swal2-input" type="number" min="0" step="0.0001" placeholder="Tasa USD del día" style="display:none;">
-                            <input id="monto-linea" class="swal2-input" type="number" min="0" step="0.01" placeholder="Monto de la línea">
+                            <input id="monto-linea" class="swal2-input" type="number" min="0" max="9999999999.99" step="0.01" placeholder="Monto de la línea">
                             <button type="button" id="agregar-linea" style="display:block;width:100%;background:#47c363;color:#fff;border:0;border-radius:6px;padding:8px;font-weight:bold;cursor:pointer;">+ Agregar línea de pago</button>
                             <div id="error-linea" style="color:#c0392b;font-size:12px;min-height:14px;"></div>
                             <div id="lista-lineas" style="margin:4px 0;"></div>
@@ -3081,10 +3151,25 @@
                     confirmButtonText: 'Confirmar pago',
                     cancelButtonText: 'Cancelar',
                     didOpen: () => {
-                        // Banco solo para tarjeta; tasa solo para dólares.
+                        // Banco: tarjeta y transferencia. Tasa: dólares
+                        // (efectivo USD o transferencia en USD). Moneda y
+                        // número de transferencia: solo transferencia.
                         document.getElementById('metodo-linea').addEventListener('change', function () {
-                            document.getElementById('banco-linea').style.display = esTarjeta(this.value) ? '' : 'none';
-                            document.getElementById('tasa-linea').style.display = this.value === 'EFECTIVO_USD' ? '' : 'none';
+                            const m = this.value;
+                            document.getElementById('banco-linea').style.display = (esTarjeta(m) || esTransferencia(m)) ? '' : 'none';
+                            document.getElementById('moneda-linea').style.display = esTransferencia(m) ? '' : 'none';
+                            document.getElementById('numero-transferencia-linea').style.display = esTransferencia(m) ? '' : 'none';
+                            const esDolares = m === 'EFECTIVO_USD' || (esTransferencia(m) && document.getElementById('moneda-linea').value === 'USD');
+                            document.getElementById('tasa-linea').style.display = esDolares ? '' : 'none';
+                        });
+
+                        // Al cambiar la moneda de una transferencia en
+                        // dólares se muestra/oculta la tasa correspondiente.
+                        document.getElementById('moneda-linea').addEventListener('change', function () {
+                            const m = document.getElementById('metodo-linea').value;
+                            if (esTransferencia(m)) {
+                                document.getElementById('tasa-linea').style.display = this.value === 'USD' ? '' : 'none';
+                            }
                         });
 
                         // Tasa USD SUGERIDA por el servidor (configuraciones o
@@ -3102,28 +3187,48 @@
                             const error = document.getElementById('error-linea');
                             const metodo = document.getElementById('metodo-linea').value;
                             const monto = Number(document.getElementById('monto-linea').value || 0);
-                            const banco = esTarjeta(metodo) ? document.getElementById('banco-linea').value : '';
-                            const tasa = metodo === 'EFECTIVO_USD' ? Number(document.getElementById('tasa-linea').value || 0) : 0;
+                            const banco = (esTarjeta(metodo) || esTransferencia(metodo)) ? document.getElementById('banco-linea').value : '';
+                            const moneda = document.getElementById('moneda-linea') ? document.getElementById('moneda-linea').value : 'NIO';
+                            const tasa = (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD'))
+                                ? Number(document.getElementById('tasa-linea').value || 0) : 0;
+                            const numeroTransferencia = document.getElementById('numero-transferencia-linea')
+                                ? document.getElementById('numero-transferencia-linea').value.trim() : '';
 
                             if (!(monto > 0)) { error.textContent = 'Ingrese un monto mayor que cero.'; return; }
-                            if (esTarjeta(metodo) && !banco) { error.textContent = 'Seleccione el banco de la tarjeta.'; return; }
-                            if (metodo === 'EFECTIVO_USD' && !(tasa > 0)) { error.textContent = 'Capture la tasa de cambio USD del día (el sistema no la inventa).'; return; }
+                            if ((esTarjeta(metodo) || esTransferencia(metodo)) && !banco) {
+                                error.textContent = 'Seleccione el banco.'; return;
+                            }
+                            if (esTransferencia(metodo) && !(moneda === 'NIO' || moneda === 'USD')) {
+                                error.textContent = 'Seleccione la moneda de la transferencia.'; return;
+                            }
+                            if (esTransferencia(metodo) && numeroTransferencia === '') {
+                                error.textContent = 'Ingrese el número de transferencia.'; return;
+                            }
+                            if (esTransferencia(metodo) && !/^\d+$/.test(numeroTransferencia)) {
+                                error.textContent = 'El número de transferencia debe contener exclusivamente dígitos.'; return;
+                            }
+                            if ((metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD')) && !(tasa > 0)) {
+                                error.textContent = 'Capture la tasa de cambio USD del día (el sistema no la inventa).'; return;
+                            }
 
                             // Vista previa: el servidor recalcula siempre.
-                            const montoCordobas = metodo === 'EFECTIVO_USD' ? Math.round(monto * tasa * 100) / 100 : monto;
+                            const montoCordobas = (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD'))
+                                ? Math.round(monto * tasa * 100) / 100 : monto;
 
                             lineasPago.push({
                                 claveOperacion: claveOperacionPago(),
                                 metodoPago: metodo,
-                                moneda: metodo === 'EFECTIVO_USD' ? 'USD' : 'NIO',
+                                moneda: moneda,
                                 banco: banco || null,
                                 monto: monto,
-                                tasaCambio: metodo === 'EFECTIVO_USD' ? tasa : null,
-                                montoCordobas: montoCordobas
+                                tasaCambio: (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD')) ? tasa : null,
+                                montoCordobas: montoCordobas,
+                                numeroTransferencia: esTransferencia(metodo) ? numeroTransferencia : null
                             });
 
                             error.textContent = '';
                             document.getElementById('monto-linea').value = '';
+                            document.getElementById('numero-transferencia-linea').value = '';
                             pintarCobro();
                         });
 
@@ -3193,6 +3298,14 @@
                             return Swal.showValidationMessage('Agregue al menos una línea de pago.');
                         }
 
+                        if (t.descuentoPorcentaje !== null && !Number.isFinite(t.descuentoPorcentaje)) {
+                            return Swal.showValidationMessage('El descuento debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                        }
+
+                        if (t.propinaPorcentaje !== null && !Number.isFinite(t.propinaPorcentaje)) {
+                            return Swal.showValidationMessage('La propina debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
+                        }
+
                         if (t.descuentoPorcentaje !== null && (t.descuentoPorcentaje < 0 || t.descuentoPorcentaje > 100)) {
                             return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
                         }
@@ -3260,7 +3373,9 @@
                         form.append(`pagos[${indice}][clave_operacion]`, linea.claveOperacion);
                         form.append(`pagos[${indice}][metodo_pago]`, linea.metodoPago);
                         form.append(`pagos[${indice}][monto]`, linea.monto.toFixed(2));
+                        form.append(`pagos[${indice}][moneda]`, linea.moneda || 'NIO');
                         if (linea.banco) form.append(`pagos[${indice}][banco]`, linea.banco);
+                        if (linea.numeroTransferencia) form.append(`pagos[${indice}][numero_transferencia]`, linea.numeroTransferencia);
                         if (linea.tasaCambio) form.append(`pagos[${indice}][tasa_cambio]`, linea.tasaCambio);
                     });
 

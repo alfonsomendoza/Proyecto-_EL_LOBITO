@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\CajaCierre;
+use App\Rules\NumeroEstricto;
 use App\Services\CajaCierreService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -78,18 +79,23 @@ class CajaCierreController extends Controller
         }
 
         $datos = $request->validate([
-            'otros_ingresos' => ['nullable', 'numeric', 'min:0'],
-            'retiros' => ['nullable', 'numeric', 'min:0'],
-            'tasa_cambio' => ['required', 'numeric', 'gt:0'],
+            'otros_ingresos' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
+            'retiros' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
+            'tasa_cambio' => ['required', 'numeric', new NumeroEstricto(4), 'gt:0', 'max:999999.9999'],
             'observaciones' => ['nullable', 'string', 'max:1000'],
             'conteo_local' => ['nullable', 'array'],
-            'conteo_local.*' => ['nullable', 'integer', 'min:0'],
+            'conteo_local.*' => ['nullable', 'numeric', new NumeroEstricto(0), 'min:0', 'max:9999999'],
             'conteo_dolar' => ['nullable', 'array'],
-            'conteo_dolar.*' => ['nullable', 'integer', 'min:0'],
+            'conteo_dolar.*' => ['nullable', 'numeric', new NumeroEstricto(0), 'min:0', 'max:9999999'],
         ], [
             'tasa_cambio.gt' => 'La tasa de cambio debe ser mayor que cero.',
+            'tasa_cambio.max' => 'La tasa de cambio supera el máximo permitido (999,999.9999).',
             'retiros.min' => 'Los retiros no pueden ser negativos.',
+            'retiros.max' => 'Los retiros superan el máximo permitido (C$ 9,999,999,999.99).',
             'otros_ingresos.min' => 'Los otros ingresos no pueden ser negativos.',
+            'otros_ingresos.max' => 'Los otros ingresos superan el máximo permitido (C$ 9,999,999,999.99).',
+            'conteo_local.*.max' => 'La cantidad de billetes o monedas es demasiado alta.',
+            'conteo_dolar.*.max' => 'La cantidad de billetes o monedas es demasiado alta.',
         ]);
 
         $conteoLocal = $this->normalizarConteo($request->input('conteo_local', []), CajaCierreService::DENOMINACIONES_LOCAL);

@@ -92,6 +92,11 @@ trait CreaEsquemaTrasladosPagos
                 $t->decimal('monto_cordobas', 12, 2);
                 $t->integer('usuario_id')->nullable();
                 $t->timestamp('creado_en')->nullable();
+                // Número de transferencia (solo para líneas de transferencia
+                // bancaria). Se añade con hasColumn para no romper esquemas
+                // que aún no la tengan; la migración de producción la crea
+                // formalmente y este guardia la ignora si ya existe.
+                $t->string('numero_transferencia', 64)->nullable();
                 $t->index('cuenta_id');
                 $t->index('venta_id');
             });

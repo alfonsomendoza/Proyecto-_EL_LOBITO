@@ -410,7 +410,7 @@ function modalProducto(accion, id = 0, catId = '', nombre = '', precio = '', rc 
                 
                 <div style="margin-bottom: 15px;">
                     <label style="font-weight:bold; display:block; margin-bottom: 5px;">Precio (C$):</label>
-                    <input id="prod-precio" type="number" step="0.01" class="swal2-input" value="${precio}" style="width: 100%; margin: 0; height: 38px; box-sizing: border-box;">
+                    <input id="prod-precio" type="number" step="0.01" min="0" max="9999999999.99" class="swal2-input" value="${precio}" style="width: 100%; margin: 0; height: 38px; box-sizing: border-box;">
                 </div>
 
                 <div style="margin-bottom: 15px;">

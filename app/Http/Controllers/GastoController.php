@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Rules\NumeroEstricto;
 use App\Services\GastoService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -82,10 +83,11 @@ class GastoController extends Controller
             'conceptos' => ['required', 'array', 'min:1'],
             'conceptos.*' => ['required', 'string', 'max:255'],
             'montos' => ['required', 'array', 'min:1'],
-            'montos.*' => ['required', 'numeric', 'gt:0'],
+            'montos.*' => ['required', 'numeric', new NumeroEstricto(2), 'gt:0', 'max:9999999999.99'],
         ], [
             'conceptos.required' => 'Debes indicar al menos un concepto.',
             'montos.*.gt' => 'Cada monto debe ser mayor que cero.',
+            'montos.*.max' => 'Cada monto supera el máximo permitido (C$ 9,999,999,999.99).',
         ]);
 
         if (count($datos['conceptos']) !== count($datos['montos'])) {

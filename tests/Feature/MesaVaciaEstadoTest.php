@@ -216,6 +216,22 @@ class MesaVaciaEstadoTest extends TestCase
             $t->string('estado', 20)->default('EMITIDA');
         });
 
+        // Apertura de caja: MesaController@abrirMesa exige que exista una
+        // apertura ABIERTA cuando las tablas existen.
+        Schema::create('caja_apertura', function (Blueprint $t) {
+            $t->increments('id');
+            $t->integer('usuario_id')->nullable();
+            $t->decimal('monto_inicial', 12, 2)->default(0);
+            $t->dateTime('fecha_apertura')->nullable();
+            $t->string('estado', 20)->default('ABIERTA');
+            $t->text('observaciones')->nullable();
+        });
+
+        Schema::create('caja_bloqueo', function (Blueprint $t) {
+            $t->integer('id')->primary();
+        });
+        DB::table('caja_bloqueo')->insert(['id' => 1]);
+
         // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
         // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.
         $this->crearEsquemaTrasladosPagos();
@@ -241,6 +257,17 @@ class MesaVaciaEstadoTest extends TestCase
             'numero' => $numero,
             'capacidad' => 4,
             'estado' => $estado,
+        ]);
+    }
+
+    private function abrirCaja(int $usuarioId = null): int
+    {
+        return DB::table('caja_apertura')->insertGetId([
+            'usuario_id' => $usuarioId,
+            'monto_inicial' => 0,
+            'fecha_apertura' => now(),
+            'estado' => 'ABIERTA',
+            'observaciones' => null,
         ]);
     }
 

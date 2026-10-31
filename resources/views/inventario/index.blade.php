@@ -159,7 +159,7 @@
                                               style="flex:1; min-width:220px; border:1px solid #e3e6f0; border-radius:6px; padding:12px; background:#fff;">
                                             @csrf
                                             <div style="font-weight:600; font-size:12px; color:#495057; margin-bottom:8px;">Carga inicial</div>
-                                            <input type="number" step="0.001" min="0.001" name="cantidad" required placeholder="Cantidad"
+                                            <input type="number" step="0.001" min="0.001" max="999999999.999" name="cantidad" required placeholder="Cantidad"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">
                                             <input type="text" name="observacion" maxlength="500" placeholder="Observación (opcional)"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">
@@ -174,7 +174,7 @@
                                               style="flex:1; min-width:220px; border:1px solid #e3e6f0; border-radius:6px; padding:12px; background:#fff;">
                                             @csrf
                                             <div style="font-weight:600; font-size:12px; color:#495057; margin-bottom:8px;">Mínimo y unidad</div>
-                                            <input type="number" step="0.001" min="0" name="stock_minimo" required value="{{ $producto->stock_minimo }}" placeholder="Stock mínimo"
+                                            <input type="number" step="0.001" min="0" max="999999999.999" name="stock_minimo" required value="{{ $producto->stock_minimo }}" placeholder="Stock mínimo"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">
                                             <input type="text" name="unidad" maxlength="20" value="{{ $producto->unidad }}" placeholder="Unidad"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">
@@ -194,7 +194,7 @@
                                                 <option value="AJUSTE_ENTRADA">Entrada (+)</option>
                                                 <option value="AJUSTE_SALIDA">Salida (-)</option>
                                             </select>
-                                            <input type="number" step="0.001" min="0.001" name="cantidad" required placeholder="Cantidad"
+                                            <input type="number" step="0.001" min="0.001" max="999999999.999" name="cantidad" required placeholder="Cantidad"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">
                                             <input type="text" name="observacion" maxlength="500" placeholder="Motivo (opcional)"
                                                    style="width:100%; padding:7px 10px; border:1px solid #ced4da; border-radius:5px; margin-bottom:6px;">

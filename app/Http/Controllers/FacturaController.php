@@ -163,17 +163,25 @@ class FacturaController extends Controller
         $pagos = collect();
 
         if (! empty($factura->cuenta_id) && Schema::hasTable('pagos_cuenta')) {
+            $columnas = [
+                'metodo_pago',
+                'banco',
+                'moneda',
+                'monto',
+                'tasa_cambio',
+                'monto_cordobas',
+            ];
+
+            // `numero_transferencia` solo existe si se aplicó la migración
+            // extendida de pagos_cuenta; se lee solo cuando esté disponible.
+            if (Schema::hasColumn('pagos_cuenta', 'numero_transferencia')) {
+                $columnas[] = 'numero_transferencia';
+            }
+
             $pagos = DB::table('pagos_cuenta')
                 ->where('cuenta_id', (int) $factura->cuenta_id)
                 ->orderBy('id')
-                ->get([
-                    'metodo_pago',
-                    'banco',
-                    'moneda',
-                    'monto',
-                    'tasa_cambio',
-                    'monto_cordobas',
-                ]);
+                ->get($columnas);
         }
 
         return view('facturas.ticket', [
@@ -266,5 +274,167 @@ class FacturaController extends Controller
     private function rolActual(): string
     {
         return strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+    }
+
+    /**
+     * Anula una factura emitida (solo ADMIN y GERENTE).
+     *
+     * - Marca la factura como ANULADA sin borrarla ni tocar la venta.
+     * - Reabre SOLO la cuenta/subcuenta de la factura para permitir corregir
+     *   el cobro y volver a facturar (venta, productos, comandas y cocina se
+     *   conservan íntegros).
+     * - Si era la única cuenta pagada de la venta, la venta vuelve a ACTIVA y
+     *   la mesa a OCUPADA.
+     * - Conserva pagos_cuenta como historial y registra auditoría en
+     *   anulaciones_caja_auditoria (usuario, fecha, motivo).
+     * - Todo dentro de una transacción: si falla, se revierte todo.
+     */
+    public function anular(Request $request, $factura)
+    {
+        // Autorización obligatoria en backend (ocultar el botón no basta).
+        if (! in_array($this->rolActual(), ['ADMIN', 'GERENTE'], true)) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'No tienes permiso para anular facturas.',
+            ], 403);
+        }
+
+        $request->validate([
+            'motivo' => ['required', 'string', 'min:5', 'max:1000'],
+        ]);
+
+        $motivo = trim((string) $request->input('motivo'));
+
+        try {
+            return DB::transaction(function () use ($factura, $motivo) {
+                $usuario = Auth::user();
+                $rol = $this->rolActual();
+
+                $consulta = DB::table('facturas as f')
+                    ->leftJoin('ventas as v', 'v.id', '=', 'f.venta_id')
+                    ->leftJoin('cuentas as c', 'c.id', '=', 'f.cuenta_id')
+                    ->leftJoin('mesas as m', 'm.id', '=', 'v.mesa_id')
+                    ->select(
+                        'f.id',
+                        'f.numero_factura',
+                        'f.estado',
+                        'f.total',
+                        'f.cuenta_id',
+                        'f.venta_id',
+                        'v.estado as venta_estado',
+                        'v.mesa_id',
+                        'm.id as mesa_id',
+                        'm.estado as mesa_estado',
+                        'm.numero as mesa_numero'
+                    );
+
+                $id = trim((string) $factura);
+
+                if (ctype_digit($id)) {
+                    $consulta->where('f.id', (int) $id);
+                } else {
+                    $consulta->where('f.numero_factura', $id);
+                }
+
+                $facturaRow = $consulta->lockForUpdate()->first();
+
+                if (!$facturaRow) {
+                    throw new \RuntimeException('La factura no existe.');
+                }
+
+                if ($facturaRow->estado === 'ANULADA') {
+                    throw new \RuntimeException('La factura ya está anulada previamente.');
+                }
+
+                if ($facturaRow->estado !== 'EMITIDA') {
+                    throw new \RuntimeException('La factura no se encuentra en un estado que permita anulación.');
+                }
+
+                if ($facturaRow->venta_estado === 'CANCELADA') {
+                    throw new \RuntimeException('No se puede anular: la venta de origen ya fue cancelada.');
+                }
+
+                // ---------------------------------------------------------
+                // Auditoría: usuario, fecha y motivo (mecanismo existente).
+                // ---------------------------------------------------------
+                if (Schema::hasTable('anulaciones_caja_auditoria')) {
+                    DB::table('anulaciones_caja_auditoria')->insert([
+                        'tipo' => 'FACTURA_ANULADA',
+                        'registro_original_id' => (int) $facturaRow->id,
+                        'apertura_id' => null,
+                        'cierre_id' => null,
+                        'fecha_anulacion' => now(),
+                        'usuario_id' => $usuario->id,
+                        'rol' => $rol,
+                        'motivo' => $motivo,
+                        'estado_anterior' => 'EMITIDA',
+                        'estado_resultante' => 'ANULADA',
+                        'referencia_json' => json_encode([
+                            'factura_id' => (int) $facturaRow->id,
+                            'numero_factura' => $facturaRow->numero_factura,
+                            'venta_id' => (int) $facturaRow->venta_id,
+                            'cuenta_id' => $facturaRow->cuenta_id ? (int) $facturaRow->cuenta_id : null,
+                            'mesa_id' => $facturaRow->mesa_id ? (int) $facturaRow->mesa_id : null,
+                            'mesa' => $facturaRow->mesa_numero ?? null,
+                            'total' => (float) $facturaRow->total,
+                        ], JSON_UNESCAPED_UNICODE),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                // ---------------------------------------------------------
+                // 7. Marcar factura como ANULADA (sin borrar, sin destruir la
+                //    venta ni sus pagos: pagos_cuenta queda como historial).
+                // ---------------------------------------------------------
+                DB::table('facturas')->where('id', $facturaRow->id)->update([
+                    'estado' => 'ANULADA',
+                ]);
+
+                // ---------------------------------------------------------
+                // Reabrir solo la cuenta/subcuenta de esta factura para
+                // corregir el cobro. Nunca se tocan otras cuentas ni se
+                // reverten pagos ajenos.
+                // ---------------------------------------------------------
+                if ($facturaRow->cuenta_id) {
+                    DB::table('cuentas')->where('id', (int) $facturaRow->cuenta_id)->update([
+                        'estado' => 'ABIERTA',
+                        'updated_at' => now(),
+                    ]);
+
+                    // Si esta era la única cuenta pagada de la venta, la venta
+                    // vuelve a ACTIVA y la mesa a OCUPADA.
+                    $otrasPagadas = DB::table('cuentas')
+                        ->where('venta_id', $facturaRow->venta_id)
+                        ->where('id', '!=', (int) $facturaRow->cuenta_id)
+                        ->where('estado', 'PAGADA')
+                        ->exists();
+
+                    if (!$otrasPagadas) {
+                        DB::table('ventas')->where('id', $facturaRow->venta_id)->update(['estado' => 'ACTIVA']);
+
+                        if ($facturaRow->mesa_id) {
+                            DB::table('mesas')->where('id', (int) $facturaRow->mesa_id)->update([
+                                'estado' => 'OCUPADA',
+                            ]);
+                        }
+                    }
+                }
+
+                return response()->json([
+                    'exito' => true,
+                    'mensaje' => 'La factura fue anulada correctamente. La venta y la mesa quedan disponibles para corregir el cobro y volver a facturar.',
+                    'factura_id' => (int) $facturaRow->id,
+                    'numero_factura' => $facturaRow->numero_factura,
+                    'venta_id' => (int) $facturaRow->venta_id,
+                    'cuenta_id' => $facturaRow->cuenta_id ? (int) $facturaRow->cuenta_id : null,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            return response()->json([
+                'exito' => false,
+                'error' => $e->getMessage(),
+            ], 422);
+        }
     }
 }

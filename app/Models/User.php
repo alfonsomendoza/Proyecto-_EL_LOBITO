@@ -24,6 +24,19 @@ class User extends Authenticatable
         return $this->password_hash;
     }
 
+    /**
+     * Nombre real de la columna de contraseña.
+     *
+     * Laravel lo usa al re-hashear contraseñas (`rehashPasswordIfRequired`) y
+     * AuthenticateSession para comparar el hash guardado en la sesión. Sin
+     * este método, Laravel intentaría escribir en `password` (columna que no
+     * existe en `usuarios`) y fallaría.
+     */
+    public function getAuthPasswordName()
+    {
+        return 'password_hash';
+    }
+
     // Relación para obtener el nombre del ROL automáticamente
     public function rol()
     {

@@ -53,7 +53,7 @@
                             </div>
                             <div style="flex:1; display:flex; flex-direction:column; gap:5px;">
                                 <label style="font-size:0.85rem; font-weight:bold; color:#555;">Monto (C$):</label>
-                                <input type="number" step="0.01" min="0.01" name="montos[]" class="form-control-gasto" value="0" required
+                                <input type="number" step="0.01" min="0.01" max="9999999999.99" name="montos[]" class="form-control-gasto" value="0" required
                                        style="padding:8px 12px; border:1px solid #ced4da; border-radius:5px;">
                             </div>
                             <button type="button" class="btn-quitar-fila"
@@ -215,14 +215,14 @@ document.addEventListener('DOMContentLoaded', function () {
 
             for (const fila of filas) {
                 const concepto = fila.querySelector('input[name="conceptos[]"]').value.trim();
-                const monto = parseFloat(fila.querySelector('input[name="montos[]"]').value);
+                const monto = numeroMaximo(fila.querySelector('input[name="montos[]"]').value, 2, 9999999999.99);
 
                 if (concepto === '') {
                     Swal.fire('Atención', 'Falta ingresar el concepto en una de las filas.', 'warning');
                     return;
                 }
-                if (isNaN(monto) || monto <= 0) {
-                    Swal.fire('Atención', 'Ingresa un monto válido mayor a 0 en cada fila.', 'warning');
+                if (monto === null || monto <= 0) {
+                    Swal.fire('Atención', 'Ingresa un monto válido mayor a 0 en cada fila (solo números, máximo 2 decimales y hasta C$ 9,999,999,999.99).', 'warning');
                     return;
                 }
                 conceptos.push(concepto);

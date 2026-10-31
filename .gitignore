@@ -248,3 +248,10 @@ tmp_fix.txt
 Homestead.json
 Homestead.yaml
 /sistemadecaja
+
+# ==========================================================
+# CONFIGURACIÓN LOCAL DE OPENCODE
+# ==========================================================
+/opencode.json
+/opencode-config.ts
+/opencode-security-skills-el-lobito.zip:Zone.Identifier

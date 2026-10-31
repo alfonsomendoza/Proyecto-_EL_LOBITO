@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Rules\NumeroEstricto;
 use App\Services\ConfiguracionService;
 use App\Services\FacturaService;
 use App\Services\InventarioService;
@@ -53,10 +54,17 @@ class VentaController extends Controller
         'EFECTIVO_USD',     // efectivo en dólares (conversión con tasa del día)
         'TARJETA_DEBITO',   // tarjeta de débito (requiere banco)
         'TARJETA_CREDITO',  // tarjeta de crédito (requiere banco)
+        'TRANSFERENCIA',    // transferencia bancaria (requiere banco, moneda y número de transferencia)
     ];
 
-    /** Bancos admitidos para pagos con tarjeta (débito o crédito). */
+    /** Bancos admitidos para pagos con tarjeta (débito o crédito) y transferencia bancaria. */
     private const BANCOS_TARJETA = ['Banpro', 'Ficohsa', 'BAC', 'Lafise'];
+
+    /** Bancos admitidos para transferencia bancaria (misma lista oficial que las tarjetas). */
+    private const BANCOS_TRANSFERENCIA = ['BAC', 'FICOHSA', 'LAFISE', 'BANPRO'];
+
+    /** Monedas admitidas para una línea de pago. */
+    private const MONEDAS_PAGO = ['NIO', 'USD'];
 
     /**
      * ============================================================
@@ -3675,21 +3683,39 @@ class VentaController extends Controller
         //            crédito con banco) -> pagos mixtos.
         //  - Antiguo: `metodo_pago` + `monto_recibido` (un solo método),
         //            que es lo que hoy envía el POS y las pruebas.
+        //
+        // El porcentaje puede llegar como "10%" (formato completo). Se
+        // normaliza ANTES de validar; "10abc%" no se limpia y se rechaza.
+        $this->normalizarPorcentajes($request);
+
         $request->validate([
             'metodo_pago' => ['nullable', 'string', 'max:30'],
-            'monto_recibido' => ['nullable', 'numeric', 'min:0'],
+            'monto_recibido' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:99999999.99'],
             'banco' => ['nullable', 'string', 'max:30'],
             'pagos' => ['nullable', 'array'],
             'pagos.*.clave_operacion' => ['required_with:pagos', 'string', 'max:64'],
             'pagos.*.metodo_pago' => ['required_with:pagos', 'string', 'max:30', 'in:'.implode(',', self::METODOS_PAGO)],
-            'pagos.*.monto' => ['required_with:pagos', 'numeric', 'gt:0'],
+            'pagos.*.monto' => ['required_with:pagos', 'numeric', new NumeroEstricto(2), 'gt:0', 'max:9999999999.99'],
             'pagos.*.banco' => ['nullable', 'string', 'max:30'],
-            'pagos.*.tasa_cambio' => ['nullable', 'numeric', 'gt:0'],
-            'descuento' => ['nullable', 'numeric', 'min:0'],
-            'descuento_porcentaje' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            // La moneda es opcional para no romper cobros antiguos que no la
+            // envían (se deriva en el servidor); para transferencia sí es
+            // obligatoria y se valida en lineasDePago.
+            'pagos.*.moneda' => ['nullable', 'string', 'max:10', 'in:'.implode(',', self::MONEDAS_PAGO)],
+            'pagos.*.tasa_cambio' => ['nullable', 'numeric', new NumeroEstricto(4), 'gt:0', 'max:999999.9999'],
+            'pagos.*.numero_transferencia' => ['nullable', 'string', 'max:64'],
+            'descuento' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
+            'descuento_porcentaje' => ['nullable', 'numeric', new NumeroEstricto(2, true), 'min:0', 'max:100'],
             'descuento_motivo' => ['nullable', 'string', 'max:255'],
-            'propina' => ['nullable', 'numeric', 'min:0'],
-            'propina_porcentaje' => ['nullable', 'numeric', 'min:0'],
+            'propina' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
+            'propina_porcentaje' => ['nullable', 'numeric', new NumeroEstricto(2, true), 'min:0'],
+        ], [
+            // Límites según las columnas reales: DECIMAL(10,2) para
+            // ventas.monto_recibido y DECIMAL(12,2)/(10,4) para pagos y ajustes.
+            'monto_recibido.max' => 'El monto recibido supera el máximo permitido.',
+            'pagos.*.monto.max' => 'Una línea de pago supera el máximo permitido.',
+            'pagos.*.tasa_cambio.max' => 'La tasa de cambio supera el máximo permitido.',
+            'descuento.max' => 'El descuento supera el máximo permitido.',
+            'propina.max' => 'La propina supera el máximo permitido.',
         ]);
 
         // ------------------------------------------------------------
@@ -3832,7 +3858,7 @@ class VentaController extends Controller
                 // REGISTRO DE CADA LÍNEA DE PAGO
                 // ----------------------------------------------------
                 foreach ($lineas as $linea) {
-                    DB::table('pagos_cuenta')->insert([
+                    $pagoInsert = [
                         'clave_operacion' => $linea['clave_operacion'],
                         'cuenta_id' => (int) $cuentaId,
                         'venta_id' => (int) $venta->id,
@@ -3844,7 +3870,17 @@ class VentaController extends Controller
                         'monto_cordobas' => $linea['monto_cordobas'],
                         'usuario_id' => (int) $usuario->id,
                         'creado_en' => now(),
-                    ]);
+                    ];
+
+                    // `numero_transferencia` solo se persiste si la columna
+                    // existe (requiere migración 2026_10_18_000002 extendida;
+                    // no se ejecuta aquí para no tocar MySQL). Mientras tanto
+                    // el dato va siempre al detalle JSON de la factura.
+                    if (Schema::hasTable('pagos_cuenta') && Schema::hasColumn('pagos_cuenta', 'numero_transferencia')) {
+                        $pagoInsert['numero_transferencia'] = $linea['numero_transferencia'];
+                    }
+
+                    DB::table('pagos_cuenta')->insert($pagoInsert);
                 }
 
                 // ----------------------------------------------------
@@ -3903,6 +3939,10 @@ class VentaController extends Controller
                         'base' => $base,
                         'propina' => $propina,
                         'total' => $totalCobrar,
+                        // Detalle de pagos (incluye número de transferencia)
+                        // para que la factura y su ticket conserven el
+                        // desglose individual de cada línea de pago.
+                        'pagos' => $lineas,
                     ]);
 
                 return [
@@ -3976,16 +4016,42 @@ class VentaController extends Controller
                 }
 
                 $esTarjeta = in_array($metodo, ['TARJETA_DEBITO', 'TARJETA_CREDITO'], true);
-                $esDolares = $metodo === 'EFECTIVO_USD';
+                $esTransferencia = $metodo === 'TRANSFERENCIA';
 
-                // Banco: SOLO en tarjeta, y siempre de la lista oficial.
+                // Moneda original de la línea (obligatoria para transferencia;
+                // para los demás métodos se deriva del método o se asume NIO).
+                $moneda = strtoupper(trim((string) ($pago['moneda'] ?? ($metodo === 'EFECTIVO_USD' ? 'USD' : 'NIO'))));
+                if (!in_array($moneda, self::MONEDAS_PAGO, true)) {
+                    throw new \RuntimeException("La línea $n tiene una moneda no válida (use NIO o USD).");
+                }
+
+                // Dólares: efectivo USD o transferencia en USD.
+                $esDolares = $metodo === 'EFECTIVO_USD' || ($esTransferencia && $moneda === 'USD');
+
+                // Banco: obligatorio en tarjeta y en transferencia, siempre de la
+                // lista oficial. Nunca es un método de pago independiente.
                 $banco = null;
 
-                if ($esTarjeta) {
+                if ($esTarjeta || $esTransferencia) {
                     $banco = $this->normalizarBanco((string) ($pago['banco'] ?? ''));
 
                     if ($banco === null) {
-                        throw new \RuntimeException("La línea $n es con tarjeta: seleccione banco (Banpro, Ficohsa, BAC o Lafise).");
+                        $tipo = $esTransferencia ? 'transferencia' : 'tarjeta';
+                        throw new \RuntimeException("La línea $n es {$tipo}: seleccione banco (Banpro, Ficohsa, BAC o Lafise).");
+                    }
+                }
+
+                // Número de transferencia: obligatorio y exclusivamente dígitos
+                // cuando el método es transferencia bancaria.
+                $numeroTransferencia = trim((string) ($pago['numero_transferencia'] ?? ''));
+
+                if ($esTransferencia) {
+                    if ($numeroTransferencia === '') {
+                        throw new \RuntimeException("La línea $n es una transferencia: el número de transferencia es obligatorio.");
+                    }
+
+                    if (!ctype_digit($numeroTransferencia)) {
+                        throw new \RuntimeException("La línea $n: el número de transferencia debe contener exclusivamente números.");
                     }
                 }
 
@@ -4009,10 +4075,11 @@ class VentaController extends Controller
                     'clave_operacion' => $clave,
                     'metodo_pago' => $metodo,
                     'banco' => $banco,
-                    'moneda' => $esDolares ? 'USD' : 'NIO',
+                    'moneda' => $moneda,
                     'monto' => $monto,
                     'tasa_cambio' => $esDolares ? $tasa : null,
                     'monto_cordobas' => $esDolares ? round($monto * $tasa, 2) : $monto,
+                    'numero_transferencia' => $esTransferencia ? $numeroTransferencia : null,
                 ];
             }
 
@@ -4047,6 +4114,9 @@ class VentaController extends Controller
             'monto' => $monto,
             'tasa_cambio' => null,
             'monto_cordobas' => $monto,
+            // El formato antiguo no admite transferencia; la clave existe
+            // siempre para que el insert no dependa de que venga o no.
+            'numero_transferencia' => null,
         ]];
     }
 
@@ -4149,29 +4219,48 @@ class VentaController extends Controller
      *
      * @throws \InvalidArgumentException si algún valor es inválido.
      */
+    private function normalizarPorcentajes(Request $request): void
+    {
+        foreach (['descuento_porcentaje', 'propina_porcentaje'] as $campo) {
+            $valor = $request->input($campo);
+
+            if ($valor === null || $valor === '') {
+                continue;
+            }
+
+            $request->merge([$campo => NumeroEstricto::normalizarPorcentaje($valor)]);
+        }
+    }
+
     private function ajustesDesdePeticion(Request $request, float $consumo): array
     {
-        $descuentoPorcentaje = $request->input('descuento_porcentaje');
-        $propinaPorcentaje = $request->input('propina_porcentaje');
-        $descuentoImporte = $request->input('descuento', 0);
-        $propinaImporte = $request->input('propina', 0);
+        $descuentoPorcentaje = NumeroEstricto::normalizarPorcentaje($request->input('descuento_porcentaje'));
+        $propinaPorcentaje = NumeroEstricto::normalizarPorcentaje($request->input('propina_porcentaje'));
+
+        // Un ajuste opcional ausente (null) o vacío ("") significa "sin
+        // ajuste" = 0. No se convierten a cero valores INVÁLIDOS: "abc" o
+        // "1e3" siguen rechazándose más abajo.
+        $descuentoImporte = $request->input('descuento');
+        if ($descuentoImporte === null || $descuentoImporte === '') {
+            $descuentoImporte = 0;
+        }
+        $propinaImporte = $request->input('propina');
+        if ($propinaImporte === null || $propinaImporte === '') {
+            $propinaImporte = 0;
+        }
 
         // Si viene un porcentaje de descuento, manda sobre el importe.
         if ($descuentoPorcentaje !== null && $descuentoPorcentaje !== '') {
-            if (!is_numeric($descuentoPorcentaje)) {
-                throw new \InvalidArgumentException('El porcentaje de descuento no es válido.');
+            if (!NumeroEstricto::esValido($descuentoPorcentaje, 2, 0, 100)) {
+                throw new \InvalidArgumentException('El porcentaje de descuento no es válido (usa solo números entre 0 y 100).');
             }
 
             $descuentoPorcentaje = (float) $descuentoPorcentaje;
 
-            if (!is_finite($descuentoPorcentaje) || $descuentoPorcentaje < 0 || $descuentoPorcentaje > 100) {
-                throw new \InvalidArgumentException('El porcentaje de descuento debe estar entre 0 y 100.');
-            }
-
             $descuento = round($consumo * $descuentoPorcentaje / 100, 2);
         } else {
-            if (!is_numeric($descuentoImporte)) {
-                throw new \InvalidArgumentException('El descuento no es válido.');
+            if (!NumeroEstricto::esValido($descuentoImporte, 2, 0)) {
+                throw new \InvalidArgumentException('El descuento no es válido (usa solo números, sin letras ni notación científica).');
             }
 
             $descuento = round((float) $descuentoImporte, 2);
@@ -4186,20 +4275,16 @@ class VentaController extends Controller
 
         // Si viene un porcentaje de propina, manda sobre el importe.
         if ($propinaPorcentaje !== null && $propinaPorcentaje !== '') {
-            if (!is_numeric($propinaPorcentaje)) {
-                throw new \InvalidArgumentException('El porcentaje de propina no es válido.');
+            if (!NumeroEstricto::esValido($propinaPorcentaje, 2, 0)) {
+                throw new \InvalidArgumentException('El porcentaje de propina no es válido (usa solo números, sin letras ni notación científica).');
             }
 
             $propinaPorcentaje = (float) $propinaPorcentaje;
 
-            if (!is_finite($propinaPorcentaje) || $propinaPorcentaje < 0) {
-                throw new \InvalidArgumentException('El porcentaje de propina no puede ser negativo.');
-            }
-
             $propina = round($base * $propinaPorcentaje / 100, 2);
         } else {
-            if (!is_numeric($propinaImporte)) {
-                throw new \InvalidArgumentException('La propina no es válida.');
+            if (!NumeroEstricto::esValido($propinaImporte, 2, 0)) {
+                throw new \InvalidArgumentException('La propina no es válida (usa solo números, sin letras ni notación científica).');
             }
 
             $propina = round((float) $propinaImporte, 2);
@@ -4207,6 +4292,18 @@ class VentaController extends Controller
 
         if (!is_finite($descuento) || !is_finite($propina) || $descuento < 0 || $propina < 0) {
             throw new \InvalidArgumentException('El descuento y la propina no pueden ser negativos.');
+        }
+
+        // Los ajustes se guardan en columnas DECIMAL(12,2): un porcentaje
+        // enorme podría desbordarlas aunque el porcentaje sea "válido".
+        $limiteAjuste = 9999999999.99;
+
+        if ($descuento > $limiteAjuste) {
+            throw new \InvalidArgumentException('El descuento supera el máximo permitido.');
+        }
+
+        if ($propina > $limiteAjuste) {
+            throw new \InvalidArgumentException('La propina supera el máximo permitido.');
         }
 
         return [$descuento, $propina];

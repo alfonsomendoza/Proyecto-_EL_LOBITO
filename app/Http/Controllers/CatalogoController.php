@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Exceptions\ImportacionProductosException;
 use App\Models\Categoria;
 use App\Models\Producto;
+use App\Rules\NumeroEstricto;
 use App\Services\ProductoImportService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -293,7 +294,9 @@ class CatalogoController extends Controller
                 $request->validate([
                     'categoria_id' => 'required|exists:categorias,id',
                     'nombre' => 'required|string|max:100',
-                    'precio' => 'required|numeric|min:0',
+                    'precio' => ['required', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
+                ], [
+                    'precio.max' => 'El precio supera el máximo permitido (C$ 9,999,999,999.99).',
                 ]);
 
                 // Datos comunes. NO se incluye 'activo' aquí: editar nunca debe

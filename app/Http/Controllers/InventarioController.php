@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Rules\NumeroEstricto;
 use App\Services\InventarioService;
 use App\Services\ConfiguracionService;
 use Illuminate\Http\Request;
@@ -277,8 +278,11 @@ class InventarioController extends Controller
         }
 
         $datos = $request->validate([
-            'cantidad' => ['required', 'numeric', 'gt:0'],
+            'cantidad' => ['required', 'numeric', new NumeroEstricto(3), 'gt:0', 'max:999999999.999'],
             'observacion' => ['nullable', 'string', 'max:500'],
+        ], [
+            'cantidad.gt' => 'La cantidad debe ser mayor que cero.',
+            'cantidad.max' => 'La cantidad supera el máximo permitido (999,999,999.999).',
         ]);
 
         if (! $this->productoExiste($producto)) {
@@ -325,8 +329,11 @@ class InventarioController extends Controller
         }
 
         $datos = $request->validate([
-            'stock_minimo' => ['required', 'numeric', 'min:0'],
+            'stock_minimo' => ['required', 'numeric', new NumeroEstricto(3), 'min:0', 'max:999999999.999'],
             'unidad' => ['nullable', 'string', 'max:20'],
+        ], [
+            'stock_minimo.min' => 'El stock mínimo no puede ser negativo.',
+            'stock_minimo.max' => 'El stock mínimo supera el máximo permitido (999,999,999.999).',
         ]);
 
         if (! $this->productoExiste($producto)) {
@@ -376,8 +383,11 @@ class InventarioController extends Controller
 
         $datos = $request->validate([
             'tipo' => ['required', 'in:AJUSTE_ENTRADA,AJUSTE_SALIDA'],
-            'cantidad' => ['required', 'numeric', 'gt:0'],
+            'cantidad' => ['required', 'numeric', new NumeroEstricto(3), 'gt:0', 'max:999999999.999'],
             'observacion' => ['nullable', 'string', 'max:500'],
+        ], [
+            'cantidad.gt' => 'La cantidad debe ser mayor que cero.',
+            'cantidad.max' => 'La cantidad supera el máximo permitido (999,999,999.999).',
         ]);
 
         if (! $this->productoExiste($producto)) {

@@ -197,6 +197,48 @@ class CatalogoAutorizacionTest extends TestCase
         }
     }
 
+    public function test_precio_con_formato_invalido_es_rechazado(): void
+    {
+        $this->actingAs($this->usuario('ADMIN'));
+        $categoriaId = $this->crearCategoria('Bebidas');
+
+        $invalidos = [
+            'e',
+            '0e',
+            '0e13212312132121',
+            '1e3',
+            '10abc',
+            '25aasasdasdasdasasd',
+            '--10',
+            '-5',
+            '10.999',
+            '10%%',
+            '10000000000',
+        ];
+
+        foreach ($invalidos as $precio) {
+            $this->post(route('catalogo.api'), [
+                'accion' => 'crear_producto',
+                'categoria_id' => $categoriaId,
+                'nombre' => 'Producto inválido',
+                'precio' => $precio,
+                'requiere_cocina' => 0,
+            ])->assertStatus(422);
+        }
+
+        $this->assertDatabaseCount('productos', 0);
+
+        $this->post(route('catalogo.api'), [
+            'accion' => 'crear_producto',
+            'categoria_id' => $categoriaId,
+            'nombre' => 'Producto válido',
+            'precio' => '10.50',
+            'requiere_cocina' => 0,
+        ])->assertStatus(200)->assertJson(['exito' => true]);
+
+        $this->assertDatabaseHas('productos', ['nombre' => 'Producto válido', 'precio' => 10.50]);
+    }
+
     public function test_admin_y_gerente_pueden_editar_producto(): void
     {
         foreach (['ADMIN', 'GERENTE'] as $rol) {
