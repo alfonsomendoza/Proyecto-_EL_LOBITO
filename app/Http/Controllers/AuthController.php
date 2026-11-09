@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Schema;
 class AuthController extends Controller
 {
     // Minutos de inactividad antes de liberar automáticamente una sesión.
-    private const MINUTOS_INACTIVIDAD = 1;
+    private const MINUTOS_INACTIVIDAD = 10;
 
     public function showLoginForm()
     {
