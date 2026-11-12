@@ -65,7 +65,7 @@ class ResumenPropinasTest extends TestCase
      * POSTERIOR de la cuenta: la factura conserva la fecha de cobro original,
      * pero `cuentas.updated_at` queda en otro día.
      *
-     * @param array<int, array{propina: float, estado: string, fecha: string, fecha_cuenta_actualizada?: string, nombre?: string, factura?: bool, detalles?: int}> $cuentas
+     * @param array<int, array{propina: float, estado: string, fecha: string, fecha_cuenta_actualizada?: string, nombre?: string, factura?: bool, detalles?: int, detalles_anulados?: int, detalle_subtotal?: float, descuento?: float, apertura_id?: int, usuario_cobro?: int}> $cuentas
      */
     private function montarVenta(array $cuentas, int $usuarioId): array
     {
@@ -98,9 +98,13 @@ class ResumenPropinasTest extends TestCase
             $cuentaId = DB::table('cuentas')->insertGetId([
                 'venta_id' => $ventaId,
                 'nombre' => $datos['nombre'] ?? ('Cuenta '.$indice),
+                // `cuentas.total` guarda el CONSUMO (no incluye propina), igual
+                // que en VentaController::pagarCuenta.
                 'total' => 100,
                 'estado' => $datos['estado'],
-                'usuario_cobro' => $usuarioId,
+                'usuario_cobro' => $datos['usuario_cobro'] ?? $usuarioId,
+                'apertura_id' => $datos['apertura_id'] ?? null,
+                'descuento' => $datos['descuento'] ?? 0,
                 'propina' => $datos['propina'],
                 'created_at' => $datos['fecha'],
                 'updated_at' => $datos['fecha_cuenta_actualizada'] ?? $datos['fecha'],
@@ -108,14 +112,21 @@ class ResumenPropinasTest extends TestCase
 
             // Varios detalles para la misma cuenta: sirven para comprobar que
             // la propina NO se multiplica por el número de detalles.
+            // `detalles_anulados` agrega líneas con `eliminado = 1` (borrado
+            // lógico): no deben inflar el consumo.
             $detalles = $datos['detalles'] ?? 1;
-            for ($i = 0; $i < $detalles; $i++) {
+            $anulados = $datos['detalles_anulados'] ?? 0;
+            $subtotalDetalle = (float) ($datos['detalle_subtotal'] ?? 100);
+
+            for ($i = 0; $i < ($detalles + $anulados); $i++) {
+                $eliminado = $i >= $detalles;
+
                 $detalleId = DB::table('venta_detalles')->insertGetId([
                     'venta_id' => $ventaId,
                     'producto_id' => $productoId,
                     'cantidad' => 1,
-                    'precio_unitario' => 100,
-                    'subtotal' => 100,
+                    'precio_unitario' => $subtotalDetalle,
+                    'subtotal' => $subtotalDetalle,
                     'estado' => 'ACTIVO',
                 ]);
 
@@ -124,8 +135,8 @@ class ResumenPropinasTest extends TestCase
                     'venta_id' => $ventaId,
                     'venta_detalle_id' => $detalleId,
                     'cantidad' => 1,
-                    'subtotal' => 100,
-                    'eliminado' => false,
+                    'subtotal' => $subtotalDetalle,
+                    'eliminado' => $eliminado,
                 ]);
             }
 
@@ -542,5 +553,668 @@ class ResumenPropinasTest extends TestCase
             ->assertStatus(200)
             ->assertSee('686.86')
             ->assertSee('value="'.$hoy.'"', false);
+    }
+
+    /* ------------------------------------------------------------------
+     | Consumo real, facturas anuladas y atribución de usuarios
+     | ------------------------------------------------------------------ */
+
+    public function test_el_monto_de_consumo_no_es_cero_y_sale_del_detalle(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        // 3 detalles de C$ 100: el consumo real es 300 (no el total
+        // denormalizado de la cuenta ni cero).
+        $this->montarVenta([
+            [
+                'propina' => 15.00,
+                'estado' => 'PAGADA',
+                'fecha' => '2026-10-18 20:00:00',
+                'detalles' => 3,
+                'factura' => true,
+            ],
+        ], $admin->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(300.0, $resumen['detalle'][0]['monto_consumo'], 'El consumo debe salir de cuenta_detalles, no ser cero.');
+        $this->assertSame(15.0, $resumen['total']);
+        // No existe registro de pago de propinas al personal: no se inventa.
+        $this->assertNull($resumen['propinas_pagadas']);
+    }
+
+    public function test_una_factura_anulada_no_duplica_la_propina(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        $venta = $this->montarVenta([
+            ['propina' => 60.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+
+        // Una factura ANULADA de la MISMA cuenta (la cuenta se reabrió y se
+        // volvió a cobrar). No debe sumar la propina por segunda vez, ni en el
+        // día de la anulación ni en ningún otro.
+        DB::table('facturas')->insert([
+            'numero_factura' => 'FAC-9999',
+            'venta_id' => $venta['venta'],
+            'cuenta_id' => $venta['cuentas'][0],
+            'mesa' => 'Mesa',
+            'detalle_consumo' => '{}',
+            'total' => 60,
+            'fecha_emision' => '2026-10-19 10:00:00',
+            'usuario_id' => $admin->id,
+            'estado' => 'ANULADA',
+        ]);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelRango('2026-10-18', '2026-10-19');
+
+        $this->assertSame(1, $resumen['cantidad'], 'Solo debe contar la factura vigente.');
+        $this->assertSame(60.0, $resumen['total'], 'La propina no debe duplicarse por la factura anulada.');
+    }
+
+    public function test_distingue_quien_abrio_la_mesa_de_quien_atendio(): void
+    {
+        $administrador = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        $venta = $this->montarVenta([
+            ['propina' => 25.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $administrador->id);
+
+        // La comanda la envió el mesero: es quien atendió la mesa, aunque la
+        // venta la haya abierto el administrador.
+        DB::table('comandas')->insert([
+            'venta_id' => $venta['venta'],
+            'usuario_id' => $mesero->id,
+            'estado' => 'ABIERTA',
+            'total' => 100,
+            'creado_en' => '2026-10-18 19:00:00',
+            'conteo_impresiones' => 1,
+        ]);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+        $linea = $resumen['detalle'][0];
+
+        $this->assertSame('MESERO Test', $linea['mesero_atendio'], 'Quien atendió es quien envió la comanda.');
+        $this->assertSame('ADMIN Test', $linea['usuario_abrio_mesa'], 'Quien abrió la mesa es el usuario de la venta.');
+        $this->assertNotSame($linea['mesero_atendio'], $linea['usuario_abrio_mesa']);
+    }
+
+    /* ------------------------------------------------------------------
+     | Filtros combinados: mesero, abrió la mesa y mesa
+     | ------------------------------------------------------------------ */
+
+    /** Registra una comanda enviada por `$usuarioId` para la venta indicada. */
+    private function comanda(int $ventaId, int $usuarioId): void
+    {
+        DB::table('comandas')->insert([
+            'venta_id' => $ventaId,
+            'usuario_id' => $usuarioId,
+            'estado' => 'ABIERTA',
+            'total' => 100,
+            'creado_en' => '2026-10-18 19:00:00',
+            'conteo_impresiones' => 1,
+        ]);
+    }
+
+    private function mesaDeVenta(int $ventaId): int
+    {
+        return (int) DB::table('ventas')->where('id', $ventaId)->value('mesa_id');
+    }
+
+    public function test_filtro_por_mesero_que_atendio(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $meseroUno = $this->usuario('MESERO');
+        $meseroDos = $this->usuario('MESERO');
+
+        $ventaUno = $this->montarVenta([
+            ['propina' => 137.37, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaUno['venta'], $meseroUno->id);
+
+        $ventaDos = $this->montarVenta([
+            ['propina' => 248.48, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaDos['venta'], $meseroDos->id);
+
+        $respuesta = $this->actingAs($admin)->get(route('reportes.propinas', [
+            'desde' => '2026-10-18', 'hasta' => '2026-10-18', 'mesero' => $meseroUno->id,
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('137.37')
+            ->assertDontSee('248.48');
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)
+            ->resumenDelDia('2026-10-18', ['mesero' => $meseroUno->id]);
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(137.37, $resumen['total']);
+    }
+
+    public function test_filtro_por_usuario_que_abrio_la_mesa(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        $ventaMesero = $this->montarVenta([
+            ['propina' => 161.61, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $mesero->id);
+        $this->comanda($ventaMesero['venta'], $mesero->id);
+
+        $ventaAdmin = $this->montarVenta([
+            ['propina' => 272.72, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaAdmin['venta'], $mesero->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)
+            ->resumenDelDia('2026-10-18', ['abrio' => $mesero->id]);
+
+        $this->assertSame(1, $resumen['cantidad'], 'Solo la mesa abierta por ese usuario.');
+        $this->assertSame(161.61, $resumen['total']);
+    }
+
+    public function test_filtro_por_mesa(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        $ventaUno = $this->montarVenta([
+            ['propina' => 383.83, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $mesero->id);
+        $this->comanda($ventaUno['venta'], $mesero->id);
+
+        $ventaDos = $this->montarVenta([
+            ['propina' => 494.94, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $mesero->id);
+        $this->comanda($ventaDos['venta'], $mesero->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)
+            ->resumenDelDia('2026-10-18', ['mesa' => $this->mesaDeVenta($ventaUno['venta'])]);
+
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(383.83, $resumen['total']);
+    }
+
+    public function test_los_filtros_se_combinan_entre_si(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $meseroUno = $this->usuario('MESERO');
+        $meseroDos = $this->usuario('MESERO');
+
+        $ventaUno = $this->montarVenta([
+            ['propina' => 515.15, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $meseroUno->id);
+        $this->comanda($ventaUno['venta'], $meseroUno->id);
+
+        $ventaDos = $this->montarVenta([
+            ['propina' => 626.26, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $meseroDos->id);
+        $this->comanda($ventaDos['venta'], $meseroDos->id);
+
+        $servicio = app(\App\Services\ResumenPropinasService::class);
+
+        // Mesero + abrió + mesa: coinciden solo en la primera venta.
+        $resumen = $servicio->resumenDelDia('2026-10-18', [
+            'mesero' => $meseroUno->id,
+            'abrio' => $meseroUno->id,
+            'mesa' => $this->mesaDeVenta($ventaUno['venta']),
+        ]);
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(515.15, $resumen['total']);
+
+        // Mesero que no abrió esa mesa: combinación imposible -> vacío.
+        $resumen = $servicio->resumenDelDia('2026-10-18', [
+            'mesero' => $meseroDos->id,
+            'mesa' => $this->mesaDeVenta($ventaUno['venta']),
+        ]);
+        $this->assertSame(0, $resumen['cantidad']);
+        $this->assertSame(0.0, $resumen['total']);
+    }
+
+    public function test_filtros_invalidos_se_ignoran_en_la_peticion(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        $venta = $this->montarVenta([
+            ['propina' => 737.37, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $mesero->id);
+        $this->comanda($venta['venta'], $mesero->id);
+
+        // Valores no numéricos: no deben filtrar nada (ni provocar error).
+        $this->actingAs($admin)->get(route('reportes.propinas', [
+            'desde' => '2026-10-18', 'hasta' => '2026-10-18',
+            'mesero' => 'abc', 'abrio' => 'x', 'mesa' => '-3',
+        ]))->assertStatus(200)->assertSee('737.37');
+    }
+
+    /* ------------------------------------------------------------------
+     | Atribución: solo MESERO, varios meseros y conciliación
+     | ------------------------------------------------------------------ */
+
+    public function test_solo_el_rol_mesero_recibe_propina(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        $gerente = $this->usuario('GERENTE');
+
+        $venta = $this->montarVenta([
+            ['propina' => 848.48, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+
+        // Comandas enviadas por roles que NO pueden recibir propinas.
+        $this->comanda($venta['venta'], $cajero->id);
+        $this->comanda($venta['venta'], $gerente->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+        $linea = $resumen['detalle'][0];
+
+        $this->assertNull($linea['mesero_atendio'], 'CAJERO/GERENTE no son meseros que atendieron.');
+        $this->assertSame('PENDIENTE', $linea['atribucion']);
+        $this->assertSame('sin_mesero', $linea['motivo_pendiente']);
+        $this->assertSame(0.0, $resumen['atribuido'], 'Ningún rol administrativo recibe propina.');
+        $this->assertSame(848.48, $resumen['pendiente']);
+    }
+
+    public function test_abrir_o_cobrar_no_atribuye_la_propina(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $adminDos = $this->usuario('ADMIN');
+
+        // Venta abierta y cobrada por ADMIN, sin comandas de ningún mesero.
+        $this->montarVenta([
+            ['propina' => 959.59, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(0.0, $resumen['atribuido']);
+        $this->assertSame(959.59, $resumen['pendiente']);
+        $this->assertSame('PENDIENTE', $resumen['detalle'][0]['atribucion']);
+        $this->assertNull($resumen['detalle'][0]['mesero_atribuido_id'], 'Quien abre/cobra no es receptor automático.');
+        $this->assertNotSame($adminDos->id, $resumen['detalle'][0]['usuario_cobro_id']);
+    }
+
+    public function test_varios_meseros_no_duplican_la_propina_y_queda_pendiente(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $meseroUno = $this->usuario('MESERO');
+        $meseroDos = $this->usuario('MESERO');
+
+        $venta = $this->montarVenta([
+            ['propina' => 300.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($venta['venta'], $meseroUno->id);
+        $this->comanda($venta['venta'], $meseroDos->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(1, $resumen['cantidad'], 'Una sola cuenta, una sola propina.');
+        $this->assertSame(300.0, $resumen['total'], 'La propina NO se multiplica por mesero.');
+        $this->assertSame(0.0, $resumen['atribuido'], 'No se reparte sin regla verificable.');
+        $this->assertSame(300.0, $resumen['pendiente']);
+        $this->assertSame('varios_meseros', $resumen['detalle'][0]['motivo_pendiente']);
+        $this->assertCount(2, $resumen['detalle'][0]['meseros_ids']);
+        $this->assertCount(1, $resumen['resumen_meseros'], 'Solo una fila pendiente, no una por mesero.');
+        $this->assertTrue($resumen['resumen_meseros'][0]['pendiente']);
+        $this->assertSame(300.0, $resumen['resumen_meseros'][0]['propinas']);
+    }
+
+    public function test_conciliacion_atribuido_mas_pendiente_igual_al_total(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+        $otroMesero = $this->usuario('MESERO');
+
+        // Atribuida: un solo mesero.
+        $ventaAtribuida = $this->montarVenta([
+            ['propina' => 137.37, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaAtribuida['venta'], $mesero->id);
+
+        // Pendiente: dos meseros en la misma venta.
+        $ventaCompartida = $this->montarVenta([
+            ['propina' => 248.48, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaCompartida['venta'], $mesero->id);
+        $this->comanda($ventaCompartida['venta'], $otroMesero->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(385.85, $resumen['total']);
+        $this->assertSame(137.37, $resumen['atribuido']);
+        $this->assertSame(248.48, $resumen['pendiente']);
+        $this->assertSame(
+            $resumen['total'],
+            round($resumen['atribuido'] + $resumen['pendiente'], 2),
+            'Atribuido + pendiente debe ser EXACTAMENTE el total.'
+        );
+
+        // La suma del resumen individual tampoco duplica ni pierde importes.
+        $this->assertSame(385.85, round((float) $resumen['resumen_meseros']->sum('propinas'), 2));
+
+        // Y la interfaz muestra las tres cifras.
+        $this->actingAs($admin)->get(route('reportes.propinas', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))
+            ->assertStatus(200)
+            ->assertSee('Atribuido a meseros')
+            ->assertSee('Pendiente de atribución')
+            ->assertSee('385.85');
+    }
+
+    public function test_resumen_diario_individual_por_mesero(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        // Dos cuentas de la MISMA mesa/venta, atendida por un solo mesero.
+        $venta = $this->montarVenta([
+            ['propina' => 10.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+            ['propina' => 15.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:30:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($venta['venta'], $mesero->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertCount(1, $resumen['resumen_meseros']);
+        $fila = $resumen['resumen_meseros'][0];
+
+        $this->assertSame('2026-10-18', $fila['fecha']);
+        $this->assertSame('MESERO Test', $fila['mesero']);
+        $this->assertFalse($fila['pendiente']);
+        $this->assertSame(1, $fila['mesas_atendidas'], 'Una mesa aunque haya dos cuentas.');
+        $this->assertSame(2, $fila['cuentas_cobradas']);
+        $this->assertSame(200.0, $fila['consumo'], '100 por cada cuenta (un detalle cada una).');
+        $this->assertSame(25.0, $fila['propinas']);
+
+        // La vista muestra el resumen individual y enlaza al detalle del mesero.
+        $this->actingAs($admin)->get(route('reportes.propinas', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))
+            ->assertStatus(200)
+            ->assertSee('Resumen diario individual por mesero')
+            ->assertSee('MESERO Test')
+            ->assertSee('mesero='.$mesero->id, false)
+            ->assertSee('25.00');
+    }
+
+    public function test_filtro_pendiente_muestra_solo_lo_no_atribuido(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+        $otroMesero = $this->usuario('MESERO');
+
+        $ventaAtribuida = $this->montarVenta([
+            ['propina' => 171.71, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaAtribuida['venta'], $mesero->id);
+
+        $ventaCompartida = $this->montarVenta([
+            ['propina' => 282.82, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 21:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($ventaCompartida['venta'], $mesero->id);
+        $this->comanda($ventaCompartida['venta'], $otroMesero->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)
+            ->resumenDelDia('2026-10-18', ['mesero' => 'pendiente']);
+
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(282.82, $resumen['total']);
+        $this->assertSame(0.0, $resumen['atribuido']);
+        $this->assertSame(282.82, $resumen['pendiente']);
+    }
+
+    public function test_una_misma_propina_no_se_cuenta_en_dos_meseros(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $meseroUno = $this->usuario('MESERO');
+        $meseroDos = $this->usuario('MESERO');
+
+        // Venta compartida entre dos meseros, con dos cuentas cobradas.
+        $venta = $this->montarVenta([
+            ['propina' => 50.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+            ['propina' => 60.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:20:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($venta['venta'], $meseroUno->id);
+        $this->comanda($venta['venta'], $meseroDos->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(110.0, $resumen['total'], '50 + 60 una sola vez.');
+
+        foreach ([$meseroUno->id, $meseroDos->id] as $idMesero) {
+            $filtrado = app(\App\Services\ResumenPropinasService::class)
+                ->resumenDelDia('2026-10-18', ['mesero' => $idMesero]);
+            $this->assertSame(110.0, $filtrado['total'], 'Filtrar por un mesero no aumenta el total.');
+            $this->assertSame(0.0, $filtrado['atribuido'], 'La venta compartida sigue pendiente.');
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     | Bloque A: consistencia, filtros nuevos, exportación y paginación
+     | ------------------------------------------------------------------ */
+
+    public function test_cuenta_pagada_sin_factura_se_informa_sin_sumar_al_total(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        $this->montarVenta([
+            ['propina' => 45.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+            // Cobrada SIN factura emitida: se informa como inconsistencia,
+            // pero NUNCA suma al total de propinas.
+            ['propina' => 999.99, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:30:00', 'factura' => false],
+        ], $admin->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(1, $resumen['cuentas_sin_factura'], 'Una cuenta cobrada sin factura vigente.');
+        $this->assertSame(1, $resumen['cantidad'], 'Solo la cuenta con factura EMITIDA entra al detalle.');
+        $this->assertSame(45.0, $resumen['total'], 'La cuenta sin factura no suma.');
+
+        $this->actingAs($admin)
+            ->get(route('reportes.propinas', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))
+            ->assertStatus(200)
+            ->assertSee('Cuentas pagadas sin factura vigente')
+            ->assertDontSee('999.99');
+    }
+
+    public function test_descuento_no_reduce_el_consumo_ni_duplica_la_propina(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        // Consumo bruto 300 (3 x 100), descuento 50, propina 30.
+        $this->montarVenta([
+            [
+                'propina' => 30.00,
+                'estado' => 'PAGADA',
+                'fecha' => '2026-10-18 20:00:00',
+                'factura' => true,
+                'detalles' => 3,
+                'descuento' => 50.00,
+            ],
+        ], $admin->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+        $linea = $resumen['detalle'][0];
+
+        $this->assertSame(1, $resumen['cantidad']);
+        $this->assertSame(30.0, $resumen['total'], 'La propina se cuenta una sola vez.');
+        $this->assertSame(300.0, $linea['monto_consumo'], 'El consumo es BRUTO: no se le resta el descuento.');
+        $this->assertSame(50.0, $linea['descuento'], 'El descuento se informa aparte.');
+        $this->assertSame(30.0, $linea['propina'], 'La propina no se suma al consumo.');
+    }
+
+    public function test_detalles_anulados_no_inflan_el_consumo(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        // 1 detalle activo + 2 anulados (borrado lógico) de C$ 100.
+        $this->montarVenta([
+            [
+                'propina' => 10.00,
+                'estado' => 'PAGADA',
+                'fecha' => '2026-10-18 20:00:00',
+                'factura' => true,
+                'detalles' => 1,
+                'detalles_anulados' => 2,
+            ],
+        ], $admin->id);
+
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+
+        $this->assertSame(100.0, $resumen['detalle'][0]['monto_consumo'], 'Solo cuenta el detalle no eliminado.');
+        $this->assertSame(10.0, $resumen['total']);
+    }
+
+    public function test_filtros_por_turno_y_por_usuario_que_cobro(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        $mesero = $this->usuario('MESERO');
+
+        $turnoUno = DB::table('caja_apertura')->insertGetId([
+            'fecha' => '2026-10-18 08:00:00',
+            'cajero' => 'CAJERO Test',
+            'turno' => 'Mañana',
+            'monto_inicial' => 1000,
+            'estado' => 'ABIERTA',
+        ]);
+        $turnoDos = DB::table('caja_apertura')->insertGetId([
+            'fecha' => '2026-10-18 16:00:00',
+            'cajero' => 'ADMIN Test',
+            'turno' => 'Tarde',
+            'monto_inicial' => 1000,
+            'estado' => 'ABIERTA',
+        ]);
+
+        $this->montarVenta([
+            ['propina' => 111.11, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 09:00:00', 'factura' => true, 'apertura_id' => $turnoUno, 'usuario_cobro' => $cajero->id],
+        ], $mesero->id);
+
+        $this->montarVenta([
+            ['propina' => 222.22, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 17:00:00', 'factura' => true, 'apertura_id' => $turnoDos, 'usuario_cobro' => $admin->id],
+        ], $mesero->id);
+
+        $servicio = app(\App\Services\ResumenPropinasService::class);
+
+        $porTurno = $servicio->resumenDelDia('2026-10-18', ['apertura' => $turnoUno]);
+        $this->assertSame(1, $porTurno['cantidad']);
+        $this->assertSame(111.11, $porTurno['total']);
+        $this->assertArrayHasKey($turnoUno, $porTurno['opciones']['turnos']);
+        $this->assertArrayHasKey($cajero->id, $porTurno['opciones']['cobradores']);
+        // La conciliación no se altera por filtrar.
+        $this->assertSame(
+            $porTurno['total'],
+            round($porTurno['atribuido'] + $porTurno['pendiente'], 2)
+        );
+
+        $porCobro = $servicio->resumenDelDia('2026-10-18', ['cobro' => $cajero->id]);
+        $this->assertSame(1, $porCobro['cantidad']);
+        $this->assertSame(111.11, $porCobro['total']);
+
+        // Combinación imposible (turno 1 lo cobró el cajero, no el admin).
+        $combinado = $servicio->resumenDelDia('2026-10-18', ['apertura' => $turnoUno, 'cobro' => $admin->id]);
+        $this->assertSame(0, $combinado['cantidad']);
+        $this->assertSame(0.0, $combinado['total']);
+
+        $this->actingAs($admin)
+            ->get(route('reportes.propinas', [
+                'desde' => '2026-10-18', 'hasta' => '2026-10-18', 'turno' => $turnoUno,
+            ]))
+            ->assertStatus(200)
+            ->assertSee('name="turno"', false)
+            ->assertSee('name="cobro"', false)
+            ->assertSee('111.11')
+            ->assertDontSee('222.22');
+    }
+
+    public function test_el_csv_coincide_con_los_totales_de_la_pantalla(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $mesero = $this->usuario('MESERO');
+
+        $venta = $this->montarVenta([
+            ['propina' => 137.37, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true],
+        ], $admin->id);
+        $this->comanda($venta['venta'], $mesero->id);
+
+        $filtros = ['desde' => '2026-10-18', 'hasta' => '2026-10-18'];
+
+        $this->actingAs($admin)->get(route('reportes.propinas', $filtros))
+            ->assertStatus(200)
+            ->assertSee('137.37');
+
+        $csv = $this->actingAs($admin)->get(route('reportes.propinas.csv', $filtros));
+
+        $csv->assertStatus(200)->assertHeader('Content-Type', 'text/csv; charset=UTF-8');
+
+        $contenido = $csv->streamedContent();
+
+        $this->assertStringStartsWith("\xEF\xBB\xBF", $contenido, 'El CSV debe empezar con BOM UTF-8.');
+
+        // fputcsv() puede envolver en comillas los campos que contienen
+        // espacios (cambia según la versión de PHP): se eliminan las comillas
+        // antes de comparar los VALUES, que es lo que debe coincidir.
+        $contenidoLimpio = str_replace('"', '', $contenido);
+
+        $this->assertStringContainsString('Propinas cobradas al cliente;137.37', $contenidoLimpio);
+        $this->assertStringContainsString('Atribuido a meseros;137.37', $contenidoLimpio);
+        $this->assertStringContainsString('Pendiente de atribución;0.00', $contenidoLimpio);
+        $this->assertStringContainsString('TOTAL COBRADO;137.37', $contenidoLimpio);
+        $this->assertStringContainsString('MESERO Test', $contenidoLimpio);
+    }
+
+    public function test_la_paginacion_del_detalle_no_altera_los_totales(): void
+    {
+        $admin = $this->usuario('ADMIN');
+
+        $cuentas = [];
+        for ($i = 0; $i < 55; $i++) {
+            $cuentas[] = ['propina' => 1.00, 'estado' => 'PAGADA', 'fecha' => '2026-10-18 20:00:00', 'factura' => true];
+        }
+        $this->montarVenta($cuentas, $admin->id);
+
+        $primera = $this->actingAs($admin)->get(route('reportes.propinas', [
+            'desde' => '2026-10-18', 'hasta' => '2026-10-18', 'pagina' => 1,
+        ]));
+
+        $primera->assertStatus(200);
+        $this->assertCount(50, $primera->viewData('paginaDetalle')->items(), 'La página 1 muestra 50 filas.');
+        $this->assertSame(55, $primera->viewData('paginaDetalle')->total(), 'El total del paginador es el conjunto completo.');
+        $primera->assertSee('C$ 55.00');
+
+        $segunda = $this->actingAs($admin)->get(route('reportes.propinas', [
+            'desde' => '2026-10-18', 'hasta' => '2026-10-18', 'pagina' => 2,
+        ]));
+
+        $segunda->assertStatus(200);
+        $this->assertCount(5, $segunda->viewData('paginaDetalle')->items(), 'La página 2 muestra las 5 restantes.');
+        $segunda->assertSee('C$ 55.00');
+
+        // El servicio (fuente de KPI y totales) sigue viendo las 55 cuentas.
+        $resumen = app(\App\Services\ResumenPropinasService::class)->resumenDelDia('2026-10-18');
+        $this->assertSame(55, $resumen['cantidad']);
+        $this->assertSame(55.0, $resumen['total']);
+    }
+
+    public function test_exportacion_e_impresion_solo_para_admin_y_gerente(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $gerente = $this->usuario('GERENTE');
+        $cajero = $this->usuario('CAJERO');
+        $mesero = $this->usuario('MESERO');
+        $cocinero = $this->usuario('COCINERO');
+
+        $filtros = ['desde' => '2026-10-18', 'hasta' => '2026-10-18'];
+
+        $this->actingAs($admin)->get(route('reportes.propinas.csv', $filtros))->assertStatus(200);
+        $this->actingAs($admin)->get(route('reportes.propinas.imprimir', $filtros))->assertStatus(200);
+        $this->actingAs($gerente)->get(route('reportes.propinas.csv', $filtros))->assertStatus(200);
+        $this->actingAs($gerente)->get(route('reportes.propinas.imprimir', $filtros))->assertStatus(200);
+
+        foreach ([$cajero, $mesero, $cocinero] as $usuario) {
+            $this->actingAs($usuario)->get(route('reportes.propinas.csv', $filtros))->assertStatus(403);
+            $this->actingAs($usuario)->get(route('reportes.propinas.imprimir', $filtros))->assertStatus(403);
+            $this->actingAs($usuario)->get(route('reportes.propinas', $filtros))->assertStatus(403);
+        }
     }
 }

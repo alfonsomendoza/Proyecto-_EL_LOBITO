@@ -112,5 +112,7 @@
             if (e.key === 'Enter') ejecutarLoginMilitar();
         });
     </script>
+
+    @include('partials.revalidar-pagina')
 </body>
 </html>

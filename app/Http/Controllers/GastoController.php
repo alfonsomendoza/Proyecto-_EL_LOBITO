@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Rules\NumeroEstricto;
 use App\Services\GastoService;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 
@@ -32,31 +33,21 @@ class GastoController extends Controller
             abort(403, 'No tienes permiso para acceder al módulo de gastos.');
         }
 
-        $apertura = $this->service->aperturaActiva();
-
-        // Filtro del listado: activos (por defecto), anulados o todos.
-        $filtro = $this->filtroEstado($request);
-
-        $todos = $apertura
-            ? $this->service->gastosDeApertura((int) $apertura->id)
-            : collect();
-
-        $gastos = $this->filtrarPorEstado($todos, $filtro);
-
-        // Los totales se calculan SIEMPRE sobre el turno completo: los anulados
-        // nunca se suman al total activo; se muestran aparte como informativos.
-        $totalActivos = $this->service->totalActivos($todos);
-        $totalAnulados = $this->service->totalAnulados($todos);
+        $listado = $this->listado($request);
         $puedeAnular = $this->puedeAnular();
 
-        return view('gastos.index', compact(
-            'apertura',
-            'gastos',
-            'totalActivos',
-            'totalAnulados',
-            'filtro',
-            'puedeAnular'
-        ));
+        return view('gastos.index', [
+            'apertura' => $listado['apertura'],
+            // Conjunto COMPLETO filtrado: de aquí salen los totales.
+            'gastos' => $listado['gastos'],
+            // Solo la página visible del listado (no altera los totales).
+            'paginaGastos' => $listado['paginaGastos'],
+            'totalActivos' => $listado['totalActivos'],
+            'totalAnulados' => $listado['totalAnulados'],
+            'filtro' => $listado['filtro'],
+            'puedeAnular' => $puedeAnular,
+            'rango' => $listado['rango'],
+        ]);
     }
 
     /* ------------------------------------------------------------------
@@ -135,28 +126,18 @@ class GastoController extends Controller
             abort(403, 'No tienes permiso para imprimir gastos.');
         }
 
-        $apertura = $this->service->aperturaActiva();
+        // El listado impreso usa el MISMO criterio que la pantalla:
+        // mismo rango de fechas, mismo filtro de estado, mismos totales.
+        $listado = $this->listado($request);
 
-        // El listado impreso usa el MISMO criterio de filtrado que la pantalla.
-        $filtro = $this->filtroEstado($request);
-
-        $todos = $apertura
-            ? $this->service->gastosDeApertura((int) $apertura->id)
-            : collect();
-
-        $gastos = $this->filtrarPorEstado($todos, $filtro);
-
-        // Totales sobre el turno completo, separados por estado.
-        $totalActivos = $this->service->totalActivos($todos);
-        $totalAnulados = $this->service->totalAnulados($todos);
-
-        return view('gastos.ticket', compact(
-            'apertura',
-            'gastos',
-            'totalActivos',
-            'totalAnulados',
-            'filtro'
-        ));
+        return view('gastos.ticket', [
+            'apertura' => $listado['apertura'],
+            'gastos' => $listado['gastos'],
+            'totalActivos' => $listado['totalActivos'],
+            'totalAnulados' => $listado['totalAnulados'],
+            'filtro' => $listado['filtro'],
+            'rango' => $listado['rango'],
+        ]);
     }
 
     /* ------------------------------------------------------------------
@@ -207,6 +188,149 @@ class GastoController extends Controller
             'todos' => $gastos->values(),
             default => $gastos->where('estado', 'ACTIVO')->values(),
         };
+    }
+
+    /* ------------------------------------------------------------------
+     | Listado compartido por la pantalla y el ticket
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Resuelve apertura + filtro de estado + rango de fechas y devuelve el
+     * conjunto completo filtrado (de ahí salen los totales) y su página
+     * visible. La pantalla y el ticket usan ESTE método, así nunca divergen.
+     *
+     * Sin fechas el módulo se comporta como siempre: gastos del turno activo.
+     * Con fechas consulta TODO el histórico dentro del rango (no requiere caja
+     * abierta).
+     *
+     * @return array{apertura: mixed, filtro: string, rango: array<string, mixed>, gastos: Collection, paginaGastos: LengthAwarePaginator, totalActivos: float, totalAnulados: float}
+     */
+    private function listado(Request $request): array
+    {
+        $apertura = $this->service->aperturaActiva();
+        $filtro = $this->filtroEstado($request);
+        $rango = $this->rangoSolicitado($request);
+
+        if (!$rango['valido']) {
+            // Fechas inválidas o rango invertido: NO se calcula nada (estado
+            // controlado, con el motivo en pantalla).
+            $todos = collect();
+        } elseif ($rango['filtrado']) {
+            $todos = $this->service->gastosEnRango($rango['desde'], $rango['hasta']);
+        } else {
+            $todos = $apertura
+                ? $this->service->gastosDeApertura((int) $apertura->id)
+                : collect();
+        }
+
+        $gastos = $this->filtrarPorEstado($todos, $filtro);
+
+        // Totales SIEMPRE sobre el conjunto completo filtrado por estado (no
+        // sobre la página visible). Los anulados nunca suman al total activo.
+        $totalActivos = $this->service->totalActivos($gastos);
+        $totalAnulados = $this->service->totalAnulados($gastos);
+
+        return [
+            'apertura' => $apertura,
+            'filtro' => $filtro,
+            'rango' => $rango,
+            'gastos' => $gastos,
+            'paginaGastos' => $this->paginar($gastos, $request),
+            'totalActivos' => $totalActivos,
+            'totalAnulados' => $totalAnulados,
+        ];
+    }
+
+    /**
+     * Pagina SOLO el listado visible (50 filas). Los totales no dependen de
+     * esta página: salen del conjunto completo. Conserva los parámetros
+     * (desde, hasta, estado) en los enlaces anterior/siguiente.
+     */
+    private function paginar(Collection $gastos, Request $request): LengthAwarePaginator
+    {
+        $porPagina = 50;
+        $total = $gastos->count();
+        $paginas = max(1, (int) ceil($total / $porPagina));
+        $pagina = min(max(1, $this->enteroPositivo($request->query('pagina')) ?? 1), $paginas);
+
+        return new LengthAwarePaginator(
+            $gastos->forPage($pagina, $porPagina)->values(),
+            $total,
+            $porPagina,
+            $pagina,
+            ['path' => route('gastos.index'), 'query' => $request->query()]
+        );
+    }
+
+    /**
+     * Rango consultado (Desde/Hasta, Y-m-d).
+     *
+     * Sin fechas se mantiene el comportamiento previo del módulo (turno activo).
+     * Si llega una sola fecha se completa con la otra (un solo día). Cualquier
+     * fecha inválida o rango invertido devuelve `valido = false` con el motivo,
+     * y NO se calcula el listado.
+     *
+     * @return array{valido: bool, filtrado: bool, desde: string, hasta: string, error: ?string}
+     */
+    private function rangoSolicitado(Request $request): array
+    {
+        $desde = trim((string) $request->query('desde', ''));
+        $hasta = trim((string) $request->query('hasta', ''));
+
+        if ($desde === '' && $hasta === '') {
+            return ['valido' => true, 'filtrado' => false, 'desde' => '', 'hasta' => '', 'error' => null];
+        }
+
+        if ($desde === '') {
+            $desde = $hasta;
+        }
+        if ($hasta === '') {
+            $hasta = $desde;
+        }
+
+        if (!$this->esFechaValida($desde) || !$this->esFechaValida($hasta)) {
+            return [
+                'valido' => false,
+                'filtrado' => true,
+                'desde' => $desde,
+                'hasta' => $hasta,
+                'error' => 'Las fechas indicadas no son válidas.',
+            ];
+        }
+
+        if ($desde > $hasta) {
+            return [
+                'valido' => false,
+                'filtrado' => true,
+                'desde' => $desde,
+                'hasta' => $hasta,
+                'error' => 'La fecha "Desde" no puede ser posterior a la fecha "Hasta".',
+            ];
+        }
+
+        return ['valido' => true, 'filtrado' => true, 'desde' => $desde, 'hasta' => $hasta, 'error' => null];
+    }
+
+    private function enteroPositivo(mixed $valor): ?int
+    {
+        if (!is_scalar($valor)) {
+            return null;
+        }
+
+        $valor = trim((string) $valor);
+
+        return (ctype_digit($valor) && (int) $valor > 0) ? (int) $valor : null;
+    }
+
+    private function esFechaValida(string $fecha): bool
+    {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
+            return false;
+        }
+
+        [$anio, $mes, $dia] = array_map('intval', explode('-', $fecha));
+
+        return checkdate($mes, $dia, $anio);
     }
 
     /* ------------------------------------------------------------------

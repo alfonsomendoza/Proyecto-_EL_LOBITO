@@ -102,6 +102,14 @@
                                         <i class="fas fa-edit"></i> Editar
                                     </button>
                                 @endif
+                                {{-- El cambio de rol es EXCLUSIVO de ADMIN. A los
+                                     demás roles no se les muestra el control; el
+                                     backend vuelve a validarlo. --}}
+                                @if ($rolAuth === 'ADMIN')
+                                    <button class="btn-cambiar-rol" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" data-rol-id="{{ $u->rol_id }}" style="background: transparent; color: #0f766e; border: 1px solid #0f766e; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 4px;">
+                                        <i class="fas fa-user-tag"></i> Cambiar rol
+                                    </button>
+                                @endif
                                 @if ($puedeCambiarPass)
                                     <button class="btn-reset-pass" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" style="background: transparent; color: #3f9ce8; border: 1px solid #3f9ce8; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 4px;">
                                         <i class="fas fa-key"></i> Cambiar contraseña
@@ -114,6 +122,11 @@
                                 @endif
                             @else
                                 <span style="font-size: 11px; color: #aaa; font-weight: bold;">Tu Sesión</span>
+                                @if (strtoupper(auth()->user()->rol->nombre ?? '') === 'ADMIN')
+                                <button class="btn-cambiar-rol" data-id="{{ $u->id }}" data-nombre="{{ $u->nombre }}" data-rol-id="{{ $u->rol_id }}" style="background: transparent; color: #0f766e; border: 1px solid #0f766e; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 4px;">
+                                    <i class="fas fa-user-tag"></i> Cambiar rol
+                                </button>
+                                @endif
                             @endif
                         </td>
                     </tr>
@@ -191,7 +204,7 @@
 </div>
 
 <script id="roles-json" type="application/json">
-    {!! json_encode($roles) !!}
+    @json($roles)
 </script>
 
 <script>
@@ -259,6 +272,15 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!btn) return;
 
         modalEditarUsuario(btn.getAttribute('data-id'), btn.getAttribute('data-nombre'), btn.getAttribute('data-username'));
+    });
+
+    // Cambiar rol: el control solo existe para ADMIN (Blade) y el backend
+    // vuelve a comprobar el rol del usuario autenticado.
+    document.body.addEventListener('click', function(e) {
+        let btn = e.target.closest('.btn-cambiar-rol');
+        if (!btn) return;
+
+        modalCambiarRol(btn.getAttribute('data-id'), btn.getAttribute('data-nombre'), btn.getAttribute('data-rol-id'));
     });
 });
 
@@ -491,6 +513,79 @@ function modalEditarUsuario(usuarioId, nombreUsuario, usernameUsuario) {
                 })
                 .catch(() => Swal.fire('Error', 'No se pudo conectar con el servidor.', 'error'));
         }
+    });
+}
+
+/*
+ * Modal Cambiar rol (EXCLUSIVO ADMIN).
+ *
+ * Solo se ofrecen los roles del catálogo oficial del sistema. El backend
+ * vuelve a validar el rol, el usuario y que no se quite el último ADMIN
+ * activo. Este control únicamente envía `accion=cambiar_rol`; no modifica
+ * contraseña, datos personales, estado, 2FA, sesiones ni dispositivos.
+ */
+function modalCambiarRol(usuarioId, nombreUsuario, rolActualId) {
+    const permitidos = ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO', 'COCINERO'];
+    const roles = JSON.parse(document.getElementById('roles-json').textContent)
+        .filter(r => permitidos.includes(String(r.nombre).toUpperCase()));
+
+    let opciones = '';
+    roles.forEach(r => {
+        const seleccionado = String(Number(r.id)) === String(Number(rolActualId)) ? ' selected' : '';
+        opciones += `<option value="${Number(r.id)}"${seleccionado}>${escaparHtml(r.nombre)}</option>`;
+    });
+
+    Swal.fire({
+        title: 'Cambiar rol del usuario',
+        html: `
+            <div style="text-align: left; font-size: 13px; padding: 6px 0;">
+                <p style="margin: 0 0 10px; color: #6c757d; font-size: 12px;">
+                    Usuario: <strong id="rol-usuario-nombre"></strong>
+                </p>
+                <label style="font-weight:bold; display:block; margin-bottom: 5px;">Rol de Sistema:</label>
+                <select id="rol-nuevo" class="swal2-input" style="width:100%; margin:0; height:38px; box-sizing:border-box;">${opciones}</select>
+                <p style="margin: 10px 0 0; color: #6c757d; font-size: 11px;">
+                    Solo se cambia el rol. No se modifican contraseña, datos personales, estado, 2FA, sesiones ni dispositivos.
+                </p>
+            </div>
+        `,
+        focusConfirm: false,
+        showCancelButton: true,
+        confirmButtonColor: '#0f766e',
+        confirmButtonText: 'Guardar rol',
+        cancelButtonText: 'Cancelar',
+        didOpen: () => {
+            const nombre = document.getElementById('rol-usuario-nombre');
+            if (nombre) nombre.textContent = nombreUsuario || '';
+        },
+        preConfirm: () => {
+            const rolId = document.getElementById('rol-nuevo').value;
+            if (!rolId) {
+                return Swal.showValidationMessage('Seleccione un rol.');
+            }
+            return { rol_id: rolId };
+        }
+    }).then((result) => {
+        if (!result.isConfirmed || !result.value) {
+            return;
+        }
+
+        const fd = new FormData();
+        fd.append('_token', '{{ csrf_token() }}');
+        fd.append('accion', 'cambiar_rol');
+        fd.append('usuario_id', usuarioId);
+        fd.append('rol_id', result.value.rol_id);
+
+        fetch('{{ route("usuarios.api") }}', { method: 'POST', body: fd })
+            .then(r => r.json())
+            .then(d => {
+                if (d.exito) {
+                    Swal.fire('¡Listo!', d.mensaje || 'Rol actualizado correctamente.', 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Error', d.error || 'No se pudo cambiar el rol.', 'error');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'No se pudo conectar con el servidor.', 'error'));
     });
 }
 

@@ -7,9 +7,48 @@
     <link rel="stylesheet" href="{{ asset('style.css') }}">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+<script>
+(function () {
+    const originalFetch = window.fetch;
+    window.fetch = function (input, init) {
+        init = init || {};
+        init.headers = init.headers || {};
+        if (typeof Headers !== 'undefined' && init.headers instanceof Headers) {
+            if (!init.headers.has('Accept')) init.headers.set('Accept', 'application/json');
+            init.headers.set('X-Requested-With', 'XMLHttpRequest');
+        } else {
+            if (!init.headers['Accept'] && !init.headers['accept']) init.headers['Accept'] = 'application/json';
+            init.headers['X-Requested-With'] = 'XMLHttpRequest';
+        }
+        return originalFetch(input, init).then(async function (response) {
+            if (response.status === 422) {
+                let data = null;
+                try { data = await response.clone().json(); } catch (e) { data = null; }
+                if (data && typeof data.error === 'string' && /caja cerrada|apertura de caja vigente/i.test(data.error)) {
+                    Swal.fire('CAJA CERRADA', 'No existe una apertura de caja vigente. Todas las operaciones están bloqueadas. Debe abrir la caja para continuar.', 'warning');
+                    throw new Error('CAJA_CERRADA');
+                }
+            }
+            return response;
+        });
+    };
+})();
+</script>
     <script src="{{ asset('script.js') }}?v={{ filemtime(public_path('script.js')) }}"></script>
 </head>
 <body>
+@if (session('caja_cerrada'))
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    Swal.fire({
+        icon: 'warning',
+        title: 'CAJA CERRADA',
+        text: @json(session('caja_cerrada')),
+        confirmButtonText: 'Entendido'
+    });
+});
+</script>
+@endif
     @php
         $rol = auth()->user()->rol->nombre ?? 'MESERO';
 
@@ -116,6 +155,13 @@
                     </a>
                 </li>
                 @endif
+                @if (in_array($rol, ['ADMIN', 'GERENTE']))
+                <li>
+                    <a href="{{ route('admin.2fa.index') }}" class="{{ request()->routeIs('admin.2fa.*') ? 'active' : '' }}">
+                        <i class="fas fa-shield-alt"></i> Seguridad 2FA
+                    </a>
+                </li>
+                @endif
             @endif
 
             @if (in_array($rol, ['ADMIN', 'GERENTE']))
@@ -142,6 +188,13 @@
                         <i class="fas fa-database"></i> Copias de Seguridad
                     </a>
                 </li>
+                @if (in_array($rol, ['ADMIN', 'GERENTE']))
+                <li>
+                    <a href="{{ route('configuracion.fiscal.index') }}" class="{{ request()->routeIs('configuracion.fiscal.*') ? 'active' : '' }}">
+                        <i class="fas fa-file-invoice-dollar"></i> Configuración fiscal y comercial
+                    </a>
+                </li>
+                @endif
                 @if ($rol === 'ADMIN')
                 <li>
                     <a href="{{ route('roles.index') }}" class="{{ request()->routeIs('roles.index') ? 'active' : '' }}">
@@ -191,5 +244,6 @@
 
 
 
+    @include('partials.revalidar-pagina')
 </body>
 </html>

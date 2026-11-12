@@ -427,6 +427,78 @@ class ResumenDiarioModuleTest extends TestCase
     }
 
     /* ------------------------------------------------------------------
+     | 3b. Cajas: quién abrió/cerró, fechas, totales y diferencia
+     | ------------------------------------------------------------------ */
+
+    public function test_muestra_quien_abrio_y_quien_cerro_la_caja_y_la_diferencia(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        $hoy = $this->fechaHoy();
+
+        $aperturaId = DB::table('caja_apertura')->insertGetId([
+            'fecha' => $hoy.' 08:00:00',
+            'cajero' => 'Texto heredado de apertura',
+            'turno' => 'Mañana',
+            'caja_id' => 1,
+            'monto_inicial' => 500,
+            'conteo_json' => null,
+            'estado' => 'CERRADA',
+            'creado_en' => now()->subHours(6)->format('Y-m-d H:i:s'),
+            'usuario_id' => $admin->id,
+        ]);
+
+        // Venta de 300 en efectivo dentro del turno.
+        $this->cuenta(300, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $aperturaId);
+
+        DB::table('caja_cierre')->insert([
+            'apertura_id' => $aperturaId,
+            'fecha' => now()->subHour()->format('Y-m-d H:i:s'),
+            'cajero' => 'Texto heredado de cierre',
+            'turno' => 'Mañana',
+            'caja_id' => 1,
+            'monto_apertura' => 500,
+            'ventas_efectivo' => 300,
+            'otros_ingresos' => 0,
+            'egresos' => 0,
+            'retiros' => 0,
+            'total_esperado' => 800,
+            'tasa_cambio' => 36.5,
+            'monto_extranjero' => 0,
+            'total_contado' => 780,
+            'diferencia' => -20,
+            'estado' => 'DESCUADRE',
+            'conteo_json' => null,
+            'observaciones' => null,
+            'creado_en' => now(),
+            'usuario_id' => $cajero->id,
+        ]);
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($hoy);
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame('ADMIN Test', $r['turnos'][0]['abrio'], 'Se prefiere caja_apertura.usuario_id, no el texto cajero.');
+        $this->assertSame('CAJERO Test', $r['turnos'][0]['cerro'], 'Se prefiere caja_cierre.usuario_id.');
+        $this->assertNotNull($r['turnos'][0]['fecha_apertura']);
+        $this->assertNotNull($r['turnos'][0]['fecha_cierre']);
+        $this->assertEqualsWithDelta(300.0, $r['turnos'][0]['total_ventas'], 0.001);
+        $this->assertEqualsWithDelta(-20.0, $r['turnos'][0]['diferencia'], 0.001);
+        $this->assertSame(1, $r['cantidad_cierres']);
+        $this->assertEqualsWithDelta(-20.0, $r['diferencia_caja'], 0.001);
+        // El esquema mínimo de esta prueba no tiene propinas: no se inventan.
+        $this->assertFalse($r['propinas']['disponible']);
+
+        // Y la interfaz muestra los nombres y la diferencia.
+        $this->actingAs($admin)
+            ->get(route('reportes.resumen', ['fecha' => $hoy]))
+            ->assertStatus(200)
+            ->assertSee('ADMIN Test')
+            ->assertSee('CAJERO Test')
+            ->assertSee('Diferencia de caja acumulada')
+            ->assertSee('Total ventas');
+    }
+
+    /* ------------------------------------------------------------------
      | 4. Ticket y solo lectura
      | ------------------------------------------------------------------ */
 

@@ -268,7 +268,7 @@
 </div>
 
 <script id="categorias-json" type="application/json">
-    {!! $categorias->toJson() !!}
+    @json($categorias)
 </script>
 
 <script>

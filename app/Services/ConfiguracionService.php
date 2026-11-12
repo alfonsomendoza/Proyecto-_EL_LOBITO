@@ -106,4 +106,38 @@ class ConfiguracionService
             'updated_at' => now(),
         ]);
     }
+
+    // ------------------------------------------------------------------
+    // Controles fiscales (estructura preparada; cálculo pendiente de reglas)
+    // ------------------------------------------------------------------
+    public const CLAVE_IVA = 'iva_habilitado';
+    public const CLAVE_RETENCION_DGI = 'retencion_dgi_habilitada';
+    public const CLAVE_RETENCION_ALCALDIA = 'retencion_alcaldia_habilitada';
+    public const CLAVE_DESCUENTO_FISCAL = 'descuento_fiscal_habilitado';
+    public const CLAVE_PROPINA_FISCAL = 'propina_fiscal_habilitada';
+
+    public function ivaHabilitado(): bool
+    {
+        return $this->obtenerBooleano(self::CLAVE_IVA, false);
+    }
+
+    public function retencionDgiHabilitada(): bool
+    {
+        return $this->obtenerBooleano(self::CLAVE_RETENCION_DGI, false);
+    }
+
+    public function retencionAlcaldiaHabilitada(): bool
+    {
+        return $this->obtenerBooleano(self::CLAVE_RETENCION_ALCALDIA, false);
+    }
+
+    public function descuentoFiscalHabilitado(): bool
+    {
+        return $this->obtenerBooleano(self::CLAVE_DESCUENTO_FISCAL, true);
+    }
+
+    public function propinaFiscalHabilitada(): bool
+    {
+        return $this->obtenerBooleano(self::CLAVE_PROPINA_FISCAL, true);
+    }
 }

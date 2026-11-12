@@ -20,8 +20,8 @@ use Tests\TestCase;
  */
 class SesionUnicaTest extends TestCase
 {
-    private const MENSAJE_SEGUNDO_EQUIPO = 'Este usuario ya tiene una sesión abierta en otro equipo. '
-        . 'Ciérrala o pide al administrador que la libere.';
+    private const MENSAJE_SEGUNDO_EQUIPO = 'Este usuario ya tiene una sesión activa en otro equipo. '
+        . 'Primero cierra esa sesión para poder entrar.';
 
     protected function setUp(): void
     {
@@ -314,10 +314,10 @@ class SesionUnicaTest extends TestCase
     }
 
     /* ==================================================================
-     | Caso 7: vencimiento por 15 minutos de inactividad
+     | Caso 7: vencimiento por inactividad (sesión abandonada)
      | ================================================================== */
 
-    public function test_tras_15_minutos_sin_actividad_otro_equipo_puede_reclamar_la_sesion(): void
+    public function test_pasada_la_ventana_de_inactividad_otro_equipo_puede_reclamar_la_sesion(): void
     {
         $usuario = $this->usuario('CAJERO', 'cajero_siete');
 
@@ -325,7 +325,8 @@ class SesionUnicaTest extends TestCase
         $cookieVieja = $this->cookieDe($login);
         $sesionVieja = $this->sesionRegistrada($usuario->id);
 
-        // 16 minutos sin actividad: la sesión se considera vencida.
+        // Muy por encima de la ventana de inactividad configurada: la sesión
+        // se considera abandonada y puede ser reclamada por otro equipo.
         DB::table('usuarios')->where('id', $usuario->id)->update([
             'ultima_actividad' => now()->subMinutes(16),
         ]);
@@ -493,7 +494,8 @@ class SesionUnicaTest extends TestCase
         $this->get(route('inicio'))->assertRedirect(route('login'));
 
         // El registro de sesión quedó libre: el usuario puede entrar DE
-        // INMEDIATO con la contraseña nueva (no queda bloqueado 15 minutos).
+        // INMEDIATO con la contraseña nueva (no queda bloqueado por la ventana
+        // de inactividad de la sesión única).
         $this->assertNull($this->sesionRegistrada($usuario->id));
 
         $this->nuevoDispositivo();

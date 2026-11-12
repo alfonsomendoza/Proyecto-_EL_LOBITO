@@ -192,6 +192,7 @@ class VentaController extends Controller
             ->get([
                 'f.venta_id',
                 'f.numero_factura',
+                'f.estado as factura_estado',
                 'f.cuenta_id',
                 'f.total',
                 'c.nombre as cuenta_nombre',
@@ -864,6 +865,15 @@ class VentaController extends Controller
             // 13. ENVIAR INFORMACIÓN AL BLADE
             // ----------------------------------------------------
 
+            $configFiscal = app(\App\Services\ConfiguracionService::class);
+            $sujetoRetencion = false;
+            if (\Illuminate\Support\Facades\Schema::hasColumn('clientes', 'sujeto_retenciones')) {
+                $clienteId = $cuentaActual ? ($cuentaActual->cliente_id ?? $venta->cliente_id) : $venta->cliente_id;
+                if ($clienteId) {
+                    $sujetoRetencion = (bool) DB::table('clientes')->where('id', $clienteId)->value('sujeto_retenciones');
+                }
+            }
+
             return view('ventas.pos', [
 
                 // Mesa actual.
@@ -902,6 +912,14 @@ class VentaController extends Controller
 
                 // Total.
                 'total' => $total,
+
+                // Fiscal.
+                'ivaHabilitado' => $configFiscal->ivaHabilitado(),
+                'retencionDgiHabilitada' => $configFiscal->retencionDgiHabilitada(),
+                'retencionAlcaldiaHabilitada' => $configFiscal->retencionAlcaldiaHabilitada(),
+                'descuentoFiscalHabilitado' => $configFiscal->descuentoFiscalHabilitado(),
+                'propinaFiscalHabilitada' => $configFiscal->propinaFiscalHabilitada(),
+                'sujetoRetencion' => $sujetoRetencion,
 
                 // Solo ADMIN y GERENTE pueden anular productos.
                 // El botón se oculta a los demás, pero la autorización real
@@ -1159,7 +1177,7 @@ class VentaController extends Controller
                 $comandaId = null;
                 if ($hayCocina) {
                     $ultimoTicket = (int) (DB::table('comandas')->where('venta_id', $venta->id)->max('numero_ticket') ?? 0);
-                    $comandaId = DB::table('comandas')->insertGetId(['mesa_id' => $venta->mesa_id, 'venta_id' => $venta->id, 'numero_ticket' => $ultimoTicket + 1, 'usuario_id' => Auth::id(), 'cliente_id' => $venta->cliente_id, 'descripcion' => null, 'estado' => 'ABIERTA', 'total' => 0, 'creado_en' => now(), 'conteo_impresiones' => 0]);
+                    $comandaId = DB::table('comandas')->insertGetId(['mesa_id' => $venta->mesa_id, 'venta_id' => $venta->id, 'numero_ticket' => $ultimoTicket + 1, 'usuario_id' => Auth::id(), 'cliente_id' => ($cuenta->cliente_id ?? $venta->cliente_id), 'descripcion' => null, 'estado' => 'ABIERTA', 'total' => 0, 'creado_en' => now(), 'conteo_impresiones' => 0]);
                 }
 
                 foreach ($items as $it) {
@@ -2165,6 +2183,22 @@ class VentaController extends Controller
             }
         });
 
+        // Desglose fiscal por subcuenta (IVA y retenciones si aplican).
+        $fiscalService = app(\App\Services\FiscalService::class);
+        $clientesSujetos = [];
+        if (\Illuminate\Support\Facades\Schema::hasColumn('clientes', 'sujeto_retenciones')) {
+            $clientesSujetos = DB::table('clientes')->pluck('sujeto_retenciones', 'id')->toArray();
+        }
+        $cuentas->each(function ($cuenta) use ($venta, $fiscalService, $clientesSujetos) {
+            $consumo = (float) ($cuenta->total ?? 0);
+            $clienteId = $cuenta->cliente_id ?: $venta->cliente_id;
+            $sujeto = false;
+            if ($clienteId && isset($clientesSujetos[$clienteId])) {
+                $sujeto = (bool) $clientesSujetos[$clienteId];
+            }
+            $cuenta->fiscal = (object) $fiscalService->calcular($consumo, 0, 0, $sujeto);
+        });
+
         // -----------------------------------------------------------------
         // REGLA: la cuenta principal VACÍA deja de aparecer como activa.
         // -----------------------------------------------------------------
@@ -2265,6 +2299,9 @@ class VentaController extends Controller
             && !$hayAsignacionesPendientes
             && !$hayCuentasConSaldo;
 
+        $clientesMap = DB::table('clientes')->pluck('nombre', 'id')->toArray();
+        $clientes = DB::table('clientes')->where('activo', 1)->orderBy('nombre')->get();
+
         return view('mesas.cuentas', [
             'mesa' => $mesa,
             'venta' => $venta,
@@ -2273,6 +2310,12 @@ class VentaController extends Controller
             'puedeCrear' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO'], true),
             // Dividir/reasignar conserva los permisos actuales.
             'puedeDividir' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            // Cambiar cliente de una cuenta ABIERTA.
+            'puedeCambiarCliente' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            // Mapa id => nombre de clientes para la vista.
+            'clientesMap' => $clientesMap,
+            // Lista de clientes activos para el selector visible.
+            'clientes' => $clientes,
             // Traslado de mesa completa entre mesas (Fase 6).
             'puedeTrasladar' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
             'mesasDestino' => $mesasDestino,
@@ -3708,6 +3751,10 @@ class VentaController extends Controller
             'descuento_motivo' => ['nullable', 'string', 'max:255'],
             'propina' => ['nullable', 'numeric', new NumeroEstricto(2), 'min:0', 'max:9999999999.99'],
             'propina_porcentaje' => ['nullable', 'numeric', new NumeroEstricto(2, true), 'min:0'],
+            // Modalidad de división del cobro: AUTOMATICA (partes iguales) o
+            // MANUAL (importe por método). Si no llega, se conserva el cobro
+            // normal de una o varias líneas con cambio.
+            'modo_division' => ['nullable', 'string', 'in:AUTOMATICA,MANUAL'],
         ], [
             // Límites según las columnas reales: DECIMAL(10,2) para
             // ventas.monto_recibido y DECIMAL(12,2)/(10,4) para pagos y ajustes.
@@ -3727,15 +3774,31 @@ class VentaController extends Controller
         // El ajuste llega como IMPORTE o como PORCENTAJE; `ajustesDesdePeticion`
         // lo normaliza a importes en el SERVIDOR (misma fórmula que la
         // prefactura), así el navegador nunca fija el total a cobrar.
+        // $puedeExcepcionFiscal se define aquí para usarse también dentro
+        // de la transacción (excepciones de IVA/DGI/Alcaldía).
+        $puedeExcepcionFiscal = in_array($rol, ['ADMIN', 'GERENTE'], true);
+
         $consumoAjuste = (float) DB::table('cuenta_detalles')
             ->where('cuenta_id', $cuentaId)
             ->where('eliminado', false)
             ->sum('subtotal');
 
         try {
-            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumoAjuste);
+            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumoAjuste, $puedeExcepcionFiscal);
         } catch (\InvalidArgumentException $e) {
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+
+        // Respetar el estado ACTIVAR/DESACTIVAR de cada concepto enviado desde
+        // el frontend. Si el usuario desactivó descuento o propina en el modal,
+        // se fuerza a cero aunque el navegador haya enviado un importe.
+        $descuentoActivo = $request->boolean('descuento_activo', true);
+        $propinaActiva = $request->boolean('propina_activo', true);
+        if (!$descuentoActivo) {
+            $descuento = 0.0;
+        }
+        if (!$propinaActiva) {
+            $propina = 0.0;
         }
 
         $motivo = trim((string) ($request->input('descuento_motivo') ?? ''));
@@ -3749,7 +3812,7 @@ class VentaController extends Controller
         }
 
         try {
-            $resultado = DB::transaction(function () use ($request, $cuentaId, $usuario, $descuento, $propina, $motivo) {
+            $resultado = DB::transaction(function () use ($request, $cuentaId, $usuario, $descuento, $propina, $motivo, $puedeExcepcionFiscal) {
                 // Lectura de navegación sin bloqueo: solo para conocer la venta.
                 $cuentaNav = DB::table('cuentas')->where('id', $cuentaId)->first();
                 if (!$cuentaNav) throw new \RuntimeException('La cuenta no existe.');
@@ -3766,6 +3829,33 @@ class VentaController extends Controller
                 // aquí, en el servidor, antes de tocar pagos o facturas.
                 if (!in_array($venta->estado, ['ACTIVA', 'ABIERTA'], true)) {
                     throw new \RuntimeException('La venta ya está cerrada; la cuenta no se puede cobrar.');
+                }
+
+                // ----------------------------------------------------
+                // TURNO DE CAJA DEL COBRO (atribución real, no temporal)
+                // ----------------------------------------------------
+                // Se bloquea el mutex de caja y la apertura ABIERTA dentro
+                // de la MISMA transacción del cobro. Así el cobro no puede
+                // "colarse" entre el arqueo y el cierre, y la cuenta queda
+                // vinculada a la apertura que realmente estaba abierta.
+                if (Schema::hasTable('caja_bloqueo')) {
+                    DB::table('caja_bloqueo')->where('id', 1)->lockForUpdate()->get();
+                }
+
+                $aperturaId = null;
+
+                if (Schema::hasTable('caja_apertura')) {
+                    $apertura = DB::table('caja_apertura')
+                        ->where('estado', 'ABIERTA')
+                        ->orderByDesc('id')
+                        ->lockForUpdate()
+                        ->first();
+
+                    if (!$apertura) {
+                        throw new \RuntimeException('No hay una caja abierta. Abra la caja antes de registrar cobros.');
+                    }
+
+                    $aperturaId = (int) $apertura->id;
                 }
 
                 $cuentas = DB::table('cuentas')
@@ -3798,7 +3888,99 @@ class VentaController extends Controller
                 // (consumo − descuento). Nunca se calcula sobre sí misma ni
                 // se aplica dos veces: aquí se fija UNA vez por cobro.
                 $base = round($consumo - $descuento, 2);
-                $totalCobrar = round($base + $propina, 2);
+
+                // Sujeto a retenciones según clasificación del cliente (si existe).
+                $sujetoRetencion = false;
+                if (\Illuminate\Support\Facades\Schema::hasColumn('clientes', 'sujeto_retenciones')) {
+                    $clienteId = (int) ($cuenta->cliente_id ?? $venta->cliente_id ?? 0);
+                    if ($clienteId <= 0) { $clienteId = (int) ($venta->cliente_id ?? 0); }
+                    if ($clienteId > 0) {
+                        $sujetoRetencion = (bool) DB::table('clientes')->where('id', $clienteId)->value('sujeto_retenciones');
+                    }
+                }
+
+                $configFiscal = app(\App\Services\ConfiguracionService::class);
+                // ----------------------------------------------------
+                // CONTROLES FISCALES POR FACTURA (excepciones ADMIN/GERENTE)
+                // ----------------------------------------------------
+                // Solo ADMIN y GERENTE pueden anular la configuración global
+                // para una factura concreta (excepción por operación). CAJERO
+                // siempre usa la configuración global sin excepciones.
+                // El backend verifica el rol; no se confía en JavaScript.
+                // $puedeExcepcionFiscal ya se definió antes de la transacción.
+                // ----------------------------------------------------
+                $ivaGlobal = $configFiscal->ivaHabilitado();
+                $retDgiGlobal = $configFiscal->retencionDgiHabilitada();
+                $retAlcGlobal = $configFiscal->retencionAlcaldiaHabilitada();
+
+                // ¿El cliente envió overrides para esta factura?
+                $ivaEnviado = $request->filled('iva_habilitado');
+                $retDgiEnviado = $request->filled('retencion_dgi_habilitada');
+                $retAlcEnviado = $request->filled('retencion_alcaldia_habilitada');
+
+                $ivaValorEnviado = $ivaEnviado ? $request->boolean('iva_habilitado') : null;
+                $retDgiValorEnviado = $retDgiEnviado ? $request->boolean('retencion_dgi_habilitada') : null;
+                $retAlcValorEnviado = $retAlcEnviado ? $request->boolean('retencion_alcaldia_habilitada') : null;
+
+                // CAJERO no puede enviar excepciones: se ignora lo que envíe
+                // el navegador y se usa la configuración global.
+                if (!$puedeExcepcionFiscal) {
+                    $ivaValorEnviado = null;
+                    $retDgiValorEnviado = null;
+                    $retAlcValorEnviado = null;
+                }
+
+                // Toggle efectivo por concepto: override de ADMIN/GERENTE o
+                // configuración global. DGI/Alcaldía requieren sujeto_retenciones.
+                $ivaEfectivo = $ivaValorEnviado ?? $ivaGlobal;
+                $retDgiEfectivo = ($retDgiValorEnviado ?? $retDgiGlobal) && $sujetoRetencion;
+                $retAlcEfectivo = ($retAlcValorEnviado ?? $retAlcGlobal) && $sujetoRetencion;
+
+                // Auditar excepciones: concepto desactivado respecto al global.
+                $excepcionesAuditar = [];
+                if ($ivaEnviado && $puedeExcepcionFiscal && $ivaValorEnviado !== $ivaGlobal) {
+                    $excepcionesAuditar[] = [
+                        'concepto' => 'iva',
+                        'estado_anterior' => $ivaGlobal,
+                        'estado_nuevo' => $ivaValorEnviado,
+                    ];
+                }
+                if ($retDgiEnviado && $puedeExcepcionFiscal && $retDgiValorEnviado !== $retDgiGlobal) {
+                    $excepcionesAuditar[] = [
+                        'concepto' => 'retencion_dgi',
+                        'estado_anterior' => $retDgiGlobal,
+                        'estado_nuevo' => $retDgiValorEnviado,
+                    ];
+                }
+                if ($retAlcEnviado && $puedeExcepcionFiscal && $retAlcValorEnviado !== $retAlcGlobal) {
+                    $excepcionesAuditar[] = [
+                        'concepto' => 'retencion_alcaldia',
+                        'estado_anterior' => $retAlcGlobal,
+                        'estado_nuevo' => $retAlcValorEnviado,
+                    ];
+                }
+
+                $fiscal = app(\App\Services\FiscalService::class)->calcular(
+                    $consumo,
+                    $descuento,
+                    $propina,
+                    $sujetoRetencion,
+                    $ivaEfectivo,
+                    $retDgiEfectivo,
+                    $retAlcEfectivo
+                );
+                $totalCobrar = $fiscal['neto'];
+
+                // Guardar excepciones para auditoría y para el desglose de la
+                // factura. Se auditan dentro de la transacción (después de
+                // saber que el cobro tuvo éxito).
+                $excepcionesParaAuditar = $excepcionesAuditar;
+                $ajustesExcepciones = [
+                    'iva_habilitado' => $ivaEfectivo,
+                    'retencion_dgi_habilitada' => $retDgiEfectivo,
+                    'retencion_alcaldia_habilitada' => $retAlcEfectivo,
+                    'excepciones_fiscales' => $excepcionesAuditar,
+                ];
 
                 // ----------------------------------------------------
                 // LÍNEAS DE PAGO (importes en córdobas calculados en
@@ -3833,6 +4015,48 @@ class VentaController extends Controller
                     throw new \RuntimeException('El total de los pagos (C$ '.number_format($suma, 2).') no cubre el total a cobrar (C$ '.number_format($totalCobrar, 2).').');
                 }
 
+                // ----------------------------------------------------
+                // DIVISIÓN DE PAGOS (automática o manual).
+                // La división es una herramienta de distribución: el total a
+                // cobrar NO cambia. El backend exige que la suma de las líneas
+                // coincida EXACTAMENTE con el total (al centavo) y que existan
+                // al menos dos líneas. En automática, además, las partes deben
+                // ser iguales salvo el centavo de redondeo.
+                // ----------------------------------------------------
+                $modoDivision = strtoupper(trim((string) $request->input('modo_division', '')));
+
+                if ($modoDivision !== '') {
+                    if (count($lineas) < 2) {
+                        throw new \RuntimeException('La división de pagos requiere al menos dos formas de pago.');
+                    }
+
+                    $centavosTotal = (int) round($totalCobrar * 100);
+                    $centavosSuma = (int) round($suma * 100);
+
+                    if ($centavosSuma !== $centavosTotal) {
+                        $diferencia = ($centavosSuma - $centavosTotal) / 100;
+
+                        throw new \RuntimeException(
+                            'La división de pagos debe coincidir exactamente con el total a cobrar (C$ '.number_format($totalCobrar, 2).'): '
+                            .($diferencia > 0
+                                ? 'sobran C$ '.number_format($diferencia, 2)
+                                : 'faltan C$ '.number_format(abs($diferencia), 2))
+                            .'.'
+                        );
+                    }
+
+                    if ($modoDivision === 'AUTOMATICA') {
+                        $montosCentavos = array_map(
+                            fn ($linea) => (int) round((float) $linea['monto_cordobas'] * 100),
+                            $lineas
+                        );
+
+                        if ((max($montosCentavos) - min($montosCentavos)) > 1) {
+                            throw new \RuntimeException('La división automática debe repartir el total en partes iguales (solo se admite 1 centavo de diferencia por redondeo).');
+                        }
+                    }
+                }
+
                 // Cambio entregado en efectivo; por construcción >= 0.
                 $cambio = round($suma - $totalCobrar, 2);
 
@@ -3843,6 +4067,13 @@ class VentaController extends Controller
                 // mensaje claro).
                 // ----------------------------------------------------
                 $claves = array_values(array_filter(array_map(fn ($l) => $l['clave_operacion'], $lineas)));
+
+                // Rechaza claves repetidas DENTRO de la misma solicitud (no
+                // solo las ya guardadas): evitaduplicar líneas por un error
+                // del navegador antes de llegar al índice UNIQUE.
+                if (count($claves) !== count(array_unique($claves))) {
+                    throw new \RuntimeException('La solicitud contiene líneas de pago repetidas; vuelva a cargar la cuenta e inténtelo de nuevo.');
+                }
 
                 if ($claves !== [] && DB::table('pagos_cuenta')->whereIn('clave_operacion', $claves)->exists()) {
                     throw new \RuntimeException('Una línea de pago ya estaba registrada con esa clave (reintento detectado). Vuelve a cargar la cuenta.');
@@ -3880,6 +4111,13 @@ class VentaController extends Controller
                         $pagoInsert['numero_transferencia'] = $linea['numero_transferencia'];
                     }
 
+                    // Estado de la línea: ACTIVO al cobrar. La anulación lo
+                    // cambia a REVERSADO sin borrar la fila (migración
+                    // 2026_11_11_000001).
+                    if (Schema::hasColumn('pagos_cuenta', 'estado')) {
+                        $pagoInsert['estado'] = 'ACTIVO';
+                    }
+
                     DB::table('pagos_cuenta')->insert($pagoInsert);
                 }
 
@@ -3901,7 +4139,19 @@ class VentaController extends Controller
                     'cambio' => $cambio,
                     'usuario_cobro' => (int) $usuario->id,
                     'updated_at' => now(),
+                    // Atribución REAL del cobro al turno abierto. No se
+                    // confía en un id enviado por el navegador.
+                    'apertura_id' => $aperturaId ?? $cuenta->apertura_id,
                 ]);
+
+                // La venta hereda el turno del cobro SOLO si aún no tenía
+                // uno: nunca se pisa la atribución de una venta anterior.
+                if ($aperturaId !== null && empty($venta->apertura_id)) {
+                    DB::table('ventas')
+                        ->where('id', $venta->id)
+                        ->whereNull('apertura_id')
+                        ->update(['apertura_id' => $aperturaId]);
+                }
 
                 // Una cuenta vacía no debe impedir el cierre: solo importan
                 // las cuentas abiertas que todavía tienen consumo pendiente.
@@ -3933,17 +4183,59 @@ class VentaController extends Controller
                 // (consumo − descuento + propina) y los ajustes quedan en el
                 // detalle JSON del comprobante.
                 $factura = app(FacturaService::class)
-                    ->emitirPorCobro($cuenta, $venta, $totalCobrar, (int) $usuario->id, [
+                    ->emitirPorCobro($cuenta, $venta, $totalCobrar, (int) $usuario->id, array_merge([
                         'consumo' => $consumo,
                         'descuento' => $descuento,
                         'base' => $base,
                         'propina' => $propina,
+                        'iva' => $fiscal['iva'],
+                        'retencion_dgi' => $fiscal['retencion_dgi'],
+                        'retencion_alcaldia' => $fiscal['retencion_alcaldia'],
+                        'total_retenciones' => $fiscal['total_retenciones'],
+                        'total_factura' => $fiscal['total_factura'],
+                        'neto' => $fiscal['neto'],
                         'total' => $totalCobrar,
                         // Detalle de pagos (incluye número de transferencia)
                         // para que la factura y su ticket conserven el
                         // desglose individual de cada línea de pago.
                         'pagos' => $lineas,
-                    ]);
+                        // Modalidad de división usada en el cobro (null si fue
+                        // un cobro normal). Queda en el detalle de la factura.
+                        'modo_division' => $modoDivision !== '' ? $modoDivision : null,
+                    ], $ajustesExcepciones));
+
+                // Vínculo línea de pago ↔ factura. Se hace DESPUÉS de emitir
+                // porque el id de la factura aún no existía al insertar los
+                // pagos. Solo se tocan las claves recién creadas: nunca se
+                // reescribe una línea histórica ni una ya reversada.
+                if (Schema::hasColumn('pagos_cuenta', 'factura_id') && $claves !== []) {
+                    DB::table('pagos_cuenta')
+                        ->whereIn('clave_operacion', $claves)
+                        ->whereNull('factura_id')
+                        ->update(['factura_id' => (int) $factura->id]);
+                }
+
+                // Auditoría de excepciones fiscales por factura (dentro de
+                // la transacción: si se revierte el cobro, se revierte la
+                // auditoría también).
+                foreach ($excepcionesParaAuditar as $excepcion) {
+                    app(\App\Services\AuditService::class)->log(
+                        'excepcion_fiscal',
+                        (int) $usuario->id,
+                        "Excepción fiscal por factura {$factura->numero_factura}: concepto {$excepcion['concepto']} de " . ($excepcion['estado_anterior'] ? 'activado' : 'desactivado') . " a " . ($excepcion['estado_nuevo'] ? 'activado' : 'desactivado'),
+                        [
+                            'factura_id' => (int) $factura->id,
+                            'numero_factura' => $factura->numero_factura,
+                            'cuenta_id' => (int) $cuentaId,
+                            'concepto' => $excepcion['concepto'],
+                            'estado_anterior' => $excepcion['estado_anterior'],
+                            'estado_nuevo' => $excepcion['estado_nuevo'],
+                            'operacion' => 'cobro',
+                            'fecha' => now()->toISOString(),
+                        ],
+                        $request
+                    );
+                }
 
                 return [
                     'cambio' => $cambio,
@@ -3955,9 +4247,17 @@ class VentaController extends Controller
                         'descuento' => $descuento,
                         'base' => $base,
                         'propina' => $propina,
+                        'iva' => $fiscal['iva'],
+                        'retencion_dgi' => $fiscal['retencion_dgi'],
+                        'retencion_alcaldia' => $fiscal['retencion_alcaldia'],
+                        'total_retenciones' => $fiscal['total_retenciones'],
+                        'total_factura' => $fiscal['total_factura'],
+                        'neto' => $fiscal['neto'],
                         'total' => $totalCobrar,
                     ],
                     'pagos' => count($lineas),
+                    'modo_division' => $modoDivision !== '' ? $modoDivision : null,
+                    'excepciones_fiscales' => $excepcionesAuditar,
                 ];
             });
             return response()->json(['exito' => true, 'mensaje' => $resultado['mesa_liberada'] ? 'Todas las cuentas fueron pagadas. Mesa liberada.' : 'Cuenta pagada. La mesa sigue abierta.', ...$resultado]);
@@ -4232,7 +4532,7 @@ class VentaController extends Controller
         }
     }
 
-    private function ajustesDesdePeticion(Request $request, float $consumo): array
+    private function ajustesDesdePeticion(Request $request, float $consumo, bool $puedeExcepcionFiscal = false): array
     {
         $descuentoPorcentaje = NumeroEstricto::normalizarPorcentaje($request->input('descuento_porcentaje'));
         $propinaPorcentaje = NumeroEstricto::normalizarPorcentaje($request->input('propina_porcentaje'));
@@ -4246,6 +4546,20 @@ class VentaController extends Controller
         }
         $propinaImporte = $request->input('propina');
         if ($propinaImporte === null || $propinaImporte === '') {
+            $propinaImporte = 0;
+        }
+
+        // Respetar controles fiscales globales: si el concepto está
+        // desactivado, no se aplica ni importe ni porcentaje. ADMIN y GERENTE
+        // pueden usar excepciones por factura para aplicar el concepto aunque
+        // esté deshabilitado globalmente.
+        $configFiscal = app(\App\Services\ConfiguracionService::class);
+        if (!$configFiscal->descuentoFiscalHabilitado() && !$puedeExcepcionFiscal) {
+            $descuentoPorcentaje = null;
+            $descuentoImporte = 0;
+        }
+        if (!$configFiscal->propinaFiscalHabilitada() && !$puedeExcepcionFiscal) {
+            $propinaPorcentaje = null;
             $propinaImporte = 0;
         }
 
@@ -4335,6 +4649,9 @@ class VentaController extends Controller
             abort(403, 'No tienes permiso para imprimir la prefactura.');
         }
 
+        $configFiscal = app(\App\Services\ConfiguracionService::class);
+        $puedeExcepcionFiscal = in_array($rol, ['ADMIN', 'GERENTE'], true);
+
         $cuenta = DB::table('cuentas')->where('id', $cuentaId)->first();
 
         if (!$cuenta) {
@@ -4364,7 +4681,7 @@ class VentaController extends Controller
         // del cobro, de modo que el navegador nunca fija el importe final.
         // Si se envían ambos, gana el porcentaje (más explícito).
         try {
-            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumo);
+            [$descuento, $propina] = $this->ajustesDesdePeticion($request, $consumo, $puedeExcepcionFiscal);
         } catch (\InvalidArgumentException $e) {
             abort(422, $e->getMessage());
         }
@@ -4379,7 +4696,87 @@ class VentaController extends Controller
         }
 
         $base = round($consumo - $descuento, 2);
-        $total = round($base + $propina, 2);
+
+        // Sujeto a retenciones según la clasificación del cliente (mismo
+        // criterio que el cobro): `clientes.sujeto_retenciones`.
+        $sujetoRetencion = false;
+        if (\Illuminate\Support\Facades\Schema::hasColumn('clientes', 'sujeto_retenciones')) {
+            $clienteId = (int) ($cuenta->cliente_id ?? $venta->cliente_id ?? 0);
+            if ($clienteId <= 0) { $clienteId = (int) ($venta->cliente_id ?? 0); }
+            if ($clienteId > 0) {
+                $sujetoRetencion = (bool) DB::table('clientes')->where('id', $clienteId)->value('sujeto_retenciones');
+            }
+        }
+
+        // ----------------------------------------------------
+        // CONTROLES FISCALES POR FACTURA (excepciones ADMIN/GERENTE)
+        // ----------------------------------------------------
+        // Solo ADMIN y GERENTE pueden anular la configuración global para
+        // esta prefactura. CAJERO y MESERO usan siempre la configuración
+        // global. DGI/Alcaldía requieren cliente sujeto a retenciones.
+        // ----------------------------------------------------
+        $ivaGlobal = $configFiscal->ivaHabilitado();
+        $retDgiGlobal = $configFiscal->retencionDgiHabilitada();
+        $retAlcGlobal = $configFiscal->retencionAlcaldiaHabilitada();
+
+        $ivaEnviado = $request->filled('iva_habilitado');
+        $retDgiEnviado = $request->filled('retencion_dgi_habilitada');
+        $retAlcEnviado = $request->filled('retencion_alcaldia_habilitada');
+
+        $ivaValorEnviado = $ivaEnviado ? $request->boolean('iva_habilitado') : null;
+        $retDgiValorEnviado = $retDgiEnviado ? $request->boolean('retencion_dgi_habilitada') : null;
+        $retAlcValorEnviado = $retAlcEnviado ? $request->boolean('retencion_alcaldia_habilitada') : null;
+
+        if (!$puedeExcepcionFiscal) {
+            $ivaValorEnviado = null;
+            $retDgiValorEnviado = null;
+            $retAlcValorEnviado = null;
+        }
+
+        $ivaEfectivo = $ivaValorEnviado ?? $ivaGlobal;
+        $retDgiEfectivo = ($retDgiValorEnviado ?? $retDgiGlobal) && $sujetoRetencion;
+        $retAlcEfectivo = ($retAlcValorEnviado ?? $retAlcGlobal) && $sujetoRetencion;
+
+        // Excepciones para el desglose (se pasan a la vista y a FiscalService).
+        $excepcionesPrefactura = [
+            'iva_habilitado' => $ivaEfectivo,
+            'retencion_dgi_habilitada' => $retDgiEfectivo,
+            'retencion_alcaldia_habilitada' => $retAlcEfectivo,
+            'excepciones_fiscales' => [],
+        ];
+
+        if ($ivaEnviado && $puedeExcepcionFiscal && $ivaValorEnviado !== $ivaGlobal) {
+            $excepcionesPrefactura['excepciones_fiscales'][] = [
+                'concepto' => 'iva',
+                'estado_anterior' => $ivaGlobal,
+                'estado_nuevo' => $ivaValorEnviado,
+            ];
+        }
+        if ($retDgiEnviado && $puedeExcepcionFiscal && $retDgiValorEnviado !== $retDgiGlobal) {
+            $excepcionesPrefactura['excepciones_fiscales'][] = [
+                'concepto' => 'retencion_dgi',
+                'estado_anterior' => $retDgiGlobal,
+                'estado_nuevo' => $retDgiValorEnviado,
+            ];
+        }
+        if ($retAlcEnviado && $puedeExcepcionFiscal && $retAlcValorEnviado !== $retAlcGlobal) {
+            $excepcionesPrefactura['excepciones_fiscales'][] = [
+                'concepto' => 'retencion_alcaldia',
+                'estado_anterior' => $retAlcGlobal,
+                'estado_nuevo' => $retAlcValorEnviado,
+            ];
+        }
+
+        $fiscal = app(\App\Services\FiscalService::class)->calcular(
+            $consumo,
+            $descuento,
+            $propina,
+            $sujetoRetencion,
+            $ivaEfectivo,
+            $retDgiEfectivo,
+            $retAlcEfectivo
+        );
+        $total = $fiscal['neto'];
 
         // El sistema guarda la propina como IMPORTE, no como porcentaje. Para
         // la prefactura se muestra el porcentaje EFECTIVO sobre la base
@@ -4391,6 +4788,18 @@ class VentaController extends Controller
 
         return view('ventas.prefactura', [
             'usuario' => $usuario,
+            'descuentoHabilitado' => $configFiscal->descuentoFiscalHabilitado(),
+            'propinaHabilitada' => $configFiscal->propinaFiscalHabilitada(),
+            'ivaHabilitado' => $ivaEfectivo,
+            'retencionDgiHabilitada' => $retDgiEfectivo,
+            'retencionAlcaldiaHabilitada' => $retAlcEfectivo,
+            'ivaGlobal' => $ivaGlobal,
+            'retencionDgiGlobal' => $retDgiGlobal,
+            'retencionAlcaldiaGlobal' => $retAlcGlobal,
+            'sujetoRetenciones' => $sujetoRetencion,
+            'puedeExcepcionFiscal' => $puedeExcepcionFiscal,
+            'excepcionesFiscales' => $excepcionesPrefactura['excepciones_fiscales'],
+            'fiscal' => $fiscal,
             'mesa' => $mesa,
             'venta' => $venta,
             'cuenta' => $cuenta,
@@ -4811,6 +5220,150 @@ class VentaController extends Controller
                 'exito' => false,
                 'error' => $e->getMessage(),
             ], 422);
+        }
+    }
+
+    /**
+     * Cambiar el cliente de una cuenta ABIERTA del panel de subcuentas.
+     *
+     * Reglas:
+     *  - Solo ADMIN, GERENTE y CAJERO.
+     *  - La cuenta debe existir, estar ABIERTA y pertenecer a la venta activa
+     *    de la mesa indicada en la URL (equivocado mesa/cuenta => 404).
+     *  - No se permite cambiar cuentas PAGADA o CANCELADA.
+     *  - Si el campo cliente_id llega vacío se conserva el cliente actual
+     *    (no se fuerza al Cliente General ni se desasocia).
+     *  - Se rechazan clientes inexistentes o inactivos.
+     *  - Cliente General (ID 1) es válido como asociación explícita, pero si
+     *    se quiere impidiendo su uso directo se puede restringir aquí.
+     *  - No toca consumos, totales ni estados.
+     */
+    public function cambiarClienteCuenta(Request $request, int $mesaId, int $cuentaId)
+    {
+        $usuario = Auth::user();
+
+        if (!$usuario) {
+            return response()->json(['exito' => false, 'error' => 'Usuario no autenticado.'], 401);
+        }
+
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para cambiar el cliente de una cuenta.'], 403);
+        }
+
+        $request->validate([
+            'cliente_id' => ['nullable', 'integer'],
+        ]);
+
+        try {
+            if ($request->boolean('quitar_cliente')
+                || $request->input('cliente_id') === 0
+                || $request->input('cliente_id') === '0') {
+                $clienteId = 0;
+            } else {
+                $clienteId = $request->filled('cliente_id') ? (int) $request->input('cliente_id') : null;
+            }
+
+            // La mesa debe existir.
+            $mesa = DB::table('mesas')->where('id', $mesaId)->first();
+            if (!$mesa) {
+                abort(404, 'La mesa no existe.');
+            }
+
+            // Venta activa de ESTA mesa.
+            $venta = DB::table('ventas')
+                ->where('mesa_id', $mesaId)
+                ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                ->orderByDesc('id')
+                ->first();
+
+            if (!$venta) {
+                abort(404, 'La mesa no tiene una venta activa.');
+            }
+
+            $cuenta = DB::table('cuentas')
+                ->where('id', $cuentaId)
+                ->where('venta_id', $venta->id)
+                ->first();
+
+            if (!$cuenta) {
+                abort(404, 'La cuenta no existe en esta mesa.');
+            }
+
+            if ($cuenta->estado !== 'ABIERTA') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'Solo se puede cambiar el cliente de cuentas ABIERTAS.',
+                ], 422);
+            }
+
+            // El esquema real de `cuentas` no tiene cliente_id: el cliente se
+            // guarda en `ventas.cliente_id` (una sola venta activa por mesa).
+            // Si en el futuro se añade la columna por cuenta, se usa esa.
+            $clientePorCuenta = Schema::hasColumn('cuentas', 'cliente_id');
+            $clienteActual = $clientePorCuenta
+                ? (int) ($cuenta->cliente_id ?? 0)
+                : (int) ($venta->cliente_id ?? 0);
+
+            // Sin cliente explícito => conservar asociación actual (no forzar Cliente General).
+            if ($clienteId === null) {
+                return response()->json([
+                    'exito' => true,
+                    'mensaje' => 'No se realizó cambio de cliente: se conserva la asociación actual.',
+                    'cliente_id' => $clienteActual,
+                ]);
+            }
+
+            $cliente = null;
+            if ($clienteId > 0) {
+                // Cliente válido: existe y activo (rechaza inexistentes/inactivos).
+                $cliente = DB::table('clientes')->find($clienteId);
+                if (!$cliente || !$cliente->activo) {
+                    return response()->json([
+                        'exito' => false,
+                        'error' => 'El cliente indicado no existe o no está activo.',
+                    ], 422);
+                }
+            }
+
+            if ($clientePorCuenta) {
+                DB::table('cuentas')->where('id', $cuentaId)->update([
+                    'cliente_id' => $clienteId > 0 ? $clienteId : null,
+                    'updated_at' => now(),
+                ]);
+            } elseif ($clienteId > 0) {
+                DB::table('ventas')->where('id', $venta->id)->update([
+                    'cliente_id' => $clienteId,
+                ]);
+            }
+
+            return response()->json([
+                'exito' => true,
+                'mensaje' => $clienteId > 0
+                    ? 'Cliente de la cuenta actualizado.'
+                    : 'Cliente propio quitado; se usará el cliente de la venta.',
+                'cliente_id' => $clienteId > 0 ? $clienteId : null,
+                'cliente' => $clienteId > 0 ? [
+                    'id' => $cliente->id,
+                    'nombre' => $cliente->nombre,
+                    'identificacion' => $cliente->identificacion,
+                    'telefono' => $cliente->telefono,
+                ] : null,
+            ]);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            Log::warning('No se pudo cambiar el cliente de la cuenta', [
+                'mesa_id' => $mesaId,
+                'cuenta_id' => $cuentaId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'exito' => false,
+                'error' => 'No se pudo actualizar el cliente de la cuenta.',
+            ], 500);
         }
     }
 }

@@ -172,6 +172,11 @@ class CajaCierreModuleTest extends TestCase
             $t->timestamp('creado_en')->nullable();
             $t->integer('usuario_id')->nullable();
         });
+
+        Schema::create('caja_bloqueo', function (Blueprint $t) {
+            $t->integer('id')->primary();
+        });
+        DB::table('caja_bloqueo')->insertOrIgnore(['id' => 1]);
     }
 
     /* ------------------------------------------------------------------

@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Services\ConfiguracionService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\Feature\Concerns\CreaEsquemaCompleto;
@@ -752,19 +753,18 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
         ]));
 
         $respuesta->assertStatus(200)
-            ->assertSee('P. unit.')
+            ->assertDontSee('P. unit.')
+            ->assertDontSee('Subtotal')
             ->assertSee('Plato A')
             ->assertSee('Cocina: Sí')
-            // Cantidad, precio unitario y subtotal de ESTA cuenta.
+            // Cantidad y producto de ESTA cuenta (sin precio unitario ni subtotal individual).
             ->assertSee('3x')
-            ->assertSee('100.00')
-            ->assertSee('300.00')
-            // Sin descuento ni propina se muestran ceros, no valores ausentes.
+            ->assertDontSee('100.00')
+            // Sin descuento ni propina no se muestran esas filas.
             ->assertSee('Consumo:')
-            ->assertSee('Descuento:')
-            ->assertSee('Base (consumo − descuento):')
-            ->assertSee('Propina:')
-            ->assertSee('0.00% de la base')
+            ->assertDontSee('Descuento:')
+            ->assertDontSee('Base (consumo − descuento):')
+            ->assertDontSee('Propina:')
             ->assertSee('TOTAL POR COBRAR')
             // No mezcla la otra subcuenta.
             ->assertDontSee('Plato B')
@@ -793,7 +793,6 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
             ->assertSee('50.00')
             ->assertSee('Base (consumo − descuento):')
             ->assertSee('250.00')
-            ->assertSee('0.00% de la base')
             ->assertSee('250.00');
     }
 
@@ -995,8 +994,7 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
                 'propina' => 30,
             ]))
             ->assertStatus(200)
-            ->assertSee('Descuento:')
-            ->assertSee('0.00')
+            ->assertDontSee('Descuento:')
             ->assertSee('Base (consumo − descuento):')
             ->assertSee('300.00')
             // 30 / 300 = 10 % efectivo sobre la base.
@@ -1087,5 +1085,467 @@ class FacturaPrefacturaSubcuentasTest extends TestCase
                 'descuento' => 'no-es-numero',
             ]))
             ->assertStatus(422);
+    }
+
+    /* ------------------------------------------------------------------
+     | 7. IVA en prefactura y controles fiscales del modal de cobro
+     | ------------------------------------------------------------------ */
+
+    public function test_prefactura_muestra_la_linea_de_iva_con_switch_activado(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Consumo 300 -> IVA (15 %) = 45 -> total con IVA = 345.
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', ['cuentaId' => $escena['cuenta_a']]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('IVA (15 %):')
+            ->assertSee('+ C$ 45.00')
+            ->assertSee('TOTAL POR COBRAR:');
+
+        $this->assertStringContainsString('345.00', (string) $respuesta->getContent());
+    }
+
+    public function test_prefactura_no_muestra_la_linea_de_iva_con_switch_desactivado(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Consumo 300 -> sin IVA -> total = 300.
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', ['cuentaId' => $escena['cuenta_a']]));
+
+        $respuesta->assertStatus(200)
+            ->assertDontSee('IVA (15 %):')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('300.00');
+    }
+
+    public function test_cobrar_modal_muestra_controles_fiscales_con_iva_y_retenciones_para_cliente_sujeto(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_DGI,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_ALCALDIA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Cliente sujeto a retenciones (como el caso real de la cuenta 53).
+        $clienteId = DB::table('clientes')->insertGetId([
+            'nombre' => 'Cliente Sujeto',
+            'activo' => true,
+            'creado_en' => now(),
+            'sujeto_retenciones' => true,
+        ]);
+        DB::table('ventas')->where('id', $escena['venta'])->update(['cliente_id' => $clienteId]);
+
+        $respuesta = $this->actingAs($cajero)->get('/pos/'.$escena['mesa']);
+
+        $respuesta->assertStatus(200);
+
+        $html = (string) $respuesta->getContent();
+
+        // Botonera fiscal siempre presente con los tres conceptos.
+        $this->assertStringContainsString('fiscal-toggle', $html);
+        $this->assertStringContainsString('data-concepto="iva"', $html);
+        $this->assertStringContainsString('data-concepto="dgi"', $html);
+        $this->assertStringContainsString('data-concepto="alc"', $html);
+        $this->assertStringContainsString('aria-pressed="${ivaActivo}"', $html);
+
+        // Controles de descuento y propina con % y importe fijo sincronizados.
+        $this->assertStringContainsString('descuento-porcentaje-cobro', $html);
+        $this->assertStringContainsString('descuento-importe-cobro', $html);
+        $this->assertStringContainsString('propina-porcentaje-cobro', $html);
+        $this->assertStringContainsString('propina-importe-cobro', $html);
+        $this->assertStringContainsString('cobro-grid', $html);
+    }
+
+    public function test_cobrar_modal_muestra_controles_fiscales_con_iva_desactivado_y_cliente_no_sujeto(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_DGI,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Cliente NO sujeto a retenciones.
+        $clienteId = DB::table('clientes')->insertGetId([
+            'nombre' => 'Cliente No Sujeto',
+            'activo' => true,
+            'creado_en' => now(),
+            'sujeto_retenciones' => false,
+        ]);
+        DB::table('ventas')->where('id', $escena['venta'])->update(['cliente_id' => $clienteId]);
+
+        $respuesta = $this->actingAs($cajero)->get('/pos/'.$escena['mesa']);
+
+        $respuesta->assertStatus(200);
+
+        $html = (string) $respuesta->getContent();
+
+        // El IVA global está apagado: el control se ve DESHABILITADO con nota.
+        $this->assertStringContainsString('IVA desactivado en la configuración', $html);
+        $this->assertStringContainsString('data-concepto="iva" data-active="${ivaActivo ? \'true\' : \'false\'}"', $html);
+        $this->assertStringContainsString('Cliente no sujeto a retención', $html);
+    }
+
+    public function test_prefactura_con_todos_los_conceptos_desactivados_muestra_solo_consumo_y_total(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // Todos los conceptos fiscales desactivados globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_DGI,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_ALCALDIA,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_DESCUENTO_FISCAL,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_PROPINA_FISCAL,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Consumo 300, sin descuento ni propina -> total = 300.
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 300.00')
+            ->assertDontSee('IVA (15 %):')
+            ->assertDontSee('Descuento:')
+            ->assertDontSee('Propina:')
+            ->assertDontSee('Retención DGI')
+            ->assertDontSee('Retención Alcaldía')
+            ->assertDontSee('Conceptos fiscales')
+            ->assertDontSee('ACTIVO')
+            ->assertDontSee('INACTIVO');
+    }
+
+    public function test_prefactura_con_iva_y_retenciones_para_cliente_sujeto(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // IVA, DGI y Alcaldía habilitados globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_DGI,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_RETENCION_ALCALDIA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Cliente sujeto a retenciones.
+        $clienteId = DB::table('clientes')->insertGetId([
+            'nombre' => 'Cliente Sujeto',
+            'activo' => true,
+            'creado_en' => now(),
+            'sujeto_retenciones' => true,
+        ]);
+        DB::table('ventas')->where('id', $escena['venta'])->update(['cliente_id' => $clienteId]);
+
+        // Consumo 300 -> IVA 45 (15%), DGI 6 (2%), Alcaldía 3 (1%).
+        // Total factura = 345, total retenciones = 9, neto = 336.
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertSee('IVA (15 %):')
+            ->assertSee('+ C$ 45.00')
+            ->assertSee('Retención DGI (2 %):')
+            ->assertSee('- C$ 6.00')
+            ->assertSee('Retención Alcaldía (1 %):')
+            ->assertSee('- C$ 3.00')
+            ->assertSee('Total retenciones:')
+            ->assertSee('- C$ 9.00')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 336.00');
+    }
+
+    public function test_prefactura_con_propina_porcentual_manual_muestra_porcentaje_efectivo(): void
+        {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // Desactivar IVA para simplificar.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '0',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Consumo 300, propina 10% sobre base 300 = 30 -> total = 330.
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'propina' => '30',
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Propina:')
+            ->assertSee('+ C$ 30.00')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 330.00');
+    }
+
+    public function test_prefactura_admin_puede_desactivar_iva_como_excepcion(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $escena = $this->montarDosSubcuentas($admin);
+
+        // IVA habilitado globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // ADMIN desactiva IVA para esta operación (excepcion por factura).
+        $respuesta = $this->actingAs($admin)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '0',
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertDontSee('IVA (15 %):')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 300.00');
+    }
+
+    public function test_prefactura_gerente_puede_desactivar_iva_como_excepcion(): void
+    {
+        $gerente = $this->usuario('GERENTE');
+        $escena = $this->montarDosSubcuentas($gerente);
+
+        // IVA habilitado globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // GERENTE desactiva IVA para esta operación (excepcion por factura).
+        $respuesta = $this->actingAs($gerente)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '0',
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertDontSee('IVA (15 %):')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 300.00');
+    }
+
+    public function test_prefactura_cajero_no_puede_desactivar_iva_usa_config_global(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // IVA habilitado globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // CAJERO intenta desactivar IVA pero el backend ignora el toggle (usa config global).
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '0',
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertSee('IVA (15 %):')
+            ->assertSee('+ C$ 45.00')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 345.00');
+    }
+
+    public function test_prefactura_cliente_no_sujeto_no_permite_retenciones(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $escena = $this->montarDosSubcuentas($admin);
+
+        // IVA, DGI y Alcaldía habilitados globalmente.
+        foreach ([ConfiguracionService::CLAVE_IVA, ConfiguracionService::CLAVE_RETENCION_DGI, ConfiguracionService::CLAVE_RETENCION_ALCALDIA] as $clave) {
+            DB::table('configuraciones')->insert([
+                'clave' => $clave,
+                'valor' => '1',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // Cliente NO sujeto a retenciones.
+        $clienteId = DB::table('clientes')->insertGetId([
+            'nombre' => 'Cliente No Sujeto',
+            'activo' => true,
+            'creado_en' => now(),
+            'sujeto_retenciones' => false,
+        ]);
+        DB::table('ventas')->where('id', $escena['venta'])->update(['cliente_id' => $clienteId]);
+
+        // ADMIN intenta activar DGI y Alcaldía pero el cliente no es sujeto.
+        $respuesta = $this->actingAs($admin)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '1',
+            'retencion_dgi_habilitada' => '1',
+            'retencion_alcaldia_habilitada' => '1',
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('Consumo:')
+            ->assertSee('C$ 300.00')
+            ->assertSee('IVA (15 %):')
+            ->assertSee('+ C$ 45.00')
+            ->assertDontSee('Retención DGI')
+            ->assertDontSee('Retención Alcaldía')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 345.00');
+    }
+
+    public function test_prefactura_excepcion_no_modifica_configuracion_global(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $escena = $this->montarDosSubcuentas($admin);
+
+        // IVA habilitado globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // ADMIN desactiva IVA en una prefactura (excepcion por factura).
+        $this->actingAs($admin)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '0',
+        ]));
+
+        // Otra prefactura SIN el parametro de excepcion debe usar la config global (IVA activado).
+        $respuesta = $this->actingAs($admin)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+        ]));
+
+        $respuesta->assertStatus(200)
+            ->assertSee('IVA (15 %):')
+            ->assertSee('+ C$ 45.00')
+            ->assertSee('TOTAL POR COBRAR:')
+            ->assertSee('C$ 345.00');
+    }
+
+    public function test_prefactura_no_registra_cobro_ni_emite_factura(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarDosSubcuentas($cajero);
+
+        // IVA habilitado globalmente.
+        DB::table('configuraciones')->insert([
+            'clave' => ConfiguracionService::CLAVE_IVA,
+            'valor' => '1',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $respuesta = $this->actingAs($cajero)->get(route('pos.cuentas.prefactura', [
+            'cuentaId' => $escena['cuenta_a'],
+            'iva_habilitado' => '1',
+        ]));
+
+        $respuesta->assertStatus(200);
+
+        // La prefactura es de solo lectura: no cobra, no factura, no cierra.
+        $this->assertSame(0, DB::table('facturas')->count());
+        $this->assertSame(0, DB::table('pagos_cuenta')->count());
+        $this->assertSame('ABIERTA', DB::table('cuentas')->find($escena['cuenta_a'])->estado);
+        $this->assertSame('ACTIVA', DB::table('ventas')->find($escena['venta'])->estado);
     }
 }

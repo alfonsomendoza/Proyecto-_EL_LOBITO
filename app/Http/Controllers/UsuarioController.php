@@ -78,6 +78,7 @@ class UsuarioController extends Controller
                     'usuarios.nombre',
                     'usuarios.username',
                     'usuarios.activo',
+                    'usuarios.rol_id',
                     'roles.nombre as rol'
                 );
         };
@@ -473,6 +474,142 @@ class UsuarioController extends Controller
                     'exito' => false,
                     'error' => 'Error al actualizar la contraseña.',
                 ]);
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | CAMBIAR ROL DE USUARIO (SOLO ADMIN)
+        |--------------------------------------------------------------------------
+        |
+        | El rol es la base de toda la autorización del sistema, por eso el
+        | cambio se limita a ADMIN en el BACKEND (no se confía en ocultar el
+        | botón en la vista). Solo se actualiza `usuarios.rol_id`: no se toca
+        | contraseña, datos personales, estado, 2FA, sesiones ni dispositivos.
+        |
+        | Se valida que el usuario y el rol existan, que el rol pertenezca al
+        | catálogo oficial y que el cambio no deje el sistema sin ningún ADMIN
+        | activo.
+        */
+
+        if ($accion === 'cambiar_rol') {
+            if ($rolActual !== 'ADMIN') {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'No autorizado',
+                ], 403);
+            }
+
+            $usuarioId = (int) $request->input('usuario_id');
+            $rolId = (int) $request->input('rol_id');
+
+            // Catálogo oficial: no se aceptan roles inventados ni arbitrarios.
+            $rolesPermitidos = ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO', 'COCINERO'];
+
+            if ($usuarioId <= 0 || $rolId <= 0) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'Usuario y rol son obligatorios.',
+                ], 422);
+            }
+
+            try {
+                $resultado = DB::transaction(function () use ($usuarioId, $rolId, $rolesPermitidos, $request) {
+                    // Serializamos TODOS los cambios de rol bloqueando la fila
+                    // del rol ADMIN: así dos degradaciones simultáneas no pueden
+                    // contar "el otro ADMIN" a la vez y dejar el sistema sin
+                    // ningún administrador activo.
+                    DB::table('roles')->where('nombre', 'ADMIN')->lockForUpdate()->first();
+
+                    // Bloqueamos también el usuario objetivo.
+                    $target = DB::table('usuarios')->where('id', $usuarioId)->lockForUpdate()->first();
+
+                    if (! $target) {
+                        return [404, [
+                            'exito' => false,
+                            'error' => 'Usuario no encontrado.',
+                        ]];
+                    }
+
+                    $rolElegido = DB::table('roles')->where('id', $rolId)->first();
+
+                    if (! $rolElegido) {
+                        return [422, [
+                            'exito' => false,
+                            'error' => 'El rol seleccionado no existe.',
+                        ]];
+                    }
+
+                    $rolNuevo = strtoupper((string) ($rolElegido->nombre ?? ''));
+
+                    if (! in_array($rolNuevo, $rolesPermitidos, true)) {
+                        return [422, [
+                            'exito' => false,
+                            'error' => 'El rol seleccionado no está permitido.',
+                        ]];
+                    }
+
+                    if (Schema::hasColumn('roles', 'activo') && (int) $rolElegido->activo === 0) {
+                        return [422, [
+                            'exito' => false,
+                            'error' => 'El rol seleccionado está desactivado y no se puede asignar.',
+                        ]];
+                    }
+
+                    // Rol actual del usuario objetivo (para auditoría y para
+                    // la protección del último ADMIN activo).
+                    $rolAnterior = strtoupper((string) (DB::table('roles')
+                        ->where('id', (int) $target->rol_id)
+                        ->value('nombre') ?? ''));
+
+                    if ($rolAnterior === 'ADMIN' && (int) $target->activo === 1 && $rolNuevo !== 'ADMIN') {
+                        $otrosAdminsActivos = DB::table('usuarios')
+                            ->join('roles', 'usuarios.rol_id', '=', 'roles.id')
+                            ->where('roles.nombre', 'ADMIN')
+                            ->where('usuarios.activo', 1)
+                            ->where('usuarios.id', '!=', $usuarioId)
+                            ->count();
+
+                        if ($otrosAdminsActivos === 0) {
+                            return [422, [
+                                'exito' => false,
+                                'error' => 'No se puede quitar el rol ADMIN al último administrador activo.',
+                            ]];
+                        }
+                    }
+
+                    // ÚNICO cambio: el rol. Nada más del usuario se modifica.
+                    DB::table('usuarios')
+                        ->where('id', $usuarioId)
+                        ->update(['rol_id' => $rolId]);
+
+                    // Auditoría compatible con el mecanismo existente. Si la
+                    // tabla no está disponible, AuditService solo registra en log.
+                    app(\App\Services\AuditService::class)->log(
+                        'cambio_rol_usuario',
+                        Auth::id(),
+                        'Cambio de rol de usuario',
+                        [
+                            'usuario_id' => $usuarioId,
+                            'rol_anterior' => $rolAnterior,
+                            'rol_nuevo' => $rolNuevo,
+                        ],
+                        $request
+                    );
+
+                    return [200, [
+                        'exito' => true,
+                        'mensaje' => 'Rol del usuario actualizado correctamente.',
+                    ]];
+                });
+
+                return response()->json($resultado[1], $resultado[0]);
+
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'exito' => false,
+                    'error' => 'Error de base de datos al cambiar el rol del usuario.',
+                ], 500);
             }
         }
 

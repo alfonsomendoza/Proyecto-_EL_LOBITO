@@ -119,13 +119,13 @@ class FacturaHistorialModuleTest extends TestCase
      | Constructores de datos
      | ------------------------------------------------------------------ */
 
-    private function usuario(string $rolNombre): User
+    private function usuario(string $rolNombre, ?string $nombre = null): User
     {
         $rolId = DB::table('roles')->insertGetId(['nombre' => $rolNombre]);
 
         $usuarioId = DB::table('usuarios')->insertGetId([
-            'nombre' => $rolNombre.' Prueba',
-            'username' => strtolower($rolNombre).'_fact',
+            'nombre' => $nombre ?? ($rolNombre.' Prueba'),
+            'username' => strtolower($rolNombre).'_fact_'.uniqid(),
             'password_hash' => bcrypt('secret'),
             'rol_id' => $rolId,
         ]);
@@ -481,6 +481,8 @@ class FacturaHistorialModuleTest extends TestCase
     public function test_los_filtros_se_conservan_en_el_formulario(): void
     {
         $this->cliente('Ana Torres', '001-1234567-8');
+        $cajero = $this->usuario('CAJERO', 'Ana Cajera');
+        $this->factura('FAC-9998', 100, usuarioId: $cajero->id);
 
         $this->actingAs($this->usuario('ADMIN'))
             ->get(route('facturas.index', [
@@ -489,12 +491,224 @@ class FacturaHistorialModuleTest extends TestCase
                 'estado' => 'ANULADA',
                 'desde' => '2026-10-01',
                 'hasta' => '2026-10-31',
+                'cajero' => $cajero->id,
             ]))
             ->assertStatus(200)
             ->assertSee('value="Ana Torres"', false)
             ->assertSee('value="FAC-9999"', false)
             ->assertSee('value="2026-10-01"', false)
-            ->assertSee('value="2026-10-31"', false);
+            ->assertSee('value="2026-10-31"', false)
+            ->assertSee('value="'.$cajero->id.'" selected', false);
+    }
+
+    /* ------------------------------------------------------------------
+     | 5. Filtro por cajero (facturas.usuario_id)
+     | ------------------------------------------------------------------ */
+
+    public function test_selector_de_cajeros_incluye_todos_y_solo_quienes_tienen_facturas(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $luis = $this->usuario('CAJERO', 'Luis Cajero');
+        $this->usuario('CAJERO', 'Cajero Sin Facturas');
+
+        $this->factura('FAC-3001', 100, usuarioId: $ana->id);
+        $this->factura('FAC-3002', 200, usuarioId: $luis->id);
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index'))
+            ->assertStatus(200)
+            ->assertSee('Todos los cajeros')
+            ->assertSee('Ana Cajera')
+            ->assertSee('Luis Cajero')
+            ->assertDontSee('Cajero Sin Facturas');
+    }
+
+    public function test_filtro_por_un_cajero_especifico(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $luis = $this->usuario('CAJERO', 'Luis Cajero');
+
+        $this->factura('FAC-3101', 100, usuarioId: $ana->id);
+        $this->factura('FAC-3102', 200, usuarioId: $luis->id);
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index', ['cajero' => $ana->id]))
+            ->assertStatus(200)
+            ->assertSee('FAC-3101')
+            ->assertDontSee('FAC-3102');
+    }
+
+    public function test_filtro_por_cajero_combinado_con_fechas(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $luis = $this->usuario('CAJERO', 'Luis Cajero');
+
+        $this->factura('FAC-3201', 100, usuarioId: $ana->id, fechaEmision: '2026-10-01 10:00:00');
+        $this->factura('FAC-3202', 200, usuarioId: $ana->id, fechaEmision: '2026-10-05 10:00:00');
+        $this->factura('FAC-3203', 300, usuarioId: $luis->id, fechaEmision: '2026-10-05 10:00:00');
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index', [
+                'cajero' => $ana->id,
+                'desde' => '2026-10-03',
+                'hasta' => '2026-10-10',
+            ]))
+            ->assertStatus(200)
+            ->assertSee('FAC-3202')
+            ->assertDontSee('FAC-3201')
+            ->assertDontSee('FAC-3203');
+    }
+
+    public function test_filtro_por_cajero_combinado_con_estado(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+
+        $this->factura('FAC-3301', 100, 'EMITIDA', usuarioId: $ana->id);
+        $this->factura('FAC-3302', 200, 'ANULADA', usuarioId: $ana->id);
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index', ['cajero' => $ana->id, 'estado' => 'ANULADA']))
+            ->assertStatus(200)
+            ->assertSee('FAC-3302')
+            ->assertDontSee('FAC-3301');
+    }
+
+    public function test_filtro_por_cajero_combinado_con_busqueda_de_numero(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $luis = $this->usuario('CAJERO', 'Luis Cajero');
+
+        $this->factura('FAC-3401', 100, usuarioId: $ana->id);
+        $this->factura('FAC-3402', 200, usuarioId: $ana->id);
+        $this->factura('FAC-3403', 300, usuarioId: $luis->id);
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index', ['cajero' => $ana->id, 'numero' => 'FAC-3402']))
+            ->assertStatus(200)
+            ->assertSee('FAC-3402')
+            ->assertDontSee('FAC-3401')
+            ->assertDontSee('FAC-3403');
+    }
+
+    public function test_facturas_sin_cajero_aparecen_solo_sin_filtro(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+
+        // Factura histórica sin usuario atribuido (usuario_id = NULL).
+        $this->factura('FAC-3500', 100);
+        $this->factura('FAC-3501', 200, usuarioId: $ana->id);
+
+        $admin = $this->usuario('ADMIN');
+
+        $this->actingAs($admin)
+            ->get(route('facturas.index'))
+            ->assertStatus(200)
+            ->assertSee('FAC-3500')
+            ->assertSee('FAC-3501');
+
+        $this->actingAs($admin)
+            ->get(route('facturas.index', ['cajero' => $ana->id]))
+            ->assertStatus(200)
+            ->assertSee('FAC-3501')
+            ->assertDontSee('FAC-3500');
+    }
+
+    public function test_cajero_invalido_se_ignora_y_no_filtra(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+
+        $this->factura('FAC-3601', 100, usuarioId: $ana->id);
+        $this->factura('FAC-3602', 200);
+
+        $admin = $this->usuario('ADMIN');
+
+        foreach (['abc', '-1', '0', '1.5'] as $invalido) {
+            $this->actingAs($admin)
+                ->get(route('facturas.index', ['cajero' => $invalido]))
+                ->assertStatus(200)
+                ->assertSee('FAC-3601')
+                ->assertSee('FAC-3602');
+        }
+    }
+
+    public function test_paginacion_conserva_el_filtro_de_cajero(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $luis = $this->usuario('CAJERO', 'Luis Cajero');
+
+        // 55 facturas de Ana y 5 de Luis: con 50 por página, la página 2 de
+        // Ana debe contener exactamente las 5 más antiguas y ningún registro
+        // de Luis.
+        for ($i = 1; $i <= 55; $i++) {
+            $this->factura(sprintf('FAC-9%03d', $i), 100, usuarioId: $ana->id);
+        }
+
+        for ($i = 1; $i <= 5; $i++) {
+            $this->factura(sprintf('FAC-8%03d', $i), 100, usuarioId: $luis->id);
+        }
+
+        $admin = $this->usuario('ADMIN');
+
+        $pagina1 = $this->actingAs($admin)
+            ->get(route('facturas.index', ['cajero' => $ana->id]));
+
+        $pagina1->assertStatus(200)
+            ->assertSee('FAC-9055')
+            ->assertSee('FAC-9006')
+            ->assertDontSee('FAC-9005')
+            ->assertSee('Página 1 de 2')
+            ->assertSee('cajero='.$ana->id, false)
+            ->assertSee('pagina=2', false);
+
+        $pagina2 = $this->actingAs($admin)
+            ->get(route('facturas.index', ['cajero' => $ana->id, 'pagina' => 2]));
+
+        $pagina2->assertStatus(200)
+            ->assertSee('FAC-9005')
+            ->assertSee('FAC-9001')
+            ->assertDontSee('FAC-9055')
+            ->assertDontSee('FAC-8001')
+            ->assertSee('Página 2 de 2')
+            ->assertSee('cajero='.$ana->id, false)
+            ->assertSee('pagina=1', false);
+    }
+
+    public function test_consultar_y_filtrar_no_modifica_registros_ni_totales(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+        $this->factura('FAC-3701', 100, 'EMITIDA', usuarioId: $ana->id);
+        $this->factura('FAC-3702', 250.5, 'ANULADA', usuarioId: $ana->id);
+
+        $antes = [
+            'facturas' => DB::table('facturas')->count(),
+            'ventas' => DB::table('ventas')->count(),
+            'suma' => (float) DB::table('facturas')->sum('total'),
+            'estados' => DB::table('facturas')->orderBy('id')->pluck('estado')->all(),
+        ];
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('facturas.index', ['cajero' => $ana->id, 'desde' => '2026-01-01']))
+            ->assertStatus(200);
+
+        $despues = [
+            'facturas' => DB::table('facturas')->count(),
+            'ventas' => DB::table('ventas')->count(),
+            'suma' => (float) DB::table('facturas')->sum('total'),
+            'estados' => DB::table('facturas')->orderBy('id')->pluck('estado')->all(),
+        ];
+
+        $this->assertSame($antes, $despues, 'Consultar el historial no debe modificar datos.');
+    }
+
+    public function test_filtro_por_cajero_no_afecta_permisos(): void
+    {
+        $ana = $this->usuario('CAJERO', 'Ana Cajera');
+
+        foreach (['CAJERO', 'MESERO'] as $rol) {
+            $this->actingAs($this->usuario($rol))
+                ->get(route('facturas.index', ['cajero' => $ana->id]))
+                ->assertStatus(403);
+        }
     }
 
     public function test_filtro_cliente_no_afecta_permisos(): void

@@ -37,6 +37,11 @@
         $descuento = (float) ($ajustes['descuento'] ?? 0);
         $base = (float) ($ajustes['base'] ?? 0);
         $propina = (float) ($ajustes['propina'] ?? 0);
+        $iva = (float) ($ajustes['iva'] ?? 0);
+        $retencionDgi = (float) ($ajustes['retencion_dgi'] ?? 0);
+        $retencionAlcaldia = (float) ($ajustes['retencion_alcaldia'] ?? 0);
+        $totalRetenciones = (float) ($ajustes['total_retenciones'] ?? 0);
+        $totalFactura = (float) ($ajustes['total_factura'] ?? 0);
 
         // Importe recibido y cambio: salen de `cuentas` (cobro del POS Laravel)
         // o de `ventas` (facturas históricas), nunca se recalculan aquí.
@@ -68,6 +73,24 @@
             </tr>
         @endif
         <tr><td><strong>Método Pago:</strong></td><td class="derecha">{{ $factura->metodo_pago ?? 'EFECTIVO' }}@if (!empty($factura->banco)) · {{ $factura->banco }}@endif</td></tr>
+        @if($clienteSnapshot)
+            <tr>
+                <td><strong>Cliente (snapshot):</strong></td>
+                <td class="derecha">
+                    {{ $clienteSnapshot->nombre ?? '--' }}
+                    @if(!empty($clienteSnapshot->identificacion)) · {{ $clienteSnapshot->identificacion }}@endif
+                    @if(!empty($clienteSnapshot->telefono)) · {{ $clienteSnapshot->telefono }}@endif
+                </td>
+            </tr>
+        @elseif($clienteNombre || $clienteIdentificacion)
+            <tr>
+                <td><strong>Cliente:</strong></td>
+                <td class="derecha">
+                    {{ $clienteNombre ?? '--' }}
+                    @if(!empty($clienteIdentificacion)) · {{ $clienteIdentificacion }}@endif
+                </td>
+            </tr>
+        @endif
     </table>
 
     <div class="linea"></div>
@@ -98,6 +121,12 @@
                 <td>Consumo:</td>
                 <td class="derecha">C$ {{ number_format($consumo, 2) }}</td>
             </tr>
+            @if ($iva > 0)
+            <tr>
+                <td>IVA (15 %):</td>
+                <td class="derecha">+ C$ {{ number_format($iva, 2) }}</td>
+            </tr>
+            @endif
             @if ($descuento > 0)
                 <tr>
                     <td>Descuento:</td>
@@ -117,7 +146,31 @@
                 </tr>
             @endif
         @endif
-        <tr>
+                @if ($totalRetenciones > 0)
+            @if ($totalFactura > 0)
+            <tr>
+                <td>Total factura:</td>
+                <td class="derecha">C$ {{ number_format($totalFactura, 2) }}</td>
+            </tr>
+            @endif
+            @if ($retencionDgi > 0)
+            <tr>
+                <td>Retención DGI (2 %):</td>
+                <td class="derecha">− C$ {{ number_format($retencionDgi, 2) }}</td>
+            </tr>
+            @endif
+            @if ($retencionAlcaldia > 0)
+            <tr>
+                <td>Retención Alcaldía (1 %):</td>
+                <td class="derecha">− C$ {{ number_format($retencionAlcaldia, 2) }}</td>
+            </tr>
+            @endif
+            <tr>
+                <td>Total retenciones:</td>
+                <td class="derecha">− C$ {{ number_format($totalRetenciones, 2) }}</td>
+            </tr>
+        @endif
+<tr>
             <td class="resaltado">TOTAL A PAGAR:</td>
             <td class="derecha resaltado">C$ {{ number_format((float) $factura->total, 2) }}</td>
         </tr>
@@ -133,6 +186,7 @@
                         {{ $etiquetasPago[$pago->metodo_pago] ?? $pago->metodo_pago }}
                         @if (!empty($pago->banco)) · {{ $pago->banco }}@endif
                         @if (!empty($pago->numero_transferencia)) · N° {{ $pago->numero_transferencia }}@endif:
+                        @if (($pago->estado ?? 'ACTIVO') === 'REVERSADO') <span class="anulada">(REVERSADO)</span>@endif
                     </td>
                     <td class="derecha">
                         @if (($pago->moneda ?? 'NIO') === 'USD')

@@ -18,7 +18,8 @@ use Tests\TestCase;
  *  - no pueda crear ventas, abrir cuentas ni abrir caja,
  *  - no reciba precios ni montos en las respuestas HTML/JSON a las que accede,
  *  - conserve el acceso a las impresiones de cocina,
- * y que ADMIN, GERENTE, CAJERO y MESERO conserven sus permisos anteriores.
+ * y que ADMIN, GERENTE y CAJERO conserven sus permisos; MESERO mantiene el
+ * POS y las mesas, pero no accede a la caja (ni a su vista ni a su apertura).
  *
  * Corre en SQLite :memory: (phpunit.xml). Nunca toca MySQL ni "sistemadecaja".
  */
@@ -225,6 +226,17 @@ class CocinaPermisosTest extends TestCase
 
         // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
         // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.
+        DB::table('caja_apertura')->insertOrIgnore([
+            'id' => 1,
+            'fecha' => now(),
+            'cajero' => 'TEST',
+            'turno' => '1',
+            'caja_id' => 1,
+            'monto_inicial' => 0,
+            'estado' => 'ABIERTA',
+            'usuario_id' => 1,
+        ]);
+
         $this->crearEsquemaTrasladosPagos();
     }
 
@@ -402,7 +414,7 @@ class CocinaPermisosTest extends TestCase
             'monto_inicial' => 500,
         ])->assertStatus(403)->assertJson(['exito' => false]);
 
-        $this->assertSame(0, DB::table('caja_apertura')->count());
+        $this->assertSame(1, DB::table('caja_apertura')->count());
     }
 
     /* ==================================================================
@@ -500,9 +512,12 @@ class CocinaPermisosTest extends TestCase
             $this->actingAs($usuario)->get('/pos/' . $mesaId)->assertStatus(200);
             $this->actingAs($usuario)->get('/catalogo')->assertStatus(200);
             $this->actingAs($usuario)->get('/clientes')->assertStatus(200);
-            $this->actingAs($usuario)->get('/caja/apertura')->assertStatus(200);
             $this->actingAs($usuario)->get('/mesas/' . $mesaId . '/cuentas')->assertStatus(200);
             $this->actingAs($usuario)->get('/pos/' . $mesaId . '/cuentas')->assertStatus(200);
+
+            // La pantalla de caja muestra montos: solo ADMIN, GERENTE y
+            // CAJERO. MESERO recibe 403 tanto en la vista como al abrir caja.
+            $respuestaVistaCaja = $this->actingAs($usuario)->get('/caja/apertura');
 
             // API del POS (consulta de venta): disponible para los cuatro.
             $this->actingAs($usuario)->postJson('/pos/api', ['venta_id' => $ventaId])
@@ -514,10 +529,12 @@ class CocinaPermisosTest extends TestCase
                 'mesa_id' => $mesaId,
             ])->assertStatus(200)->assertJson(['exito' => true]);
 
-            // Abrir caja: disponible para los cuatro (permiso preexistente).
-            $this->actingAs($usuario)->postJson('/caja/apertura', [
-                'monto_inicial' => 100,
-            ])->assertStatus(200)->assertJson(['exito' => true]);
+            // Abrir caja: solo ADMIN, GERENTE y CAJERO. MESERO no tiene
+            // permisos de caja (coherente con el cierre de caja, que también
+            // le responde 403).
+            // (La apertura real se prueba en CajaCierreModuleTest; aquí solo se
+            // verifica el acceso a la pantalla, para no depender del estado de caja.)
+            $respuestaVistaCaja->assertStatus(in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true) ? 200 : 403);
         }
     }
 

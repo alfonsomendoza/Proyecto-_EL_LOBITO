@@ -1,0 +1,93 @@
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+        <!-- Suite de regresión de clientes, subcuentas, traslados, cobros y
+             facturas. Se puede ejecutar sola con:
+                 vendor/bin/phpunit --testsuite=RegresionClientes
+             Está separada de la suite Feature general porque los tests aquí
+             listados construyen el esquema manualmente en SQLite y pueden
+             correrse en aislamiento sin depender del resto del catálogo. -->
+        <testsuite name="RegresionClientes">
+            <file>tests/Feature/ClienteCicloVidaTest.php</file>
+            <file>tests/Feature/SubcuentasTest.php</file>
+            <file>tests/Feature/MesaVaciaEstadoTest.php</file>
+            <file>tests/Feature/DivisionUnidadesTest.php</file>
+            <file>tests/Feature/TrasladoCuentasTest.php</file>
+            <file>tests/Feature/TrasladoConsumoDestinoTest.php</file>
+            <file>tests/Feature/TrasladoConsumoCocinaTest.php</file>
+            <file>tests/Feature/SubdivisionSubcuentaTest.php</file>
+            <file>tests/Feature/ProtegerCuentasPagadasTest.php</file>
+            <file>tests/Feature/FacturaEmisionModuleTest.php</file>
+            <file>tests/Feature/FacturaHistorialModuleTest.php</file>
+            <file>tests/Feature/facturas/RegistroInvoiceTest.php</file>
+            <file>tests/Feature/ResumenPropinasTest.php</file>
+            <file>tests/Feature/CajaCierreModuleTest.php</file>
+            <file>tests/Feature/ResumenDiarioModuleTest.php</file>
+            <file>tests/Feature/PrefacturaImpresionTest.php</file>
+            <file>tests/Feature/FacturaPrefacturaSubcuentasTest.php</file>
+            <file>tests/Feature/VentasPanelTest.php</file>
+            <file>tests/Feature/ComandaCuentaTest.php</file>
+            <file>tests/Feature/AnularDetalleTest.php</file>
+            <file>tests/Feature/AnularDetalleCocinaTest.php</file>
+            <file>tests/Feature/CuentaPrincipalDivisionTest.php</file>
+            <file>tests/Feature/CategoriasDesactivadasPosTest.php</file>
+            <file>tests/Feature/InventarioTest.php</file>
+            <file>tests/Feature/InventarioModuleTest.php</file>
+            <file>tests/Feature/InventarioCategoriaFiltroTest.php</file>
+            <file>tests/Feature/CatalogoCicloVidaTest.php</file>
+            <file>tests/Feature/CatalogoCategoriasEstadoTest.php</file>
+            <file>tests/Feature/CatalogoAutorizacionTest.php</file>
+            <file>tests/Feature/RolesCatalogoTest.php</file>
+            <file>tests/Feature/UsuarioModuleTest.php</file>
+            <file>tests/Feature/UsuarioEditarTest.php</file>
+            <file>tests/Feature/PermisosUsuariosTest.php</file>
+            <file>tests/Feature/VisibilidadModulosTest.php</file>
+            <file>tests/Feature/NavegacionMenuTest.php</file>
+            <file>tests/Feature/SesionNavegacionTest.php</file>
+            <file>tests/Feature/SesionUnicaTest.php</file>
+            <file>tests/Feature/SesionUnicaMysqlTest.php</file>
+            <file>tests/Feature/BackupModuleTest.php</file>
+            <file>tests/Feature/ConfiguracionModuleTest.php</file>
+            <file>tests/Feature/LogoutBotonAtrasTest.php</file>
+            <file>tests/Feature/LoginHttpFlowTest.php</file>
+            <file>tests/Feature/LoginConSesionActivaTest.php</file>
+            <file>tests/Feature/DispositivoRegistroTest.php</file>
+            <file>tests/Feature/TwoFactorP0Test.php</file>
+            <file>tests/Feature/TwoFactorQrTest.php</file>
+            <file>tests/Feature/TwoFactorPolicyTest.php</file>
+            <file>tests/Feature/ProductoImportCsvTest.php</file>
+            <file>tests/Feature/GastoModuleTest.php</file>
+        </testsuite>
+    </testsuites>
+
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="BROADCAST_CONNECTION" value="null"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_DATABASE" value=":memory:"/>
+        <env name="DB_URL" value=""/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="NIGHTWATCH_ENABLED" value="false"/>
+    </php>
+</phpunit>

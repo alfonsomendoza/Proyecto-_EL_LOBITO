@@ -30,9 +30,10 @@
             @php $denominaciones = [1000, 500, 200, 100, 50, 20, 10, 5, 1, 0.5]; @endphp
             @foreach($denominaciones as $den)
                 @php $formato = $den < 1 ? '0.50' : number_format($den, 2); @endphp
-                <div style="display:flex; justify-content:space-between; margin-bottom:10px; align-items:center;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:10px; align-items:center; gap:8px;">
                     <label style="width:100px;">C$ {{ $formato }}:</label>
                     <input type="number" data-den="{{ $den }}" name="apertura_b[{{ $den }}]" value="0" class="calc-apertura" min="0" step="1" inputmode="numeric" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px;">
+                    <span style="width:110px; text-align:right; font-weight:bold;">C$ <span class="subtotal-apertura" data-den="{{ $den }}">0.00</span></span>
                 </div>
             @endforeach
 
@@ -65,7 +66,10 @@ document.addEventListener('DOMContentLoaded', function() {
         inputs.forEach(input => {
             const cantidad = numeroEstricto(input.value === '' ? '0' : input.value, 0) ?? 0;
             const denominacion = Number(input.getAttribute('data-den'));
-            total += (cantidad * denominacion);
+            const subtotal = cantidad * denominacion;
+            total += subtotal;
+            const span = document.querySelector('.subtotal-apertura[data-den="' + denominacion + '"]');
+            if (span) span.textContent = subtotal.toFixed(2);
         });
         lblTotal.textContent = total.toFixed(2);
         return total;
@@ -78,6 +82,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     inputs.forEach(input => input.addEventListener('input', calcularTotal));
+    calcularTotal();
 
     form.addEventListener('submit', function(e) {
         e.preventDefault();

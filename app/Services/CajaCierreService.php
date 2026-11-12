@@ -115,21 +115,32 @@ class CajaCierreService
      * `null` (hasta ahora, porque no existe un turno posterior abierto); el
      * Resumen del Día pasa el inicio del siguiente turno para que las ventanas
      * de varios turnos NO se solapen (evita contar dos veces una venta).
+     *
+     * `$finExclusivo` debe ser true cuando `$fin` es el INICIO del turno
+     * siguiente: el instante exacto de corte pertenece al turno nuevo, no al
+     * anterior. Sin esta bandera una cuenta cobrada justo en ese instante se
+     * contaría en los dos turnos.
      */
-    public function cuentasDelTurno(CajaApertura $apertura, ?Carbon $fin = null): Collection
+    public function cuentasDelTurno(CajaApertura $apertura, ?Carbon $fin = null, bool $finExclusivo = false): Collection
     {
         $inicio = $this->inicioTurno($apertura);
         $fin = $fin ?? now();
 
         return DB::table('cuentas')
             ->where('estado', 'PAGADA')
-            ->where(function ($query) use ($apertura, $inicio, $fin) {
+            ->where(function ($query) use ($apertura, $inicio, $fin, $finExclusivo) {
                 $query->where('apertura_id', $apertura->id);
 
                 if ($inicio !== null) {
-                    $query->orWhere(function ($sub) use ($inicio, $fin) {
+                    $query->orWhere(function ($sub) use ($inicio, $fin, $finExclusivo) {
                         $sub->whereNull('apertura_id')
-                            ->whereBetween('updated_at', [$inicio, $fin]);
+                            ->where('updated_at', '>=', $inicio);
+
+                        if ($finExclusivo) {
+                            $sub->where('updated_at', '<', $fin);
+                        } else {
+                            $sub->where('updated_at', '<=', $fin);
+                        }
                     });
                 }
             })
@@ -153,9 +164,9 @@ class CajaCierreService
      *
      * @return array{cuentas: Collection, cantidad: int, efectivo: float, tarjeta: float, transferencia: float, otro: float, tarjetas_por_banco: array<string, float>, total: float}
      */
-    public function resumenVentas(CajaApertura $apertura, ?Carbon $fin = null): array
+    public function resumenVentas(CajaApertura $apertura, ?Carbon $fin = null, bool $finExclusivo = false): array
     {
-        $cuentas = $this->cuentasDelTurno($apertura, $fin);
+        $cuentas = $this->cuentasDelTurno($apertura, $fin, $finExclusivo);
 
         $totales = ['EFECTIVO' => 0.0, 'TARJETA' => 0.0, 'TRANSFERENCIA' => 0.0, 'OTRO' => 0.0];
         $tarjetasPorBanco = [];
@@ -164,8 +175,19 @@ class CajaCierreService
         $pagosPorCuenta = collect();
 
         if (Schema::hasTable('pagos_cuenta') && $cuentas->isNotEmpty()) {
-            $pagosPorCuenta = DB::table('pagos_cuenta')
-                ->whereIn('cuenta_id', $cuentas->pluck('id'))
+            $consultaPagos = DB::table('pagos_cuenta')
+                ->whereIn('cuenta_id', $cuentas->pluck('id'));
+
+            // Una cuenta reabierta y recobrada conserva sus líneas antiguas
+            // marcadas REVERSADO. Contarlas otra vez duplicaría la venta del
+            // turno; solo suman las líneas ACTIVAS (o históricas sin estado).
+            if (Schema::hasColumn('pagos_cuenta', 'estado')) {
+                $consultaPagos->where(function ($query) {
+                    $query->whereNull('estado')->orWhere('estado', '!=', 'REVERSADO');
+                });
+            }
+
+            $pagosPorCuenta = $consultaPagos
                 ->orderBy('id')
                 ->get()
                 ->groupBy(fn ($pago) => (int) $pago->cuenta_id);

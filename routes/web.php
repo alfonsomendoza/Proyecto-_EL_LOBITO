@@ -1,25 +1,30 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
-
+use App\Http\Controllers\AdminCodigo2FAController;
+use App\Http\Controllers\AdminTwoFactorController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CajaAperturaController;
 use App\Http\Controllers\CajaCierreController;
-use App\Http\Controllers\ClienteController;
 use App\Http\Controllers\CatalogoController;
-use App\Http\Controllers\FacturaController;
-use App\Http\Controllers\ResumenDiarioController;
-use App\Http\Controllers\ResumenPropinasController;
-use App\Http\Controllers\UsuarioController;
-use App\Http\Controllers\RolController;
-use App\Http\Controllers\MesaController;
-use App\Http\Controllers\VentaController;
+use App\Http\Controllers\ClienteController;
+use App\Http\Controllers\CocinaController;
 use App\Http\Controllers\ComandaController;
-use App\Http\Controllers\BackupController;
+use App\Http\Controllers\ConfiguracionController;
+use App\Http\Controllers\ConfiguracionFiscalController;
+use App\Http\Controllers\DeviceController;
+use App\Http\Controllers\FacturaController;
 use App\Http\Controllers\GastoController;
 use App\Http\Controllers\InventarioController;
-use App\Http\Controllers\CocinaController;
-use App\Http\Controllers\ConfiguracionController;
+use App\Http\Controllers\MesaController;
+use App\Http\Controllers\ResumenDiarioController;
+use App\Http\Controllers\ResumenPropinasController;
+use App\Http\Controllers\RolController;
+use App\Http\Controllers\TwoFactorController;
+use App\Http\Controllers\UsuarioController;
+use App\Http\Controllers\VentaController;
+use App\Http\Controllers\VerificarCodigo2FAController;
+use Illuminate\Support\Facades\Route;
 
 Route::middleware(['guest'])->group(function () {
     Route::get('/login', [AuthController::class, 'showLoginForm'])
@@ -29,9 +34,41 @@ Route::middleware(['guest'])->group(function () {
         ->name('login.post');
 });
 
-Route::middleware(['auth'])->group(function () {
+// Verificación del agente de dispositivos: pública porque es el mecanismo de
+// autenticación del propio equipo mediante identificador + token.
+Route::post('/dispositivo/verificar', [DeviceController::class, 'verificar'])->name('dispositivo.verificar');
+
+Route::middleware(['auth', 'caja.abierta'])->group(function () {
+    // El alta de dispositivos exige sesión y rol ADMIN (se valida también en el
+    // controlador). El token se entrega una única vez al crear el dispositivo.
+    Route::post('/dispositivo/registrar', [DeviceController::class, 'registrar'])->name('dispositivo.registrar');
+
     Route::post('/logout', [AuthController::class, 'logout'])
         ->name('logout');
+
+    // 2FA con códigos administrados
+    Route::get('/2fa/verificar', [VerificarCodigo2FAController::class, 'mostrar'])->name('2fa.verificar.mostrar');
+    Route::post('/2fa/verificar', [VerificarCodigo2FAController::class, 'verificar'])->name('2fa.verificar');
+
+    // 2FA TOTP - Configuración inicial y verificación
+    Route::get('/2fa/setup', [TwoFactorController::class, 'setup'])->name('2fa.setup');
+    Route::post('/2fa/confirm', [TwoFactorController::class, 'confirm'])->name('2fa.confirm');
+    Route::get('/2fa/challenge', [TwoFactorController::class, 'challenge'])->name('2fa.challenge');
+    Route::post('/2fa/verify', [TwoFactorController::class, 'verify'])->name('2fa.verify');
+    Route::get('/2fa/recovery', [TwoFactorController::class, 'recovery'])->name('2fa.recovery');
+
+    // Administración 2FA - Solo ADMIN y GERENTE
+    Route::get('/admin/2fa/codigos', [AdminCodigo2FAController::class, 'index'])->name('admin.2fa.codigos.index');
+    Route::post('/admin/2fa/codigos/generar/{usuarioId}', [AdminCodigo2FAController::class, 'generar'])->name('admin.2fa.codigos.generar');
+    Route::get('/admin/2fa/codigos/historial', [AdminCodigo2FAController::class, 'historial'])->name('admin.2fa.codigos.historial');
+    Route::post('/admin/2fa/codigos/revocar/{id}', [AdminCodigo2FAController::class, 'revocar'])->name('admin.2fa.codigos.revocar');
+
+    Route::get('/admin/2fa', [AdminTwoFactorController::class, 'index'])->name('admin.2fa.index');
+    Route::post('/admin/2fa/configurar', [AdminTwoFactorController::class, 'configurarGlobal'])->name('admin.2fa.configurar');
+    Route::post('/admin/2fa/activar/{id}', [AdminTwoFactorController::class, 'activar'])->name('admin.2fa.activar');
+    Route::post('/admin/2fa/desactivar/{id}', [AdminTwoFactorController::class, 'desactivar'])->name('admin.2fa.desactivar');
+    Route::post('/admin/2fa/reset/{id}', [AdminTwoFactorController::class, 'reset'])->name('admin.2fa.reset');
+    Route::get('/admin/auditoria', [AdminTwoFactorController::class, 'auditoria'])->name('admin.auditoria');
 
     Route::get('/', function () {
         return view('inicio');
@@ -45,7 +82,7 @@ Route::middleware(['auth'])->group(function () {
         // Autorización en servidor: la pantalla de caja muestra montos.
         $rol = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
 
-        if (!in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
             abort(403, 'No tienes permiso para acceder a la caja.');
         }
 
@@ -101,6 +138,15 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/reportes/propinas', [ResumenPropinasController::class, 'index'])
         ->name('reportes.propinas');
 
+    // Exportación CSV y vista imprimible. MISMOS filtros y MISMOS importes que
+    // la pantalla (comparten ResumenPropinasController::calcular). La
+    // autorización (ADMIN/GERENTE) se valida también aquí en el backend.
+    Route::get('/reportes/propinas/exportar', [ResumenPropinasController::class, 'exportarCsv'])
+        ->name('reportes.propinas.csv');
+
+    Route::get('/reportes/propinas/imprimir', [ResumenPropinasController::class, 'imprimir'])
+        ->name('reportes.propinas.imprimir');
+
     // ------------------------------------------------------------------
     // HISTORIAL DE FACTURAS.
     // ADMIN y GERENTE listan, imprimen y anulan; CAJERO solo imprime.
@@ -111,6 +157,12 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('/facturas/ticket', [FacturaController::class, 'ticket'])
         ->name('facturas.ticket');
+
+    // Imprimible de una factura específica (SOLO LECTURA). Reutiliza el ticket
+    // actual y añade el snapshot de cliente cuando esté disponible; las
+    // facturas históricas sin snapshot conservan su comportamiento.
+    Route::get('/facturas/{factura}', [FacturaController::class, 'show'])
+        ->name('facturas.show');
 
     // Anulación de factura (solo ADMIN y GERENTE, motivo obligatorio,
     // dentro de transacción). No es solo lectura: marca la factura ANULADA,
@@ -176,6 +228,11 @@ Route::middleware(['auth'])->group(function () {
     // Autorizan ADMIN, GERENTE, CAJERO y MESERO (solo CREAR).
     Route::post('/mesas/{mesaId}/cuentas', [VentaController::class, 'crearSubcuenta'])
         ->name('mesas.cuentas.crear');
+
+    // Cambiar el cliente de una cuenta ABIERTA (solo ADMIN, GERENTE y CAJERO).
+    // No permite cambiar cuentas PAGADA o CANCELADA.
+    Route::post('/mesas/{mesaId}/cuentas/{cuentaId}/cliente', [VentaController::class, 'cambiarClienteCuenta'])
+        ->name('mesas.cuentas.cliente');
 
     /*
     |--------------------------------------------------------------------------
@@ -353,4 +410,13 @@ Route::middleware(['auth'])->group(function () {
 
     Route::post('/configuracion/api', [ConfiguracionController::class, 'actualizar'])
         ->name('configuracion.api');
+
+    // ------------------------------------------------------------------
+    // CONFIGURACIÓN FISCAL Y COMERCIAL (ADMIN y GERENTE).
+    // ------------------------------------------------------------------
+    Route::get('/configuracion-fiscal', [ConfiguracionFiscalController::class, 'index'])
+        ->name('configuracion.fiscal.index');
+
+    Route::post('/configuracion-fiscal/api', [ConfiguracionFiscalController::class, 'actualizar'])
+        ->name('configuracion.fiscal.api');
 });

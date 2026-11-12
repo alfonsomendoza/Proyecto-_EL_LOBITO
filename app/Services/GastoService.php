@@ -60,6 +60,35 @@ class GastoService
     }
 
     /**
+     * Gastos de TODAS las aperturas dentro de un rango de fechas (desde/hasta,
+     * ambos días incluidos completos).
+     *
+     * El rango es semiabierto: `fecha >= inicio(desde)` y
+     * `fecha < inicio(hasta + 1 día)`, así un gasto de las 23:59 del último día
+     * sí entra y no se pierde por la hora. Consultar un solo día es usar la
+     * misma fecha en ambos campos.
+     *
+     * NO depende de que haya una caja abierta: sirve para consultar el
+     * histórico. Incluye los anulados (el panel los marca) para que los totales
+     * por estado se calculen sobre el mismo conjunto que la lista.
+     *
+     * Orden cronológico: primero por fecha, luego por id para desempatar.
+     */
+    public function gastosEnRango(string $desde, string $hasta): Collection
+    {
+        $inicio = \Illuminate\Support\Carbon::parse($desde)->startOfDay();
+        $finExclusivo = \Illuminate\Support\Carbon::parse($hasta)->startOfDay()->addDay();
+
+        return CajaGasto::query()
+            ->with('usuario')
+            ->where('fecha', '>=', $inicio)
+            ->where('fecha', '<', $finExclusivo)
+            ->orderBy('fecha')
+            ->orderBy('id')
+            ->get();
+    }
+
+    /**
      * Suma de los egresos ACTIVOS de la colección. Los anulados se excluyen.
      */
     public function totalActivos(Collection $gastos): float

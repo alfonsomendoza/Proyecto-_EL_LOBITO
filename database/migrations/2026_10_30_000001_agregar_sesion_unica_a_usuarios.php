@@ -9,8 +9,9 @@ use Illuminate\Support\Facades\Schema;
  *
  * `usuarios.session_id` guarda el identificador de la ÚNICA sesión autorizada
  * y `usuarios.ultima_actividad` la última petición válida de esa sesión. Con
- * ambos datos, un segundo inicio de sesión dentro de los 15 minutos posteriores
- * a la última actividad se rechaza (la sesión original sigue intacta).
+ * ambos datos, un segundo inicio de sesión dentro de la ventana de inactividad
+ * configurada en AuthController::MINUTOS_INACTIVIDAD se rechaza (la sesión
+ * original sigue intacta).
  *
  * La migración es ADITIVA: solo agrega dos columnas nullable a la tabla
  * existente `usuarios`. No renombra ni elimina columnas, no toca datos y no

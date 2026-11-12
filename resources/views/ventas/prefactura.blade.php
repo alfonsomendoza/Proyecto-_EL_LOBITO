@@ -42,8 +42,6 @@
             <tr>
                 <td><strong>Cant.</strong></td>
                 <td><strong>Producto</strong></td>
-                <td class="derecha"><strong>P. unit.</strong></td>
-                <td class="derecha"><strong>Subtotal</strong></td>
             </tr>
             @foreach ($lineas as $linea)
                 <tr>
@@ -54,8 +52,6 @@
                             <div class="sugerencia">Cocina: {{ $linea['requiere_cocina'] ? 'Sí' : 'No' }}</div>
                         @endif
                     </td>
-                    <td class="derecha">{{ number_format((float) $linea['precio'], 2) }}</td>
-                    <td class="derecha">{{ number_format((float) $linea['subtotal'], 2) }}</td>
                 </tr>
             @endforeach
         </table>
@@ -65,23 +61,33 @@
 
     <div class="linea"></div>
 
-    {{-- Desglose completo: consumo, descuento (aunque sea cero), base usada
-         para la propina, propina con su porcentaje efectivo y total final. --}}
+    {{-- Desglose completo: solo los conceptos que realmente se aplican y
+         tienen importe mayor a cero. No se muestran estados internos
+         ACTIVO/INACTIVO ni filas con C$0.00. --}}
     <table>
         <tr>
             <td>Consumo:</td>
             <td class="derecha">C$ {{ number_format($consumo, 2) }}</td>
         </tr>
+        @if ($ivaHabilitado && ($fiscal['iva'] ?? 0) > 0)
+        <tr>
+            <td>IVA (15 %):</td>
+            <td class="derecha">+ C$ {{ number_format($fiscal['iva'], 2) }}</td>
+        </tr>
+        @endif
+        @if ($descuento > 0)
         <tr>
             <td>Descuento:</td>
-            <td class="derecha">
-                @if ($descuento > 0)− @endif C$ {{ number_format($descuento, 2) }}
-            </td>
+            <td class="derecha">− C$ {{ number_format($descuento, 2) }}</td>
         </tr>
+        @endif
+        @if ($descuento > 0 || $propina > 0)
         <tr>
             <td>Base (consumo − descuento):</td>
             <td class="derecha">C$ {{ number_format($base, 2) }}</td>
         </tr>
+        @endif
+        @if ($propina > 0)
         <tr>
             <td>
                 Propina:
@@ -89,14 +95,35 @@
                     <span class="sugerencia">({{ number_format($porcentajePropina, 2) }}% de la base)</span>
                 @endif
             </td>
-            <td class="derecha">
-                @if ($propina > 0)+ @endif C$ {{ number_format($propina, 2) }}
-            </td>
+            <td class="derecha">+ C$ {{ number_format($propina, 2) }}</td>
         </tr>
+        @endif
         @if ($propina <= 0 && $descuento > 0 && $propinaSugerida > 0)
             <tr>
                 <td class="sugerencia" colspan="2">Propina sugerida (10% de la base): C$ {{ number_format($propinaSugerida, 2) }} — no incluida.</td>
             </tr>
+        @endif
+        @if (($fiscal['total_retenciones'] ?? 0) > 0)
+        <tr>
+            <td>Total factura:</td>
+            <td class="derecha">C$ {{ number_format($fiscal['total_factura'], 2) }}</td>
+        </tr>
+        @if ($retencionDgiHabilitada && ($fiscal['retencion_dgi'] ?? 0) > 0)
+        <tr>
+            <td>Retención DGI (2 %):</td>
+            <td class="derecha">- C$ {{ number_format($fiscal['retencion_dgi'], 2) }}</td>
+        </tr>
+        @endif
+        @if ($retencionAlcaldiaHabilitada && ($fiscal['retencion_alcaldia'] ?? 0) > 0)
+        <tr>
+            <td>Retención Alcaldía (1 %):</td>
+            <td class="derecha">- C$ {{ number_format($fiscal['retencion_alcaldia'], 2) }}</td>
+        </tr>
+        @endif
+        <tr>
+            <td>Total retenciones:</td>
+            <td class="derecha">- C$ {{ number_format($fiscal['total_retenciones'], 2) }}</td>
+        </tr>
         @endif
         <tr>
             <td class="resaltado">TOTAL POR COBRAR:</td>

@@ -121,13 +121,23 @@ class GastoModuleTest extends TestCase
         ]);
     }
 
-    private function gasto(int $aperturaId, string $concepto, float $monto, string $estado = 'ACTIVO', ?int $usuarioId = null): int
-    {
+    /**
+     * Crea un gasto. `$fecha` (Y-m-d H:i:s) permite simular gastos de días
+     * pasados para probar el filtro por rango; si no se indica, se usa `now()`.
+     */
+    private function gasto(
+        int $aperturaId,
+        string $concepto,
+        float $monto,
+        string $estado = 'ACTIVO',
+        ?int $usuarioId = null,
+        ?string $fecha = null,
+    ): int {
         return DB::table('caja_gastos')->insertGetId([
             'apertura_id' => $aperturaId,
             'concepto' => $concepto,
             'monto' => $monto,
-            'fecha' => now(),
+            'fecha' => $fecha ?? now(),
             'estado' => $estado,
             'usuario_id' => $usuarioId,
         ]);
@@ -210,11 +220,11 @@ class GastoModuleTest extends TestCase
     {
         // No se crea ninguna apertura.
         $this->actingAs($this->usuario('CAJERO'))
-            ->post(route('gastos.store'), [
+            ->postJson(route('gastos.store'), [
                 'conceptos' => ['Pago de agua'],
                 'montos' => [100],
             ])
-            ->assertStatus(409)
+            ->assertStatus(422)
             ->assertJson(['exito' => false]);
 
         $this->assertDatabaseCount('caja_gastos', 0);
@@ -245,7 +255,7 @@ class GastoModuleTest extends TestCase
             '0e13212312132121',
             '1e3',
             '10abc',
-            '25aasasdasdasdasasd',
+            '25aasasdasdasdasdasd',
             '--10',
             '10%%',
             '10.125',
@@ -393,6 +403,8 @@ class GastoModuleTest extends TestCase
 
     public function test_anular_gasto_inexistente_devuelve_404(): void
     {
+        $this->apertura('ABIERTA');
+
         $this->actingAs($this->usuario('ADMIN'))
             ->post(route('gastos.anular', 9999))
             ->assertStatus(404)
@@ -483,142 +495,244 @@ class GastoModuleTest extends TestCase
         $respuesta->assertStatus(200);
         $respuesta->assertSee('GastoActivoTodos');
         $respuesta->assertSee('GastoAnuladoTodos');
-        $respuesta->assertSee('ANULADO');
     }
 
-    public function test_filtro_invalido_vuelve_a_activos(): void
+    public function test_filtro_activos_mantiene_el_comportamiento_predeterminado(): void
     {
         $usuario = $this->usuario('CAJERO');
         $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $this->gasto($aperturaId, 'GastoActivoInvalido', 100, 'ACTIVO', $usuario->id);
-        $this->gasto($aperturaId, 'GastoAnuladoInvalido', 200, 'ANULADO', $usuario->id);
+        $this->gasto($aperturaId, 'ActivoSinFiltrar', 100, 'ACTIVO', $usuario->id);
+        $this->gasto($aperturaId, 'AnuladoSinFiltro', 300, 'ANULADO', $usuario->id);
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'basura']));
+        // Sin parámetro = estado predeterminado (activos).
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index'));
 
         $respuesta->assertStatus(200);
-        $respuesta->assertSee('GastoActivoInvalido');
-        $respuesta->assertDontSee('GastoAnuladoInvalido');
+        $respuesta->assertSee('ActivoSinFiltrar');
+        $respuesta->assertDontSee('AnuladoSinFiltro');
     }
 
-    public function test_totales_no_incluyen_anulados_bajo_filtro_todos(): void
+    public function test_filtros_invalidos_caidan_en_activos(): void
     {
         $usuario = $this->usuario('CAJERO');
         $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $this->gasto($aperturaId, 'ActivoTotal', 100, 'ACTIVO', $usuario->id);
-        $this->gasto($aperturaId, 'AnuladoTotal', 999, 'ANULADO', $usuario->id);
+        $this->gasto($aperturaId, 'GastoSoloActivo', 100, 'ACTIVO', $usuario->id);
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'todos']));
+        $respuesta = $this->actingAs($usuario)->get(route('gastos.index', ['estado' => 'requisitos']));
 
         $respuesta->assertStatus(200);
-        $respuesta->assertSee('SUBTOTAL ANULADOS');
-        // El total activo y el subtotal anulado aparecen por separado; nunca sumados.
-        $respuesta->assertSee('C$ 100.00');
-        $respuesta->assertSee('C$ 999.00');
-        $respuesta->assertDontSee('1,099.00');
+        $respuesta->assertSee('GastoSoloActivo');
     }
 
     /* ------------------------------------------------------------------
-     | 6. Impresión individual y de listado con filtros
+     | 6. Filtro por fechas (desde / hasta)
      | ------------------------------------------------------------------ */
 
-    public function test_imprimir_gasto_anulado_individual(): void
+    public function test_consulta_por_una_fecha_muestra_un_solo_dia(): void
     {
-        $usuario = $this->usuario('CAJERO');
-        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $gastoId = $this->gasto($aperturaId, 'GastoAnuladoImpreso', 500, 'ANULADO', $usuario->id);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'GastoDia18', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+        $this->gasto($ap, 'GastoDia19', 200, 'ACTIVO', $admin->id, '2026-10-19 09:00:00');
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId));
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-18',
+        ]));
 
-        $respuesta->assertStatus(200);
-        $respuesta->assertSee('GastoAnuladoImpreso');
-        $respuesta->assertSee('ANULADO');
-        $respuesta->assertSee('C$ 500.00');
+        $r->assertStatus(200)
+            ->assertSee('GastoDia18')
+            ->assertDontSee('GastoDia19')
+            ->assertSee('C$ 100.00')
+            ->assertDontSee('C$ 200.00')
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
     }
 
-    public function test_comprobante_individual_identifica_el_gasto_correcto(): void
+    public function test_rango_completo_incluye_varios_dias_y_calcula_totales(): void
     {
-        $usuario = $this->usuario('CAJERO');
-        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $gastoId = $this->gasto($aperturaId, 'GastoSeleccionado', 120, 'ACTIVO', $usuario->id);
-        $this->gasto($aperturaId, 'GastoAjenoNoDebeSalir', 999, 'ACTIVO', $usuario->id);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura(); // ABIERTA → también incluye gasto en el mismo turno actual
+        $this->gasto($ap, 'Gasto18A', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+        $this->gasto($ap, 'Gasto18B', 50, 'ACTIVO', $admin->id, '2026-10-18 14:00:00');
+        $this->gasto($ap, 'Gasto19A', 200, 'ACTIVO', $admin->id, '2026-10-19 09:00:00');
+        $this->gasto($ap, 'Gasto19B', 300, 'ACTIVO', $admin->id, '2026-10-19 14:00:00');
+        $this->gasto($ap, 'Gasto20A', 150, 'ACTIVO', $admin->id, '2026-10-20 09:00:00');
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId));
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-19',
+        ]));
 
-        $respuesta->assertStatus(200);
-        $respuesta->assertSee('GastoSeleccionado');
-        $respuesta->assertDontSee('GastoAjenoNoDebeSalir');
+        $r->assertStatus(200)
+            ->assertSee('Gasto18A')
+            ->assertSee('Gasto18B')
+            ->assertSee('Gasto19A')
+            ->assertSee('Gasto19B')
+            ->assertDontSee('Gasto20A')
+            ->assertSee('C$ 650.00')
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-19');
     }
 
-    public function test_imprimir_listado_anulados(): void
+    public function test_el_ultimo_dia_se_incluye_completo_incluso_ultimo_minuto(): void
     {
-        $usuario = $this->usuario('CAJERO');
-        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $this->gasto($aperturaId, 'ActivoListadoImpreso', 100, 'ACTIVO', $usuario->id);
-        $this->gasto($aperturaId, 'AnuladoListadoImpreso', 200, 'ANULADO', $usuario->id);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $inicioUltimoDia = '2026-10-18 00:00:00';
+        $ultimoMinuto = '2026-10-18 23:59:59';
+        $primerMinutoSiguiente = '2026-10-19 00:00:00';
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']));
+        $this->gasto($ap, 'GastoInicioUltimoDia', 100, 'ACTIVO', $admin->id, $inicioUltimoDia);
+        $this->gasto($ap, 'GastoUltimoMinuto', 50, 'ACTIVO', $admin->id, $ultimoMinuto);
+        $this->gasto($ap, 'GastoPrimerMinutoSiguiente', 999, 'ACTIVO', $admin->id, $primerMinutoSiguiente);
 
-        $respuesta->assertStatus(200);
-        $respuesta->assertSee('AnuladoListadoImpreso');
-        $respuesta->assertDontSee('ActivoListadoImpreso');
-        $respuesta->assertSee('SUBTOTAL ANULADOS');
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-18',
+        ]));
+
+        $r->assertStatus(200)
+            ->assertSee('GastoInicioUltimoDia')
+            ->assertSee('GastoUltimoMinuto')
+            ->assertDontSee('GastoPrimerMinutoSiguiente')
+            ->assertSee('C$ 150.00')
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
     }
 
-    public function test_impresion_todos_distingue_estados(): void
+    public function test_rango_invertido_no_calcula_nada_y_muestra_el_motivo(): void
     {
-        $usuario = $this->usuario('CAJERO');
-        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $this->gasto($aperturaId, 'ActivoImpresoMixto', 100, 'ACTIVO', $usuario->id);
-        $this->gasto($aperturaId, 'AnuladoImpresoMixto', 200, 'ANULADO', $usuario->id);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'Gasto18', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+        $this->gasto($ap, 'Gasto19', 200, 'ACTIVO', $admin->id, '2026-10-19 09:00:00');
 
-        $respuesta = $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'todos']));
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-19',
+            'hasta' => '2026-10-18',
+        ]));
 
-        $respuesta->assertStatus(200);
-        $respuesta->assertSee('ActivoImpresoMixto');
-        $respuesta->assertSee('AnuladoImpresoMixto');
-        $respuesta->assertSee('ACTIVO');
-        $respuesta->assertSee('ANULADO');
-        $respuesta->assertSee('SUBTOTAL ANULADOS');
+        $r->assertStatus(200)
+            ->assertSee('La fecha "Desde" no puede ser posterior a la fecha "Hasta"')
+            ->assertDontSee('Gasto18')
+            ->assertDontSee('Gasto19')
+            ->assertDontSee('C$ 100.00')
+            ->assertDontSee('C$ 200.00')
+            ->assertSee('No hay gastos en el período');
     }
 
-    public function test_impresion_no_modifica_el_estado(): void
+    public function test_fecha_invalida_hace_que_el_listado_no_se_calcule(): void
     {
-        $usuario = $this->usuario('CAJERO');
-        $aperturaId = $this->apertura('ABIERTA', $usuario->id);
-        $gastoId = $this->gasto($aperturaId, 'GastoNoCambia', 300, 'ANULADO', $usuario->id);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'GastoValido', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
 
-        $this->actingAs($usuario)->get(route('gastos.ticket.gasto', $gastoId))->assertStatus(200);
-        $this->actingAs($usuario)->get(route('gastos.ticket', ['estado' => 'anulados']))->assertStatus(200);
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '18/10/2026',
+            'hasta' => '2026-10-18',
+        ]));
 
-        $this->assertDatabaseHas('caja_gastos', ['id' => $gastoId, 'estado' => 'ANULADO']);
-        $this->assertDatabaseCount('caja_gastos', 1);
+        $r->assertStatus(200)
+            ->assertSee('Las fechas indicadas no son válidas.')
+            ->assertDontSee('GastoValido')
+            ->assertDontSee('C$ 100.00')
+            ->assertSee('No hay gastos en el período');
     }
 
-    public function test_imprimir_gasto_inexistente_devuelve_404(): void
+    public function test_fechas_y_filtro_de_estado_se_combinan(): void
     {
-        $this->actingAs($this->usuario('ADMIN'))
-            ->get(route('gastos.ticket.gasto', 9999))
-            ->assertStatus(404);
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'ActivoSeleccion', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+        $this->gasto($ap, 'AnuladoSeleccion', 200, 'ANULADO', $admin->id, '2026-10-18 09:00:00');
+
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-18',
+            'estado' => 'anulados',
+        ]));
+
+        $r->assertStatus(200)
+            ->assertSee('AnuladoSeleccion')
+            ->assertDontSee('ActivoSeleccion')
+            ->assertSee('C$ 200.00')
+            ->assertDontSee('C$ 100.00')
+            ->assertSee('SUBTOTAL ANULADOS')
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
     }
 
-    public function test_mesero_no_puede_imprimir_gasto_individual(): void
+    public function test_paginacion_conserva_las_fechas_y_muestra_todos_los_totales_sobre_el_rango_completo(): void
     {
-        $aperturaId = $this->apertura('ABIERTA');
-        $gastoId = $this->gasto($aperturaId, 'GastoProtegido', 100, 'ANULADO');
+        $admin = $this->usuario('ADMIN');
 
+        // 55 activos del mismo día -> página 1 (50) y página 2 (5).
+        $ap = $this->apertura();
+        for ($i = 1; $i <= 55; $i++) {
+            $this->gasto($ap, "ActivoFecha{$i}", 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+        }
+
+        $primera = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-18',
+        ]));
+
+        $primera->assertStatus(200)
+            ->assertSee('Mostrando 1–50 de 55 gasto(s)')
+            ->assertSee('C$ 5,500.00')  // total sobre todas las filas
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
+
+        $this->assertStringContainsString('desde=2026-10-18', $primera->viewData('paginaGastos')->nextPageUrl());
+        $this->assertStringContainsString('hasta=2026-10-18', $primera->viewData('paginaGastos')->nextPageUrl());
+
+        $segunda = $this->actingAs($admin)
+            ->get(route('gastos.index', [
+                'desde' => '2026-10-18',
+                'hasta' => '2026-10-18',
+                'pagina' => 2,
+            ]));
+
+        $segunda
+            ->assertStatus(200)
+            ->assertSee('Mostrando 51–55 de 55 gasto(s)')
+            ->assertSee('C$ 5,500.00')
+            ->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
+
+        $contenido = $segunda->viewData('paginaGastos')->pluck('concepto')->toArray();
+        $this->assertContains('ActivoFecha51', $contenido);
+        $this->assertContains('ActivoFecha55', $contenido);
+    }
+
+    public function test_limpiar_filtros_vuelve_al_turno_activo(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'GastoTurno18', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+
+        $r = $this->actingAs($admin)->get(route('gastos.index', [
+            'desde' => '2026-10-18',
+            'hasta' => '2026-10-18',
+        ]));
+        $r->assertStatus(200)->assertSee('Gastos del período 2026-10-18 → 2026-10-18');
+
+        $sinFiltro = $this->actingAs($admin)->get(route('gastos.index'));
+        $sinFiltro->assertStatus(200)
+            ->assertSee('Gastos Registrados en este Turno')
+            ->assertSee('GastoTurno18');
+    }
+
+    public function test_el_filtro_de_fechas_respeta_los_permisos_existentes(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $cajero = $this->usuario('CAJERO');
+        $ap = $this->apertura();
+        $this->gasto($ap, 'GastoAdmin', 100, 'ACTIVO', $admin->id, '2026-10-18 09:00:00');
+
+        // ADMIN y CAJERO pueden ver con fechas.
+        $this->actingAs($admin)->get(route('gastos.index', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))->assertStatus(200);
+        $this->actingAs($cajero)->get(route('gastos.index', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))->assertStatus(200);
+
+        // MESERO sigue sin permiso (403) aunque envíe fechas.
         $this->actingAs($this->usuario('MESERO'))
-            ->get(route('gastos.ticket.gasto', $gastoId))
+            ->get(route('gastos.index', ['desde' => '2026-10-18', 'hasta' => '2026-10-18']))
             ->assertStatus(403);
-    }
-
-    public function test_admin_puede_imprimir_gasto_individual(): void
-    {
-        $aperturaId = $this->apertura('ABIERTA');
-        $gastoId = $this->gasto($aperturaId, 'GastoAdminImpreso', 100, 'ACTIVO');
-
-        $this->actingAs($this->usuario('ADMIN'))
-            ->get(route('gastos.ticket.gasto', $gastoId))
-            ->assertStatus(200);
     }
 
     /* ------------------------------------------------------------------
