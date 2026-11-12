@@ -255,3 +255,6 @@ Homestead.yaml
 /opencode.json
 /opencode-config.ts
 /opencode-security-skills-el-lobito.zip:Zone.Identifier
+*:Zone.Identifier
+Zone.Identifier
+**/*:Zone.Identifier
