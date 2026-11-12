@@ -74,6 +74,7 @@ trait CreaEsquemaCompleto
             $t->string('username', 50)->nullable();
             $t->string('password_hash', 255)->nullable();
             $t->integer('rol_id')->nullable();
+            $t->boolean('activo')->default(true);
         });
 
         Schema::create('mesas', function (Blueprint $t) {

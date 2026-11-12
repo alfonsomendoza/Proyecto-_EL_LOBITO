@@ -54,6 +54,27 @@ class CajaAbierta
             return true;
         }
 
+        // Administración y seguridad: gestión de usuarios, roles, 2FA,
+        // dispositivos/sesiones y configuración de seguridad. Se mantienen
+        // accesibles con caja cerrada según los permisos existentes.
+        $adminSeguridad = [
+            'usuarios',
+            'roles',
+            'admin',
+            'dispositivo',
+        ];
+        foreach ($adminSeguridad as $prefijo) {
+            if ($path === $prefijo || str_starts_with($path, $prefijo.'/')) {
+                return true;
+            }
+        }
+
+        // Configuración general (seguridad/módulos) sí; la fiscal afecta
+        // ventas y se mantiene bloqueada con caja cerrada.
+        if ($path === 'configuracion' || str_starts_with($path, 'configuracion/')) {
+            return true;
+        }
+
         return false;
     }
 

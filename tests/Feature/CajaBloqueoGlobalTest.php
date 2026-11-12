@@ -90,4 +90,29 @@ class CajaBloqueoGlobalTest extends TestCase
             ->assertStatus(200)
             ->assertJson(['exito' => true]);
     }
+
+    public function test_caja_cerrada_permite_administracion_y_seguridad_segun_permisos(): void
+    {
+        $this->cerrarCaja();
+
+        // ADMIN puede gestionar usuarios/roles con caja cerrada.
+        $admin = $this->usuario('ADMIN');
+        $this->actingAs($admin)->get('/usuarios')->assertStatus(200);
+        $this->actingAs($admin)->get('/roles')->assertStatus(200);
+        $this->actingAs($admin)->get('/configuracion')->assertStatus(200);
+
+        // CAJERO/MESERO/COCINERO no reciben privilegios adicionales.
+        foreach (['CAJERO', 'MESERO', 'COCINERO'] as $rol) {
+            $u = $this->usuario($rol);
+            $this->actingAs($u)->get('/usuarios')->assertRedirect(route('inicio'));
+            $this->actingAs($u)->get('/roles')->assertRedirect(route('inicio'));
+        }
+
+        // Operaciones comerciales siguen bloqueadas.
+        $mesaId = DB::table('mesas')->insertGetId(['numero' => 'M3', 'capacidad' => 4, 'estado' => 'LIBRE']);
+        $this->actingAs($admin)
+            ->postJson('/mesas/api', ['accion' => 'abrir_mesa', 'mesa_id' => $mesaId])
+            ->assertStatus(422)
+            ->assertJson(['exito' => false]);
+    }
 }

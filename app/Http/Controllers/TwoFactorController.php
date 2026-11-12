@@ -196,7 +196,39 @@ class TwoFactorController extends Controller
 
         $user = Auth::user();
         $claveIntentos = $this->twoFactorService->claveIntentos($user->id, $request->ip());
+        $claveRecuperacion = '2fa-recuperacion:'.$user->id.':'.($request->ip() ?: 'sin-ip');
 
+        // Los códigos de recuperación son de un solo uso y NO deben quedar
+        // bloqueados por los intentos fallidos del TOTP (ni viceversa).
+        // Se intentan PRIMERO, con su propio limitador.
+        try {
+            if (\Illuminate\Support\Facades\RateLimiter::tooManyAttempts($claveRecuperacion, 5)) {
+                $segundos = \Illuminate\Support\Facades\RateLimiter::availableIn($claveRecuperacion);
+
+                return back()->withErrors([
+                    'code' => "Demasiados intentos fallidos. Intenta de nuevo en {$segundos} segundos.",
+                ]);
+            }
+        } catch (\Throwable $e) {
+            // Ignorar si el almacén de caché no responde.
+        }
+
+        if ($this->twoFactorService->consumirCodigoRecuperacion($user, $request->code)) {
+            $this->twoFactorService->limpiarIntentos($claveIntentos);
+            try {
+                \Illuminate\Support\Facades\RateLimiter::clear($claveRecuperacion);
+            } catch (\Throwable $e) {
+            }
+            $this->twoFactorService->marcarSesionVerificada($request->session(), $user);
+            try {
+                $this->auditService->log('2fa_codigo_recuperacion_usado', $user->id);
+            } catch (\Throwable $e) {
+            }
+
+            return redirect()->intended(route('inicio'));
+        }
+
+        // Bloqueo propio del TOTP (no afecta a los códigos de recuperación).
         if ($this->twoFactorService->bloqueado($claveIntentos)) {
             $segundos = $this->twoFactorService->segundosBloqueo($claveIntentos);
 
@@ -224,19 +256,12 @@ class TwoFactorController extends Controller
             }
         }
 
-        // Código de recuperación: consumo ATÓMICO y de un solo uso.
-        if ($this->twoFactorService->consumirCodigoRecuperacion($user, $request->code)) {
-            $this->twoFactorService->limpiarIntentos($claveIntentos);
-            $this->twoFactorService->marcarSesionVerificada($request->session(), $user);
-            try {
-                $this->auditService->log('2fa_codigo_recuperacion_usado', $user->id);
-            } catch (\Throwable $e) {
-            }
-
-            return redirect()->intended(route('inicio'));
-        }
-
         $this->twoFactorService->registrarIntentoFallido($claveIntentos);
+
+        try {
+            \Illuminate\Support\Facades\RateLimiter::hit($claveRecuperacion, 300);
+        } catch (\Throwable $e) {
+        }
 
         try {
             $this->auditService->log('2fa_validacion_fallida', $user->id, 'Código TOTP o de recuperación inválido');

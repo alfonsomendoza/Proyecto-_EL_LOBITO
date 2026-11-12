@@ -8,6 +8,7 @@ use App\Services\TwoFactorService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\RateLimiter;
 
 class VerificarCodigo2FAController extends Controller
 {
@@ -35,7 +36,23 @@ class VerificarCodigo2FAController extends Controller
         ]);
 
         $usuario = Auth::user();
-        
+
+        // Protección contra fuerza bruta a nivel de endpoint (no por código):
+        // un código válido se acepta aunque haya intentos fallidos previos.
+        $claveLimitador = '2fa-verificar:'.$usuario->id.':'.($request->ip() ?: 'sin-ip');
+
+        try {
+            if (RateLimiter::tooManyAttempts($claveLimitador, 5)) {
+                $segundos = RateLimiter::availableIn($claveLimitador);
+
+                $this->auditService->log('2fa_bloqueado', $usuario->id, 'Demasiados intentos fallidos de código 2FA');
+
+                return back()->withErrors(['codigo' => "Demasiados intentos fallidos. Intenta de nuevo en {$segundos} segundos."]);
+            }
+        } catch (\Throwable $e) {
+            // Si el almacén de caché no responde, se permite el intento.
+        }
+
         // Buscar código válido pendiente
         $codigos = Codigo2FAAdministrado::where('usuario_id', $usuario->id)
             ->where('usado', false)
@@ -44,43 +61,42 @@ class VerificarCodigo2FAController extends Controller
                   ->orWhere('expira_en', '>', now());
             })
             ->get();
-        
+
         $valido = false;
         $codigoEncontrado = null;
-        
+
         foreach ($codigos as $codigo) {
             if (Hash::check($request->codigo, $codigo->codigo_hash)) {
-                if ($codigo->intentos >= 5) { // Límite de intentos
-                    $codigo->usado = true;
-                    $codigo->usado_en = now();
-                    $codigo->save();
-                    $this->auditService->log('2fa_intentos_excedidos', $usuario->id, 'Límite de intentos excedido');
-                    return back()->withErrors(['codigo' => 'Código bloqueado por intentos excesivos.']);
-                }
                 $valido = true;
                 $codigoEncontrado = $codigo;
                 break;
             }
         }
-        
+
         if (! $valido) {
-            // Incrementar intentos en códigos pendientes
-            foreach ($codigos as $codigo) {
-                $codigo->intentos++;
-                $codigo->save();
+            try {
+                RateLimiter::hit($claveLimitador, 300);
+            } catch (\Throwable $e) {
+                // Ignorar si el almacén no responde.
             }
             $this->auditService->log('2fa_codigo_invalido', $usuario->id, 'Código 2FA inválido');
             return back()->withErrors(['codigo' => 'Código inválido.']);
         }
-        
+
         // Marcar código como usado
         $codigoEncontrado->usado = true;
         $codigoEncontrado->usado_en = now();
         $codigoEncontrado->save();
-        
+
+        try {
+            RateLimiter::clear($claveLimitador);
+        } catch (\Throwable $e) {
+            // Ignorar.
+        }
+
         $this->twoFactorService->marcarSesionVerificada($request->session(), $usuario);
         $this->auditService->log('2fa_verificado_exitoso', $usuario->id);
-        
+
         return redirect()->intended(route('inicio'));
     }
 }
