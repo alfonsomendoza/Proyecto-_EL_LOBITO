@@ -46,6 +46,14 @@ class CajaAperturaController extends Controller
 
         try {
             return DB::transaction(function () use ($request) {
+                // Mutex de caja: la apertura compite con cierres, anulaciones
+                // de apertura y cobros. Se toma ANTES de leer el estado y se
+                // vuelve a comprobar DESPUÉS de bloquear, para que dos
+                // solicitudes simultáneas no abran dos cajas.
+                if (Schema::hasTable('caja_bloqueo')) {
+                    DB::table('caja_bloqueo')->where('id', 1)->lockForUpdate()->get();
+                }
+
                 $cajaAbierta = CajaApertura::where('estado', 'ABIERTA')->lockForUpdate()->exists();
 
                 if ($cajaAbierta) {

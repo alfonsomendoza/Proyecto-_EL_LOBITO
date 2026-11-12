@@ -50,10 +50,25 @@ trait CreaEsquemaCompleto
             $t->string('identificacion', 50)->nullable();
             $t->text('direccion')->nullable();
             $t->boolean('activo')->nullable()->default(true);
+            // Misma columna que la migración real (2026_11_10_000001): indica si
+            // el cliente debe retener DGI / Alcaldía. Se replica aquí a mano porque
+            // las pruebas no aplican migraciones.
+            $t->boolean('sujeto_retenciones')->default(false);
+            $t->string('identificacion_normalizada', 50)->nullable();
+            $t->string('telefono_normalizado', 30)->nullable();
             $t->timestamp('creado_en')->nullable();
         });
 
+        // Índice único de identificación normalizada: solo en MySQL real.
+        // En SQLite aislado no se crea para no afectar las pruebas aisladas.
+        // Schema::table('clientes', fn ($t) => $t->unique('identificacion_normalizada'));
+
         Schema::create('usuarios', function (Blueprint $t) {
+            // Índice único de clientes por identificación normalizada, solo
+            // relevante en la rama de clientes. No se replica en SQLite para
+            // las pruebas aisladas.
+            // Schema::table('clientes', fn ($t) => $t->unique('identificacion_normalizada'));
+
             $t->increments('id');
             $t->string('nombre', 100)->nullable();
             $t->string('username', 50)->nullable();
@@ -164,6 +179,7 @@ trait CreaEsquemaCompleto
         Schema::create('cuentas', function (Blueprint $t) {
             $t->bigIncrements('id');
             $t->integer('venta_id');
+            $t->integer('cliente_id')->nullable();
             $t->string('nombre', 255);
             $t->decimal('total', 10, 2)->default(0);
             $t->string('estado', 255)->default('ABIERTA');
@@ -292,6 +308,8 @@ trait CreaEsquemaCompleto
 
         // Traslados (pos() consulta traslado_detalles), pagos mixtos y
         // ajustes de cobro: replica 2026_10_18_000001 y 2026_10_18_000002.
+        // Este trait crea las tablas de traslados/pagos y garantiza el
+        // Cliente General (ID 1) una sola vez.
         $this->crearEsquemaTrasladosPagos();
     }
 }

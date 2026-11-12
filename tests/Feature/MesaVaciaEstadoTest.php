@@ -55,6 +55,8 @@ class MesaVaciaEstadoTest extends TestCase
             'clientes',
             'usuarios',
             'roles',
+            'caja_apertura',
+            'caja_bloqueo',
         ] as $tabla) {
             Schema::dropIfExists($tabla);
         }
@@ -73,6 +75,8 @@ class MesaVaciaEstadoTest extends TestCase
             $t->string('identificacion', 50)->nullable();
             $t->text('direccion')->nullable();
             $t->boolean('activo')->nullable()->default(true);
+            $t->string('identificacion_normalizada', 50)->nullable();
+            $t->string('telefono_normalizado', 30)->nullable();
             $t->timestamp('creado_en')->nullable();
         });
 
@@ -231,6 +235,10 @@ class MesaVaciaEstadoTest extends TestCase
             $t->integer('id')->primary();
         });
         DB::table('caja_bloqueo')->insert(['id' => 1]);
+
+        // abrirMesa exige una apertura de caja ABIERTA: se deja una lista
+        // para que las pruebas de "abrir mesa" no choquen con caja_cerrada.
+        $this->abrirCaja();
 
         // Trazabilidad de traslados + pagos/ajustes de cobro (replica las
         // migraciones 2026_10_18): exigido por pos() y trasladarConsumoCuenta.

@@ -50,6 +50,7 @@ class SubcuentasTest extends TestCase
             'productos',
             'categorias',
             'mesas',
+            'clientes',
             'usuarios',
             'roles',
         ] as $tabla) {
@@ -149,6 +150,7 @@ class SubcuentasTest extends TestCase
             $t->decimal('total', 10, 2)->default(0);
             $t->string('estado', 255)->default('ABIERTA');
             $t->integer('apertura_id')->nullable();
+            $t->unsignedInteger('cliente_id')->nullable();
             $t->string('metodo_pago', 30)->nullable();
             $t->string('banco', 30)->nullable();
             $t->decimal('monto_recibido', 12, 2)->nullable();
@@ -156,6 +158,23 @@ class SubcuentasTest extends TestCase
             $t->unsignedBigInteger('usuario_cobro')->nullable();
             $t->timestamps();
         });
+
+        Schema::create('clientes', function (Blueprint $t) {
+            $t->increments('id');
+            $t->string('nombre', 150);
+            $t->string('telefono', 30)->nullable();
+            $t->string('identificacion', 50)->nullable();
+            $t->text('direccion')->nullable();
+            $t->boolean('activo')->default(true);
+            $t->string('identificacion_normalizada', 50)->nullable();
+            $t->string('telefono_normalizado', 30)->nullable();
+            $t->timestamps();
+        });
+
+        // Índice único de identificación normalizada: solo en MySQL real.
+        // En SQLite aislado no se crea para no chocar con el índice único de
+        // producción (la migración 2026_10_30_000002 lo crea en MySQL).
+        // Schema::table('clientes', fn ($t) => $t->unique('identificacion_normalizada'));
 
         Schema::create('cuenta_detalles', function (Blueprint $t) {
             $t->bigIncrements('id');
@@ -254,13 +273,14 @@ class SubcuentasTest extends TestCase
         ]);
     }
 
-    private function cuenta(int $ventaId, string $nombre, string $estado = 'ABIERTA'): int
+    private function cuenta(int $ventaId, string $nombre, string $estado = 'ABIERTA', int $clienteId = null): int
     {
         return DB::table('cuentas')->insertGetId([
             'venta_id' => $ventaId,
             'nombre' => $nombre,
             'total' => 0,
             'estado' => $estado,
+            'cliente_id' => $clienteId,
             'created_at' => now(),
             'updated_at' => now(),
         ]);

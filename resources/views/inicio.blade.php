@@ -42,6 +42,11 @@
 
             @if (in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO', 'MESERO']))
                 <a href="{{ route('clientes.index') }}" style="text-decoration: none; background: #17a2b8; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-address-book"></i> Clientes</a>
+
+            @endif
+
+            @if (in_array($rol, ['ADMIN', 'GERENTE']))
+                <a href="{{ route('configuracion.fiscal.index') }}" style="text-decoration: none; background: #2d3436; color: white; padding: 12px 20px; border-radius: 5px; font-weight: 600;"><i class="fas fa-file-invoice-dollar"></i> Configuración fiscal y comercial</a>
             @endif
 
             {{-- Ventas: cuentas pendientes de cobro e historial. Solo ADMIN,

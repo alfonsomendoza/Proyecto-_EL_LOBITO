@@ -6,6 +6,7 @@ use App\Models\CajaApertura;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Resumen del Día (varios turnos de una misma fecha).
@@ -35,11 +36,27 @@ use Illuminate\Support\Facades\DB;
  *     tarjeta débito/crédito): el POS solo registra EFECTIVO, TARJETA y
  *     TRANSFERENCIA, y las tarjetas se agrupan por banco.
  *
+ * DATOS DE CAJAS Y PROPINAS
+ * -------------------------
+ * Cada turno devuelve, además de los importes, quién ABRIÓ la caja
+ * (`caja_apertura.usuario_id`, con respaldo del texto `cajero`), quién la
+ * CERRÓ (`caja_cierre.usuario_id` del cierre vigente), las fechas de apertura y
+ * cierre, el fondo inicial, el total de ventas, el total de gastos y la
+ * diferencia del arqueo. Las propinas se calculan con
+ * `ResumenPropinasService` (una sola fórmula): se informa lo COBRADO al cliente
+ * y se deja `pagadas = null` porque el esquema no registra el pago al personal.
+ *
  * Solo LEE datos: no escribe ni modifica ventas, cuentas, gastos ni cierres.
  */
 class ResumenDiarioService
 {
-    public function __construct(private CajaCierreService $cierre) {}
+    public function __construct(
+        private CajaCierreService $cierre,
+        // Reutiliza el MISMO cálculo de propinas que el módulo de Propinas:
+        // así no hay dos fórmulas distintas para el mismo dato.
+        private ResumenPropinasService $propinas
+    ) {
+    }
 
     /**
      * Turnos (aperturas) cuya fecha de negocio corresponde al día indicado,
@@ -177,15 +194,44 @@ class ResumenDiarioService
             'ventas_anuladas' => 0.0,
             'cantidad_ventas_anuladas' => 0,
             'cantidad_cuentas' => 0,
+            'diferencia_caja' => 0.0,
+            'cantidad_cierres' => 0,
         ];
 
         $tarjetasPorBanco = [];
         $turnos = [];
 
+        // Cierres vigentes de todos los turnos del período, en una sola pasada:
+        // de ahí salen el usuario que cerró y las diferencias de caja, además
+        // de los nombres de quienes abrieron. Se resuelven contra `usuarios`
+        // (no se confía solo en el texto heredado `cajero`).
+        $cierresVigentes = [];
+        $idsUsuarios = $aperturas->pluck('usuario_id')->filter()->all();
+
+        foreach ($aperturas as $apertura) {
+            $cierreApertura = $this->cierre->cierreVigente((int) $apertura->id);
+            $cierresVigentes[(int) $apertura->id] = $cierreApertura;
+
+            if ($cierreApertura && $cierreApertura->usuario_id) {
+                $idsUsuarios[] = $cierreApertura->usuario_id;
+            }
+        }
+
+        $nombresUsuarios = [];
+        if ($idsUsuarios !== [] && Schema::hasTable('usuarios')) {
+            $nombresUsuarios = DB::table('usuarios')
+                ->whereIn('id', array_values(array_unique(array_map('intval', $idsUsuarios))))
+                ->pluck('nombre', 'id')
+                ->toArray();
+        }
+
         foreach ($aperturas as $apertura) {
             $fin = $this->finDeTurno($apertura, $todas);
-            $ventas = $this->cierre->resumenVentas($apertura, $fin);
-            $cierreVigente = $this->cierre->cierreVigente((int) $apertura->id);
+            // `$fin` es el INICIO del turno siguiente: se excluye ese instante
+            // exacto para que una venta cobrada justo en el corte no se cuente
+            // en los dos turnos.
+            $ventas = $this->cierre->resumenVentas($apertura, $fin, true);
+            $cierreVigente = $cierresVigentes[(int) $apertura->id] ?? null;
 
             $egresosTurno = 0.0;
             $otrosIngresosTurno = (float) ($cierreVigente->otros_ingresos ?? 0);
@@ -228,6 +274,11 @@ class ResumenDiarioService
             $totales['ventas_anuladas'] += $anuladas['monto'];
             $totales['cantidad_ventas_anuladas'] += $anuladas['cantidad'];
 
+            if ($cierreVigente) {
+                $totales['diferencia_caja'] += (float) $cierreVigente->diferencia;
+                $totales['cantidad_cierres']++;
+            }
+
             $turnos[] = [
                 'apertura' => $apertura,
                 'inicio' => $this->cierre->inicioTurno($apertura),
@@ -240,6 +291,19 @@ class ResumenDiarioService
                 'retiros' => $retirosTurno,
                 'cambios' => $cambiosTurno,
                 'ventas_anuladas' => $anuladas,
+                // Usuario que ABRIÓ el turno: se prefiere el vínculo
+                // `caja_apertura.usuario_id`; si el registro es heredado y no
+                // lo tiene, se usa el nombre guardado en `cajero`.
+                'abrio' => $this->nombreUsuario($apertura->usuario_id, $nombresUsuarios)
+                    ?? ($apertura->cajero !== null && $apertura->cajero !== '' ? (string) $apertura->cajero : null),
+                // Usuario que CERRÓ: `caja_cierre.usuario_id`; respaldo `cajero`
+                // del propio cierre.
+                'cerro' => $this->nombreUsuario($cierreVigente->usuario_id ?? null, $nombresUsuarios)
+                    ?? (($cierreVigente->cajero ?? null) !== null && ($cierreVigente->cajero ?? '') !== '' ? (string) $cierreVigente->cajero : null),
+                'fecha_apertura' => $apertura->fecha,
+                'fecha_cierre' => $cierreVigente->fecha ?? null,
+                'total_ventas' => round((float) $ventas['total'], 2),
+                'diferencia' => $cierreVigente ? round((float) $cierreVigente->diferencia, 2) : null,
             ];
         }
 
@@ -250,6 +314,8 @@ class ResumenDiarioService
             - $totales['retiros'];
 
         $totalVentas = $totales['efectivo'] + $totales['tarjeta'] + $totales['transferencia'] + $totales['otro'];
+
+        $propinas = $this->propinasDelPeriodo($fechaInicio, $fechaFin);
 
         return [
             'exito' => true,
@@ -278,7 +344,68 @@ class ResumenDiarioService
             'cantidad_ventas_anuladas' => $totales['cantidad_ventas_anuladas'],
             'cantidad_cuentas' => $totales['cantidad_cuentas'],
             'efectivo_esperado' => round($efectivoEsperado, 2),
+            // Cajas: diferencias de los cierres vigentes del período.
+            'diferencia_caja' => round($totales['diferencia_caja'], 2),
+            'cantidad_cierres' => $totales['cantidad_cierres'],
+            'turnos_abiertos' => $aperturas->filter(fn ($a) => strtoupper((string) $a->estado) === 'ABIERTA')->count(),
+            // Propinas: lo COBRADO al cliente (cifra real) y lo PAGADO al
+            // personal (null = el esquema no lo registra; nunca se inventa).
+            'propinas' => $propinas,
         ];
+    }
+
+    /**
+     * Propinas del período, reutilizando ResumenPropinasService (una sola
+     * fórmula en todo el sistema).
+     *
+     * Si el esquema todavía no tiene las columnas/tablas de propinas (p. ej.
+     * pruebas con esquema mínimo, o despliegue sin migrar), se devuelve
+     * `disponible = false` en vez de fallar: el resumen sigue funcionando.
+     *
+     * @return array{disponible: bool, cobradas: float, cantidad: int, pagadas: ?float}
+     */
+    private function propinasDelPeriodo(string $desde, string $hasta): array
+    {
+        $noDisponible = [
+            'disponible' => false,
+            'cobradas' => 0.0,
+            'cantidad' => 0,
+            'pagadas' => null,
+        ];
+
+        if (! Schema::hasTable('facturas')
+            || ! Schema::hasTable('cuenta_detalles')
+            || ! Schema::hasColumn('cuentas', 'propina')) {
+            return $noDisponible;
+        }
+
+        $resumen = $this->propinas->resumenDelRango($desde, $hasta);
+
+        if (! ($resumen['exito'] ?? false)) {
+            return $noDisponible;
+        }
+
+        return [
+            'disponible' => true,
+            'cobradas' => round((float) $resumen['total'], 2),
+            'cantidad' => (int) $resumen['cantidad'],
+            // No hay registro de pago de propinas al personal en el esquema.
+            'pagadas' => null,
+        ];
+    }
+
+    /**
+     * Nombre del usuario a partir de su id; null si no hay id o no existe.
+     *
+     * @param  array<int|string, string>  $nombres
+     */
+    private function nombreUsuario($usuarioId, array $nombres): ?string
+    {
+        if (! $usuarioId) {
+            return null;
+        }
+
+        return $nombres[(int) $usuarioId] ?? null;
     }
 
     public function resumenDelDia(string $fecha, ?string $cajero = null): array
@@ -324,7 +451,8 @@ class ResumenDiarioService
 
         $ventas = DB::table('ventas')
             ->where('estado', 'CANCELADA')
-            ->whereBetween('fecha', [$inicio, $fin])
+            ->where('fecha', '>=', $inicio)
+            ->where('fecha', '<', $fin)
             ->get();
 
         return [

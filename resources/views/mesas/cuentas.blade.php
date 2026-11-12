@@ -240,6 +240,30 @@
                             <span aria-hidden="true">·</span>
                             Venta #{{ $venta->id }}
                         </p>
+                        @php
+                            $clienteEfectivoId = $cuenta->cliente_id ?: $venta->cliente_id;
+                        @endphp
+                        <p class="cuenta-meta" style="margin-top:4px;">
+                            @if($cuenta->cliente_id)
+                                Cliente de la subcuenta: {{ $clientesMap[$cuenta->cliente_id] ?? 'Sin nombre' }}
+                            @else
+                                Sin cliente propio (usa cliente de la venta: {{ $clientesMap[$venta->cliente_id] ?? 'Sin cliente' }})
+                            @endif
+                        </p>
+                        @if(($cuenta->fiscal->iva ?? 0) > 0 || ($cuenta->fiscal->retencion_dgi ?? 0) > 0 || ($cuenta->fiscal->retencion_alcaldia ?? 0) > 0)
+                        <div style="margin-top:6px; font-size:12px; color:#34395e;">
+                            @if(($cuenta->fiscal->iva ?? 0) > 0)
+                                <div>IVA 15%: C$ {{ number_format($cuenta->fiscal->iva, 2) }}</div>
+                            @endif
+                            @if(($cuenta->fiscal->retencion_dgi ?? 0) > 0)
+                                <div>Retención DGI 2%: −C$ {{ number_format($cuenta->fiscal->retencion_dgi, 2) }}</div>
+                            @endif
+                            @if(($cuenta->fiscal->retencion_alcaldia ?? 0) > 0)
+                                <div>Retención Alcaldía 1%: −C$ {{ number_format($cuenta->fiscal->retencion_alcaldia, 2) }}</div>
+                            @endif
+                            <div><strong>Neto: C$ {{ number_format($cuenta->fiscal->neto, 2) }}</strong></div>
+                        </div>
+                        @endif
                         <div>
                             <span class="cuenta-total-label">Total</span>
                             <p class="cuenta-total">C$ {{ number_format((float) $cuenta->total, 2) }}</p>
@@ -272,6 +296,57 @@
                     </div>
                     <div class="cuenta-footer">
                         {{--
+                            Cambiar el cliente asociado a esta cuenta ABIERTA.
+                            Solo ADMIN, GERENTE y CAJERO; el backend vuelve a
+                            validar el rol, el estado y que la cuenta pertenezca
+                            a la mesa.
+                        --}}
+                        @if($puedeCambiarCliente && $cuenta->estado === 'ABIERTA')
+                            <div style="margin-bottom:8px;">
+                                <label style="display:block; font-size:12px; font-weight:bold; color:#34395e; margin-bottom:4px;">
+                                    Buscar y seleccionar cliente
+                                </label>
+                                <input type="text" class="cc-buscar-cliente" data-cuenta-id="{{ $cuenta->id }}"
+                                       placeholder="Buscar por nombre o identificación..."
+                                       style="width:100%; height:32px; box-sizing:border-box; font-size:12px; margin-bottom:6px;">
+                                <select class="cc-select-cliente" data-cuenta-id="{{ $cuenta->id }}"
+                                        style="width:100%; height:34px; box-sizing:border-box; font-size:12px;">
+                                    <option value="">Sin cliente (usa el de la venta)</option>
+                                    @foreach($clientes as $cl)
+                                        <option value="{{ $cl->id }}"
+                                            data-nombre="{{ \Illuminate\Support\Str::lower($cl->nombre ?? '') }}"
+                                            data-ident="{{ \Illuminate\Support\Str::lower($cl->identificacion ?? '') }}"
+                                            {{ (int)$cuenta->cliente_id === (int)$cl->id ? 'selected' : '' }}>
+                                            {{ $cl->nombre }}
+                                        </option>
+                                    @endforeach
+                                </select>
+                                <button type="button" class="btn-accion btn-guardar-cliente"
+                                        data-cuenta-id="{{ $cuenta->id }}"
+                                        style="margin-top:6px;">
+                                    <i class="fas fa-save"></i> Guardar cliente
+                                </button>
+                            </div>
+                        @endif
+                        @if($puedeCambiarCliente && $cuenta->estado === 'ABIERTA')
+                            <button type="button"
+                                    class="btn-accion btn-cambiar-cliente"
+                                    data-cuenta-id="{{ $cuenta->id }}"
+                                    data-cuenta-nombre="{{ $cuenta->nombre }}"
+                                    title="Cambiar el cliente de esta cuenta">
+                                <i class="fas fa-user-edit"></i> Cambiar cliente
+                            </button>
+                        @endif
+                        @if($puedeCambiarCliente && $cuenta->estado === 'ABIERTA')
+                            <button type="button"
+                                    class="btn-accion btn-quitar-cliente"
+                                    data-cuenta-id="{{ $cuenta->id }}"
+                                    title="Quitar el cliente propio de esta cuenta">
+                                <i class="fas fa-user-times"></i> Quitar cliente
+                            </button>
+                        @endif
+
+                        {{--
                             Traslado INDIVIDUAL: mueve SOLO el consumo de esta
                             subcuenta a otra mesa (trasladarConsumoCuenta).
                             Solo cuentas ABIERTAS: una PAGADA o CANCELADA ya
@@ -294,13 +369,13 @@
                             Visible para cualquier rol: no modifica datos.
                         --}}
                         @if($cuenta->estado === 'ABIERTA' && (float) $cuenta->total > 0)
-                            <a class="btn-accion btn-prefactura-cuenta"
-                               href="{{ route('pos.cuentas.prefactura', ['cuentaId' => $cuenta->id]) }}"
-                               target="_blank"
-                               rel="noopener"
-                               title="Imprimir prefactura de esta cuenta (NO es factura fiscal)">
+                            <button type="button"
+                                    class="btn-accion btn-prefactura-cuenta"
+                                    data-cuenta-id="{{ $cuenta->id }}"
+                                    data-total="{{ $cuenta->total }}"
+                                    title="Imprimir prefactura de esta cuenta (NO es factura fiscal)">
                                 <i class="fas fa-file-invoice"></i> Prefactura
-                            </a>
+                            </button>
                         @endif
 
                         {{--
@@ -319,6 +394,23 @@
         </div>
     @endif
 </div>
+
+@php
+    use Illuminate\Support\Facades\Schema;
+    use Illuminate\Support\Facades\DB;
+    $cfgCuentas = app(\App\Services\ConfiguracionService::class);
+    $rolCuentas = strtoupper((string) (auth()->user()->rol->nombre ?? ''));
+    $sujetoCuentas = false;
+    if (Schema::hasColumn('clientes', 'sujeto_retenciones') && isset($venta) && $venta->cliente_id) {
+        $sujetoCuentas = (bool) DB::table('clientes')->where('id', $venta->cliente_id)->value('sujeto_retenciones');
+    }
+    $urlCuentasCuentas = route('pos.cuentas', ['mesaId' => $mesa->id]);
+@endphp
+
+@include('partials.modal-prefactura', [
+    'sujetoRetencion' => $sujetoCuentas,
+    'urlCuentas' => $urlCuentasCuentas,
+])
 
 <script>
     // Fase 2: crear subcuenta vacía (ADMIN, GERENTE, CAJERO y MESERO).
@@ -517,6 +609,16 @@
         });
     });
 
+    // Prefactura de una cuenta específica: abre el modal de configuración fiscal
+    // y, al confirmar, genera la prefactura (no la genera directamente).
+    document.querySelectorAll('.btn-prefactura-cuenta').forEach(function (boton) {
+        boton.addEventListener('click', function () {
+            const cuentaId = Number(this.dataset.cuentaId);
+            const consumo = Number(this.dataset.total || 0);
+            window.abrirPrefacturaModal(cuentaId, consumo);
+        });
+    });
+
     // Fase de recuperación de mesas vacías: liberar reutilizando liberarMesa()
     // vía pos.api (accion=liberar_mesa_vacia). Mismas validaciones y permisos
     // que el botón "Liberar" del POS.
@@ -559,5 +661,285 @@
             });
         });
     }
+</script>
+
+<script>
+    // Cambiar el cliente de una cuenta ABIERTA desde el panel de subcuentas.
+    // Reutiliza clientes.api (búsqueda y alta) y la ruta mesas.cuentas.cliente.
+    const URL_CLIENTES_BUSCAR = '{{ route('clientes.api') }}';
+    const URL_CAMBIAR_CLIENTE = '{{ route('mesas.cuentas.cliente', ['mesaId' => $mesa->id, 'cuentaId' => '__CUENTA__']) }}';
+    const CSRF_TOKEN = '{{ csrf_token() }}';
+
+    function abrirCambiarCliente(cuentaId) {
+        let clienteSeleccionado = null;
+        let debounce = null;
+
+        Swal.fire({
+            title: 'Cambiar cliente',
+            html: `
+                <div style="text-align: left; font-size: 13px;">
+                    <label style="display:block; margin-bottom:5px; font-weight:bold; color:#34395e;">
+                        Buscar cliente existente
+                    </label>
+                    <input type="text" id="cc-buscar" class="swal2-input"
+                           placeholder="Nombre, cédula o teléfono..."
+                           autocomplete="off"
+                           style="height:38px; box-sizing:border-box; width:100%; margin:0;">
+                    <div id="cc-resultados" style="display:none; margin-top:8px; max-height:200px; overflow:auto; border:1px solid #e3e6f0; border-radius:6px; background:#fff;"></div>
+                    <div id="cc-info" style="margin-top:6px; color:#2f9e44; font-size:12px;"></div>
+                    <div style="margin-top:10px;">
+                        <button type="button" id="cc-mostrar-nuevo"
+                                style="background:none; border:none; color:#6777ef; cursor:pointer; font-size:12px; padding:0;">
+                            + Registrar cliente nuevo
+                        </button>
+                    </div>
+                    <div id="cc-nuevo" style="display:none; margin-top:8px; padding:8px; border:1px solid #e3e6f0; border-radius:6px; background:#f8f9fa;">
+                        <input type="text" id="cc-nombre" class="swal2-input" placeholder="Nombre completo (*)" style="height:34px; box-sizing:border-box; width:100%; margin:0 0 4px 0;">
+                        <input type="text" id="cc-ident" class="swal2-input" placeholder="Cédula/RUC (opcional)" style="height:34px; box-sizing:border-box; width:100%; margin:0 0 4px 0;">
+                        <input type="text" id="cc-tel" class="swal2-input" placeholder="Teléfono (opcional)" style="height:34px; box-sizing:border-box; width:100%; margin:0;">
+                    </div>
+                </div>`,
+            showCancelButton: true,
+            confirmButtonColor: '#47c363',
+            confirmButtonText: 'Actualizar cliente',
+            cancelButtonText: 'Cancelar',
+            focusConfirm: false,
+            didOpen: () => {
+                const input = document.getElementById('cc-buscar');
+                const resultados = document.getElementById('cc-resultados');
+                const info = document.getElementById('cc-info');
+                const nuevo = document.getElementById('cc-nuevo');
+
+                document.getElementById('cc-mostrar-nuevo').addEventListener('click', () => {
+                    nuevo.style.display = 'block';
+                    resultados.style.display = 'none';
+                    info.textContent = '';
+                    document.getElementById('cc-nombre').focus();
+                });
+
+                input.addEventListener('input', () => {
+                    clearTimeout(debounce);
+                    const texto = input.value.trim();
+                    clienteSeleccionado = null;
+                    info.textContent = '';
+
+                    if (texto.length < 2) {
+                        resultados.style.display = 'none';
+                        resultados.innerHTML = '';
+                        return;
+                    }
+
+                    debounce = setTimeout(() => {
+                        const fd = new FormData();
+                        fd.append('_token', CSRF_TOKEN);
+                        fd.append('accion', 'search');
+                        fd.append('q', texto);
+                        fd.append('limit', '20');
+
+                        fetch(URL_CLIENTES_BUSCAR, {
+                            method: 'POST',
+                            headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                            body: fd
+                        })
+                        .then(r => r.json())
+                        .then(data => {
+                            const clientes = data.exito ? (data.clientes || []) : [];
+                            if (!clientes.length) {
+                                resultados.innerHTML = '<div style="padding:8px; color:#9aa2b1; font-size:12px;">Sin resultados.</div>';
+                                resultados.style.display = 'block';
+                                return;
+                            }
+
+                            // Renderizado seguro: los datos del cliente se insertan
+                            // como texto (textContent/setAttribute), nunca como HTML,
+                            // para evitar XSS almacenado/reflejado en la búsqueda.
+                            resultados.textContent = '';
+                            clientes.forEach(c => {
+                                const fila = document.createElement('div');
+                                fila.dataset.id = String(c.id ?? '');
+                                fila.dataset.nombre = String(c.nombre || '');
+                                fila.style.cssText = 'padding:7px 10px; border-bottom:1px solid #f0f0f0; cursor:pointer; font-size:12px;';
+
+                                const strong = document.createElement('strong');
+                                strong.textContent = c.nombre || '-';
+                                fila.appendChild(strong);
+
+                                if (!c.activo) {
+                                    const inactivo = document.createElement('span');
+                                    inactivo.style.color = '#dc3545';
+                                    inactivo.textContent = ' (inactivo)';
+                                    fila.appendChild(inactivo);
+                                }
+
+                                if (c.identificacion) {
+                                    fila.appendChild(document.createElement('br'));
+                                    const small = document.createElement('small');
+                                    small.textContent = 'Cédula: ' + c.identificacion;
+                                    fila.appendChild(small);
+                                }
+
+                                if (c.telefono) {
+                                    fila.appendChild(document.createElement('br'));
+                                    const small = document.createElement('small');
+                                    small.textContent = 'Tel: ' + c.telefono;
+                                    fila.appendChild(small);
+                                }
+
+                                fila.addEventListener('click', () => {
+                                    clienteSeleccionado = {
+                                        id: Number(c.id),
+                                        nombre: String(c.nombre || ''),
+                                    };
+                                    resultados.style.display = 'none';
+                                    resultados.textContent = '';
+                                    input.value = clienteSeleccionado.nombre;
+                                    info.textContent = 'Seleccionado: ' + clienteSeleccionado.nombre;
+                                    nuevo.style.display = 'none';
+                                });
+
+                                resultados.appendChild(fila);
+                            });
+                            resultados.style.display = 'block';
+                        })
+                        .catch(() => {
+                            resultados.innerHTML = '<div style="padding:8px; color:#dc3545; font-size:12px;">Error al buscar clientes.</div>';
+                            resultados.style.display = 'block';
+                        });
+                    }, 250);
+                });
+            },
+            preConfirm: async () => {
+                if (clienteSeleccionado) {
+                    return clienteSeleccionado.id;
+                }
+
+                const nombre = document.getElementById('cc-nombre').value.trim();
+                if (!nombre) {
+                    Swal.showValidationMessage('Seleccione un cliente o registre uno nuevo.');
+                    return false;
+                }
+
+                const fd = new FormData();
+                fd.append('_token', CSRF_TOKEN);
+                fd.append('accion', 'crear');
+                fd.append('nombre', nombre);
+                fd.append('identificacion', document.getElementById('cc-ident').value.trim());
+                fd.append('telefono', document.getElementById('cc-tel').value.trim());
+
+                try {
+                    const respuesta = await fetch(URL_CLIENTES_BUSCAR, {
+                        method: 'POST',
+                        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                        body: fd
+                    });
+                    const data = await respuesta.json();
+                    if (!data.exito || !data.cliente) {
+                        Swal.showValidationMessage(data.error || 'No se pudo registrar el cliente.');
+                        return false;
+                    }
+                    return data.cliente.id;
+                } catch (e) {
+                    Swal.showValidationMessage('Error de comunicación al registrar el cliente.');
+                    return false;
+                }
+            }
+        }).then(result => {
+            if (!result.isConfirmed || !result.value) {
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('_token', CSRF_TOKEN);
+            fd.append('cliente_id', result.value);
+
+            fetch(URL_CAMBIAR_CLIENTE.replace('__CUENTA__', cuentaId), {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                body: fd
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('¡Actualizado!', data.mensaje, 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Atención', data.error || 'No se pudo cambiar el cliente.', 'warning');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error'));
+        });
+    }
+
+    document.querySelectorAll('.btn-cambiar-cliente').forEach(boton => {
+        boton.addEventListener('click', function () {
+            abrirCambiarCliente(Number(this.dataset.cuentaId));
+        });
+    });
+
+    document.querySelectorAll('.btn-guardar-cliente').forEach(boton => {
+        boton.addEventListener('click', function () {
+            const cuentaId = Number(this.dataset.cuentaId);
+            const select = document.querySelector('.cc-select-cliente[data-cuenta-id="' + cuentaId + '"]');
+            const clienteId = select ? select.value : '';
+            const fd = new FormData();
+            fd.append('_token', CSRF_TOKEN);
+            if (clienteId !== '') {
+                fd.append('cliente_id', clienteId);
+            } else {
+                fd.append('quitar_cliente', '1');
+            }
+            fetch(URL_CAMBIAR_CLIENTE.replace('__CUENTA__', cuentaId), {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                body: fd
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('Actualizado', data.mensaje, 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Atención', data.error || 'No se pudo guardar el cliente.', 'warning');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error'));
+        });
+    });
+
+    document.querySelectorAll('.cc-buscar-cliente').forEach(input => {
+        input.addEventListener('input', function () {
+            const cuentaId = this.dataset.cuentaId;
+            const texto = this.value.trim().toLowerCase();
+            const select = document.querySelector('.cc-select-cliente[data-cuenta-id="' + cuentaId + '"]');
+            if (!select) return;
+            select.querySelectorAll('option').forEach(opt => {
+                if (opt.value === '') { opt.hidden = false; return; }
+                const nombre = opt.dataset.nombre || '';
+                const ident = opt.dataset.ident || '';
+                opt.hidden = texto !== '' && !nombre.includes(texto) && !ident.includes(texto);
+            });
+        });
+    });
+
+    document.querySelectorAll('.btn-quitar-cliente').forEach(boton => {
+        boton.addEventListener('click', function () {
+            const cuentaId = Number(this.dataset.cuentaId);
+            const fd = new FormData();
+            fd.append('_token', CSRF_TOKEN);
+            fd.append('quitar_cliente', '1');
+            fetch(URL_CAMBIAR_CLIENTE.replace('__CUENTA__', cuentaId), {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                body: fd
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.exito) {
+                    Swal.fire('Actualizado', data.mensaje, 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Atención', data.error || 'No se pudo quitar el cliente.', 'warning');
+                }
+            })
+            .catch(() => Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error'));
+        });
+    });
 </script>
 @endsection

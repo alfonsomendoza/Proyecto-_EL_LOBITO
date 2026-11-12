@@ -50,10 +50,10 @@
                 }
             @endphp
 
-            <div class="mesa-card {{ $claseEstado }}" 
-                 data-mesa-id="{{ $mesa->id }}" 
-                 data-numero="{{ e($mesa->numero) }}" 
-                 data-estado="{{ e($mesa->estado) }}" 
+            <div class="mesa-card {{ $claseEstado }}"
+                 data-mesa-id="{{ $mesa->id }}"
+                 data-numero="{{ e($mesa->numero) }}"
+                 data-estado="{{ e($mesa->estado) }}"
                  data-venta-id="{{ $ventaId }}">
                 <i class="fas {{ $icono }} mesa-icon"></i>
                 <h3>{{ $mesa->numero }}</h3>
@@ -81,6 +81,11 @@
     // registrar el primer producto (la mesa permanece LIBRE hasta ese momento).
     const URL_POS_MESA = '{{ url('/pos') }}';
 
+    // Endpoint de búsqueda AJAX de clientes (reutiliza clientes.api con
+    // accion=search). Limita resultados y usa debounce.
+    const URL_CLIENTES_BUSCAR = '{{ route('clientes.api') }}';
+    const CLIENTES_LIMIT = 20;
+
     document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.mesa-card').forEach(mesa => {
             mesa.addEventListener('click', function () {
@@ -96,30 +101,8 @@
 
     function gestionarMesa(mesaId, numero, estado, ventaId) {
         if (estado === 'LIBRE') {
-            const clientesElement = document.getElementById('clientes-data');
-            if (!clientesElement) return Swal.fire('Error', 'No se encontró la lista de clientes.', 'error');
-
-            Swal.fire({
-                title: 'Abrir mesa ' + numero,
-                html: `
-                    <div style="text-align: left; font-size: 14px;">
-                        <label style="display: block; margin-bottom: 5px; font-weight: bold;">Cliente:</label>
-                        <select id="apertura-cliente" class="swal2-input" style="width: 100%; height: 40px; margin: 0;">
-                            ${clientesElement.innerHTML}
-                        </select>
-                    </div>`,
-                focusConfirm: false,
-                showCancelButton: true,
-                confirmButtonColor: '#47c363',
-                confirmButtonText: '<i class="fas fa-door-open"></i> Abrir Mesa',
-                cancelButtonText: 'Cancelar',
-                preConfirm: () => {
-                    const cliente = document.getElementById('apertura-cliente');
-                    return cliente ? cliente.value : '1';
-                }
-            }).then((result) => {
-                if (result.isConfirmed) abrirMesa(mesaId, result.value);
-            });
+            // Nuevo flujo: búsqueda AJAX de clientes con registro inline.
+            abrirBusquedaClienteMesa(mesaId, numero);
         } else {
             if (ventaId > 0) {
                 // Abre el panel de subcuentas de la mesa (usa mesaId, no ventaId).
@@ -159,6 +142,288 @@
             }
         });
     }
+
+    /**
+     * Buscador AJAX de clientes al abrir una mesa LIBRE.
+     *
+     * - Muestra un input con debounce.
+     * - Lista los clientes coincidentes (con nombre, identificación y teléfono
+     *   cuando existan) y permite seleccionar uno existente.
+     * - Permite registrar un cliente nuevo desde el mismo flujo (sin salir del
+     *   Modal).
+     * - Si no se selecciona ninguno, el cliente queda ausente y la asociación
+     *   actual se conserva (no se fuerza Cliente General).
+     */
+    function abrirBusquedaClienteMesa(mesaId, numero) {
+        Swal.fire({
+            title: 'Buscar cliente - Mesa ' + numero,
+            html: `
+                <div style="text-align: left; font-size: 13px; padding: 4px 0;">
+                    <label style="display:block; margin-bottom:5px; font-weight:bold; color:#34395e;">
+                        Buscar o registrar cliente
+                    </label>
+                    <div style="position:relative;">
+                        <i class="fas fa-search" style="position:absolute; left:10px; top:9px; color:#9aa2b1;"></i>
+                        <input type="text"
+                               id="cliente-buscar-input"
+                               class="swal2-input"
+                               placeholder="Nombre, cédula, teléfono..."
+                               autocomplete="off"
+                               style="padding-left:32px; height:38px; box-sizing:border-box;">
+                    </div>
+                    <div id="cliente-resultados" style="margin-top:8px; max-height:220px; overflow:auto; border:1px solid #e3e6f0; border-radius:6px; background:#fff; display:none;"></div>
+                    <div id="cliente-info" style="margin-top:6px; color:#5a5f7d; font-size:12px;"></div>
+                    <input type="hidden" id="cliente-seleccionado" value="">
+                    <div id="cliente-nuevo-form" style="display:none; margin-top:6px; padding:8px; border:1px solid #e3e6f0; border-radius:6px; background:#f8f9fa;">
+                        <label style="font-weight:bold; color:#34395e; display:block; margin-bottom:4px;">Registrar nuevo cliente</label>
+                        <input type="text" id="cliente-nuevo-nombre" class="swal2-input" placeholder="Nombre completo (*)" style="height:34px; box-sizing:border-box;">
+                        <input type="text" id="cliente-nuevo-ident" class="swal2-input" placeholder="Cédula/RUC (opcional)" style="height:34px; box-sizing:border-box; margin-top:4px;">
+                        <input type="text" id="cliente-nuevo-tel" class="swal2-input" placeholder="Teléfono (opcional)" style="height:34px; box-sizing:border-box; margin-top:4px;">
+                        <input type="text" id="cliente-nuevo-dir" class="swal2-input" placeholder="Dirección (opcional)" style="height:34px; box-sizing:border-box; margin-top:4px;">
+                        <button type="button" id="cliente-nuevo-guardar" style="margin-top:8px; width:100%; background:#6777ef; color:#fff; border:none; padding:7px; border-radius:5px; cursor:pointer; font-weight:bold; font-size:13px;">
+                            <i class="fas fa-save"></i> Guardar y seleccionar
+                        </button>
+                    </div>
+                    <div id="cliente-aviso" style="margin-top:6px; color:#dc3545; font-size:12px;"></div>
+                </div>
+            `,
+            focusConfirm: false,
+            showCancelButton: true,
+            confirmButtonColor: '#47c363',
+            confirmButtonText: '<i class="fas fa-door-open"></i> Abrir Mesa',
+            cancelButtonText: 'Cancelar',
+            didOpen: () => {
+                const contenedor = Swal.getHtmlContainer();
+
+                // Estado del buscador.
+                let debounceTimer = null;
+                let clientesActuales = [];
+                let clienteSeleccionadoId = null;
+
+                const input = contenedor.querySelector('#cliente-buscar-input');
+                const resultadosDiv = contenedor.querySelector('#cliente-resultados');
+                const infoDiv = contenedor.querySelector('#cliente-info');
+                const avisoDiv = contenedor.querySelector('#cliente-aviso');
+                const nuevoForm = contenedor.querySelector('#cliente-nuevo-form');
+
+        // Evita inyectar HTML si un cliente tiene caracteres especiales en
+        // su nombre, identificación o teléfono.
+        function escaparHtml(valor) {
+            return String(valor ?? '').replace(/[&<>"']/g, caracter => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[caracter]));
+        }
+
+        // Deja seleccionado un cliente (existente o recién creado) y guarda
+        // su id en el campo oculto que lee preConfirm.
+        function seleccionarCliente(clienteId, nombre) {
+            clienteSeleccionadoId = Number(clienteId);
+            const inputOculto = contenedor.querySelector('#cliente-seleccionado');
+            if (inputOculto) {
+                inputOculto.value = String(clienteSeleccionadoId);
+            }
+            infoDiv.innerHTML = '✅ Seleccionado: <strong>' + escaparHtml(nombre) + '</strong>';
+        }
+
+        function renderizarResultados(clientes) {
+            if (!clientes.length) {
+                resultadosDiv.style.display = 'none';
+                resultadosDiv.innerHTML = '<div style="padding:8px; color:#9aa2b1; font-size:12px;">No se encontraron clientes.</div>';
+                return;
+            }
+
+            resultadosDiv.style.display = 'block';
+            resultadosDiv.innerHTML = clientes.map(c => {
+                const nombre = c.nombre || '-';
+                const ident = c.identificacion ? 'Cédula: ' + escaparHtml(c.identificacion) : '';
+                const tel = c.telefono ? 'Tel: ' + escaparHtml(c.telefono) : '';
+                const activo = c.activo ? '' : ' <span style="color:#dc3545;">(inactivo)</span>';
+                return `
+                    <div style="padding:6px 10px; border-bottom:1px solid #f0f0f0; cursor:pointer;"
+                         data-id="${Number(c.id)}">
+                        <strong>${ escaparHtml(nombre) }</strong>${ activo }
+                        ${ ident ? '<br><small>' + ident + '</small>' : '' }
+                        ${ tel ? '<br><small>' + tel + '</small>' : '' }
+                    </div>
+                `;
+            }).join('');
+
+            resultadosDiv.querySelectorAll('[data-id]').forEach(row => {
+                row.addEventListener('click', () => {
+                    const cliente = clientes.find(c => Number(c.id) === Number(row.dataset.id));
+
+                    clientesActuales = [];
+                    resultadosDiv.innerHTML = '';
+                    resultadosDiv.style.display = 'none';
+                    avisoDiv.innerHTML = '';
+                    nuevoForm.style.display = 'none';
+                    input.value = '';
+
+                    seleccionarCliente(row.dataset.id, cliente?.nombre);
+                });
+            });
+        }
+
+        input.addEventListener('input', () => {
+            clearTimeout(debounceTimer);
+
+            const texto = input.value.trim();
+            if (texto.length < 2) {
+                resultadosDiv.style.display = 'none';
+                resultadosDiv.innerHTML = '';
+                infoDiv.innerHTML = '';
+                avisoDiv.innerHTML = '';
+                nuevoForm.style.display = 'none';
+                clientesActuales = [];
+                return;
+            }
+
+            debounceTimer = setTimeout(() => {
+                // Búsqueda AJAX con debounce.
+                const fd = new FormData();
+                fd.append('_token', '{{ csrf_token() }}');
+                fd.append('accion', 'search');
+                fd.append('q', texto);
+                fd.append('limit', String(CLIENTES_LIMIT));
+
+                fetch(URL_CLIENTES_BUSCAR, {
+                    method: 'POST',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                    body: fd
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.exito) {
+                        avisoDiv.innerHTML = '⚠️ ' + (data.error || 'Error al buscar clientes.');
+                        resultadosDiv.style.display = 'none';
+                        return;
+                    }
+
+                    clientesActuales = data.clientes || [];
+                    renderizarResultados(clientesActuales);
+
+                    const avisos = [];
+                    const repetidosIdent = clientesActuales.filter(c => c.identificacion && /\S/.test(c.identificacion));
+                    if (repetidosIdent.length > 0) {
+                        avisos.push('Hay ' + repetidosIdent.length + ' cliente(s) con identificación.');
+                    }
+                    const inactivos = clientesActuales.filter(c => !c.activo);
+                    if (inactivos.length) {
+                        avisos.push('Advertencia: ' + inactivos.length + ' cliente(s) inactivo(s) detectado(s).');
+                    }
+
+                    if (avisos.length) {
+                        avisoDiv.innerHTML = avisos.join(' | ');
+                    }
+                })
+                .catch(() => {
+                    avisoDiv.innerHTML = '⚠️ Error de comunicación al buscar clientes.';
+                });
+            }, 250);
+        });
+
+        // Mostrar formulario de nuevo cliente al hacer clic en "Registrar nuevo".
+        // Botón de registrar nuevo (se crea debajo de resultados).
+        function mostrarFormNuevo() {
+            nuevoForm.style.display = 'block';
+            resultadosDiv.style.display = 'none';
+            infoDiv.innerHTML = '';
+            avisoDiv.innerHTML = 'Puede registrar un cliente nuevo. Complete nombre obligatorio.';
+        }
+
+        // Insertar botón de registro debajo del div de resultados.
+        const btnNuevoCliente = document.createElement('div');
+        btnNuevoCliente.style.cssText = 'padding:6px 10px; font-size:12px; color:#6777ef; cursor:pointer; border-top:1px solid #f0f0f0;';
+        btnNuevoCliente.textContent = '+ Registrar cliente nuevo';
+        btnNuevoCliente.addEventListener('click', () => {
+            mostrarFormNuevo();
+        });
+        resultadosDiv.parentNode.insertBefore(btnNuevoCliente, resultadosDiv.nextSibling);
+
+        // Guardar y seleccionar un cliente nuevo sin cerrar el modal.
+        contenedor.querySelector('#cliente-nuevo-guardar').addEventListener('click', function () {
+            const campoNombre = contenedor.querySelector('#cliente-nuevo-nombre');
+            const nombre = campoNombre.value.trim();
+
+            if (nombre === '') {
+                avisoDiv.innerHTML = '⚠️ El nombre del cliente es obligatorio.';
+                campoNombre.focus();
+                return;
+            }
+
+            const boton = this;
+            boton.disabled = true;
+            avisoDiv.innerHTML = 'Guardando cliente...';
+
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('accion', 'crear');
+            fd.append('nombre', nombre);
+            fd.append('identificacion', contenedor.querySelector('#cliente-nuevo-ident').value.trim());
+            fd.append('telefono', contenedor.querySelector('#cliente-nuevo-tel').value.trim());
+            fd.append('direccion', contenedor.querySelector('#cliente-nuevo-dir').value.trim());
+
+            fetch(URL_CLIENTES_BUSCAR, {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                body: fd
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.exito) {
+                    avisoDiv.innerHTML = '⚠️ ' + (data.error || 'No se pudo registrar el cliente.');
+
+                    // Identificación duplicada: el backend devuelve el cliente
+                    // existente; se selecciona para no obligar a buscarlo.
+                    if (data.cliente && data.cliente.id) {
+                        seleccionarCliente(data.cliente.id, data.cliente.nombre);
+                    }
+                    return;
+                }
+
+                seleccionarCliente(data.cliente.id, data.cliente.nombre);
+                nuevoForm.style.display = 'none';
+                avisoDiv.innerHTML = data.alerta
+                    ? '✅ Cliente creado y seleccionado. Revise posibles duplicados.'
+                    : '✅ Cliente creado y seleccionado.';
+            })
+            .catch(() => {
+                avisoDiv.innerHTML = '⚠️ Error de comunicación al registrar el cliente.';
+            })
+            .finally(() => {
+                boton.disabled = false;
+            });
+        });
+
+        // Limpiar selección al escribir.
+        input.addEventListener('input', () => {
+            if (input.value.trim().length < 2) {
+                clienteSeleccionadoId = null;
+                const inputOculto = contenedor.querySelector('#cliente-seleccionado');
+                if (inputOculto) inputOculto.value = '';
+                infoDiv.innerHTML = '';
+            }
+        });
+            },
+            preConfirm: () => {
+                const inputOculto = document.getElementById('cliente-seleccionado');
+                const clienteId = inputOculto ? Number(inputOculto.value) : 0;
+
+                // Sin cliente seleccionado se abre la mesa igualmente: el
+                // backend conserva/omite la asociación (no fuerza Cliente General).
+                return clienteId > 0 ? clienteId : null;
+            }
+        }).then((result) => {
+            if (result.isConfirmed) {
+                abrirMesa(mesaId, result.value || null);
+            }
+        });
+    }
+
     function abrirMesa(mesaId, clienteId) {
         Swal.fire({
             title: 'Abriendo mesa...',
@@ -176,7 +441,7 @@
 
         fetch('{{ route("mesas.api") }}', { method: 'POST', body: formData })
         // Eliminamos la barrera de response.ok para obligarlo a leer siempre el JSON del servidor
-        .then(response => response.json()) 
+        .then(response => response.json())
         .then(data => {
             if (data.exito) {
                 // Tras preparar la mesa, entra al POS para registrar el primer

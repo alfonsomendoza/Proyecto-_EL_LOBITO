@@ -169,8 +169,12 @@
                             <td style="padding: 12px 15px;">{{ $venta->metodo_pago ?? '—' }}</td>
                             <td style="padding: 12px 15px;">
                                 @forelse (($cuentasCobradas[$venta->venta_id] ?? collect()) as $cobro)
-                                    <div style="font-size: 12px; line-height: 1.5;">
-                                        {{ $cobro->numero_factura }} ·
+                                    <div style="font-size: 12px; line-height: 1.5; @if (($cobro->factura_estado ?? '') === 'ANULADA') color: #b02a37; text-decoration: line-through; @endif">
+                                        {{ $cobro->numero_factura }}
+                                        @if (($cobro->factura_estado ?? '') === 'ANULADA')
+                                            <strong style="text-decoration: none; margin-left: 4px;">ANULADA</strong>
+                                        @endif
+                                        ·
                                         {{ $cobro->cuenta_nombre ?? 'Cuenta' }}
                                         <small style="color: #6c757d;">(#{{ $cobro->cuenta_id }})</small>:
                                         C$ {{ number_format((float) $cobro->total, 2) }}

@@ -149,6 +149,24 @@ class PrefacturaImpresionTest extends TestCase
             ->assertSee('200.00');
     }
 
+    public function test_prefactura_incluye_boton_para_imprimir_en_el_navegador(): void
+    {
+        $cajero = $this->usuario('CAJERO');
+        $escena = $this->montarMesa($cajero);
+
+        $respuesta = $this->actingAs($cajero)
+            ->get(route('pos.cuentas.prefactura', ['cuentaId' => $escena['cuenta']]));
+
+        $respuesta->assertStatus(200);
+
+        // La prefactura es un documento imprimible: debe ofrecer el botón que
+        // dispara window.print() y ocultarse en la propia impresión.
+        $contenido = $respuesta->getContent();
+        $this->assertStringContainsString('onclick="window.print()"', $contenido);
+        $this->assertStringContainsString('Imprimir', $contenido);
+        $this->assertStringContainsString('@media print', $contenido);
+    }
+
     public function test_prefactura_no_modifica_la_cuenta_ni_la_venta(): void
     {
         $cajero = $this->usuario('CAJERO');

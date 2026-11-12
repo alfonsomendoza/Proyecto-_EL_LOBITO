@@ -81,41 +81,73 @@
                     <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Retiros:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['retiros'], 2) }}</td></tr>
                     <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Gastos anulados (informativo):</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['gastos_anulados'], 2) }} ({{ $resumen['cantidad_gastos_anulados'] }})</td></tr>
                     <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Cambios entregados (informativo):</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['cambios_entregados'], 2) }}</td></tr>
+                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Cierres registrados:</td><td style="padding:8px 14px; text-align:right;">{{ (int) $resumen['cantidad_cierres'] }}</td></tr>
+                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Diferencia de caja acumulada:</td><td style="padding:8px 14px; text-align:right; font-weight:bold; color:{{ $resumen['diferencia_caja'] < 0 ? '#c0392b' : '#1e7e34' }}">C$ {{ number_format($resumen['diferencia_caja'], 2) }}</td></tr>
                     <tr style="background:#fff8e1; font-weight:bold; font-size:15px;"><td style="padding:12px 14px;">EFECTIVO ESPERADO:</td><td style="padding:12px 14px; text-align:right;">C$ {{ number_format($resumen['efectivo_esperado'], 2) }}</td></tr>
                 </table>
                 <p style="font-size:11px; color:#6c757d; padding:10px 14px; line-height:1.4;">
                     Fondo de apertura + efectivo C$ + otros ingresos − gastos activos − retiros.
                     Las tarjetas y transferencias no entran a la gaveta y los cambios no se
-                    descuentan (el POS ya retiene el neto).
+                    descuentan (el POS ya retiene el neto). La diferencia de caja es la suma de
+                    las diferencias de los cierres vigentes (contado − esperado).
                 </p>
+            </div>
+
+            {{-- Propinas: cobrado al cliente vs pagado al personal. --}}
+            <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
+                <div style="padding:10px 16px; background:#16a085; color:#fff; font-weight:600; font-size:14px;">
+                    <i class="fas fa-hand-holding-dollar"></i> Resumen de Propinas
+                </div>
+                @if ($resumen['propinas']['disponible'] ?? false)
+                    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                        <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Propinas cobradas al cliente:</td><td style="padding:8px 14px; text-align:right; font-weight:bold;">C$ {{ number_format($resumen['propinas']['cobradas'], 2) }}</td></tr>
+                        <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Cuentas cobradas con propina:</td><td style="padding:8px 14px; text-align:right;">{{ (int) $resumen['propinas']['cantidad'] }}</td></tr>
+                        <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Propinas pagadas al personal:</td><td style="padding:8px 14px; text-align:right;">No registrado</td></tr>
+                    </table>
+                    <p style="font-size:11px; color:#6c757d; padding:10px 14px; line-height:1.4;">
+                        La propina se cobra al cliente en el mismo cobro de la factura y se
+                        consulta por fecha de emisión. El sistema NO registra su entrega al
+                        personal, por eso no se muestra como «pagada».
+                    </p>
+                @else
+                    <p style="font-size:12px; color:#7a5a1a; padding:12px 16px;">
+                        No disponible: el esquema no tiene las columnas/tablas de propinas.
+                    </p>
+                @endif
             </div>
         </div>
 
         {{-- Detalle por turno. --}}
-        <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden; margin-top:22px;">
+        <div style="border:1px solid #e3e6f0; border-radius:8px; overflow-x:auto; margin-top:22px;">
             <div style="padding:12px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px;">
-                <i class="fas fa-list-alt"></i> Turnos del Día ({{ $resumen['cantidad_turnos'] }})
+                <i class="fas fa-list-alt"></i> Cajas / Turnos del Día ({{ $resumen['cantidad_turnos'] }})
+                <span style="font-weight:400; font-size:12px;">
+                    — {{ (int) $resumen['turnos_abiertos'] }} abierta(s),
+                    {{ (int) $resumen['cantidad_cierres'] }} con cierre registrado
+                </span>
             </div>
-            <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:1000px;">
                 <thead>
                     <tr style="background:#f4f6f9; color:#495057; text-align:left;">
                         <th style="padding:10px 12px;">Turno</th>
-                        <th style="padding:10px 12px;">Cajero</th>
+                        <th style="padding:10px 12px;">Abrió la caja</th>
+                        <th style="padding:10px 12px;">Cerró la caja</th>
+                        <th style="padding:10px 12px;">Apertura</th>
+                        <th style="padding:10px 12px;">Cierre</th>
                         <th style="padding:10px 12px; text-align:center;">Estado</th>
-                        <th style="padding:10px 12px; text-align:right;">Fondo</th>
-                        <th style="padding:10px 12px; text-align:right;">Efectivo</th>
-                        <th style="padding:10px 12px; text-align:right;">Tarjeta</th>
-                        <th style="padding:10px 12px; text-align:right;">Transfer.</th>
-                        <th style="padding:10px 12px; text-align:right;">Gastos</th>
-                        <th style="padding:10px 12px; text-align:right;">Esperado</th>
+                        <th style="padding:10px 12px; text-align:right;">Fondo inicial</th>
+                        <th style="padding:10px 12px; text-align:right;">Total ventas</th>
+                        <th style="padding:10px 12px; text-align:right;">Total gastos</th>
+                        <th style="padding:10px 12px; text-align:right;">Diferencia</th>
                     </tr>
                 </thead>
                 <tbody>
                     @foreach ($resumen['turnos'] as $detalle)
                         @php
                             $turno = $detalle['apertura'];
-                            $ventaTurno = $detalle['ventas'];
-                            $esperadoTurno = (float) $turno->monto_inicial + $ventaTurno['efectivo'] + $detalle['otros_ingresos'] - $detalle['egresos'] - $detalle['retiros'];
+                            $fechaApertura = $detalle['fecha_apertura'] ?? $detalle['inicio'];
+                            $fechaCierre = $detalle['fecha_cierre'] ?? null;
+                            $diferencia = $detalle['diferencia'] ?? null;
                         @endphp
                         <tr style="border-bottom:1px solid #f1f1f1;">
                             <td style="padding:10px 12px;">
@@ -127,7 +159,14 @@
                                     @endif
                                 </div>
                             </td>
-                            <td style="padding:10px 12px;">{{ $turno->cajero ?? '--' }}</td>
+                            <td style="padding:10px 12px;">{{ $detalle['abrio'] ?? 'No registrado' }}</td>
+                            <td style="padding:10px 12px;">{{ $detalle['cerro'] ?? ($turno->estado === 'CERRADA' ? 'No registrado' : '—') }}</td>
+                            <td style="padding:10px 12px;">
+                                {{ $fechaApertura ? \Illuminate\Support\Carbon::parse($fechaApertura)->format('d/m/Y H:i') : '—' }}
+                            </td>
+                            <td style="padding:10px 12px;">
+                                {{ $fechaCierre ? \Illuminate\Support\Carbon::parse($fechaCierre)->format('d/m/Y H:i') : '—' }}
+                            </td>
                             <td style="padding:10px 12px; text-align:center;">
                                 @if ($turno->estado === 'ABIERTA')
                                     <span style="background:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">ABIERTO</span>
@@ -136,11 +175,11 @@
                                 @endif
                             </td>
                             <td style="padding:10px 12px; text-align:right;">C$ {{ number_format((float) $turno->monto_inicial, 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format($ventaTurno['efectivo'], 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right;">C$ {{ number_format($ventaTurno['tarjeta'], 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right;">C$ {{ number_format($ventaTurno['transferencia'], 2) }}</td>
+                            <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format($detalle['total_ventas'], 2) }}</td>
                             <td style="padding:10px 12px; text-align:right; color:#c0392b;">C$ {{ number_format($detalle['egresos'], 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format($esperadoTurno, 2) }}</td>
+                            <td style="padding:10px 12px; text-align:right; font-weight:bold; color:{{ $diferencia !== null && $diferencia < 0 ? '#c0392b' : '#1e7e34' }}">
+                                {{ $diferencia === null ? '—' : 'C$ '.number_format($diferencia, 2) }}
+                            </td>
                         </tr>
                     @endforeach
                 </tbody>

@@ -737,6 +737,32 @@
             width: 100%;
         }
     }
+
+    /* Layout del modal "Cobrar cuenta": descuento y propina en una grilla
+       de 2 columnas que pasa a 1 columna en pantallas estrechas. */
+    .cobro-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        text-align: left;
+        font-size: 12px;
+        color: #555;
+        border-top: 1px dashed #aaa;
+        margin-top: 8px;
+        padding-top: 8px;
+    }
+
+    .cobro-bloque {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    @media (max-width: 640px) {
+        .cobro-grid {
+            grid-template-columns: 1fr;
+        }
+    }
 </style>
 
 <div class="pos-container">
@@ -1273,10 +1299,31 @@
     $puedeAjustarCobro = in_array($rolPos, ['ADMIN', 'GERENTE', 'CAJERO'], true);
 @endphp
 
+@include('partials.modal-prefactura', [
+    'sujetoRetencion' => $sujetoRetencion,
+    'urlCuentas' => route('pos.cuentas', ['mesaId' => $mesa->id]),
+])
+
 <script>
     // ¿Puede este usuario aplicar descuentos/propinas en el cobro? (si no,
     // el modal ni siquiera pide estos campos).
     const PUEDE_AJUSTAR_COBRO = {{ $puedeAjustarCobro ? 'true' : 'false' }};
+    const DESCUENTO_FISCAL_HABILITADO = {{ $descuentoFiscalHabilitado ? 'true' : 'false' }};
+    const PROPINA_FISCAL_HABILITADA = {{ $propinaFiscalHabilitada ? 'true' : 'false' }};
+    const IVA_HABILITADO = {{ $ivaHabilitado ? 'true' : 'false' }};
+    const RET_DGI_HABILITADO = {{ $retencionDgiHabilitada ? 'true' : 'false' }};
+    const RET_ALC_HABILITADO = {{ $retencionAlcaldiaHabilitada ? 'true' : 'false' }};
+    const SUJETO_RETENCION = {{ $sujetoRetencion ? 'true' : 'false' }};
+    const ROL_USUARIO = '{{ $rolPos }}';
+    const PUEDE_EXCEPCION_FISCAL = ROL_USUARIO === 'ADMIN' || ROL_USUARIO === 'GERENTE';
+
+    // Estado activo por concepto (inicia desde la configuración global;
+    // ADMIN/GERENTE puede cambiarlo por excepción por factura).
+    let descuentoActivo = DESCUENTO_FISCAL_HABILITADO;
+    let propinaActiva = PROPINA_FISCAL_HABILITADA;
+    let ivaActivo = IVA_HABILITADO;
+    let retDgiActivo = RET_DGI_HABILITADO && SUJETO_RETENCION;
+    let retAlcActivo = RET_ALC_HABILITADO && SUJETO_RETENCION;
 
     let nuevoPedido = [];
     let categoriaActual = 'todas';
@@ -2648,296 +2695,31 @@
         return 'pago-' + Date.now() + '-' + Math.random().toString(16).slice(2);
     }
 
-    /**
-     * Prefactura imprimible (SOLO LECTURA).
-     *
-     * Abre en una pestaña nueva la prefactura de la cuenta elegida. NO marca
-     * nada como pagado, NO emite factura y NO toca la mesa: la ruta es un GET
-     * de solo lectura (VentaController::prefactura). Si el POS está acotado a
-     * una cuenta (?cuenta=) se imprime esa misma; si no, se elige entre las
-     * cuentas abiertas con consumo de la mesa.
-     */
-    function abrirPrefacturaUrl(cuentaId, params) {
-        const URL_BASE_PREFACTURA = '{{ url("/pos/cuentas") }}';
-        let url = URL_BASE_PREFACTURA + '/' + encodeURIComponent(cuentaId) + '/prefactura';
-        if (params && Object.keys(params).length) {
-            const qs = new URLSearchParams(params).toString();
-            if (qs) {
-                url += '?' + qs;
-            }
-        }
-        window.open(url, '_blank');
-    }
-
-    function abrirPrefacturaModalCuenta(cuentaId, consumo) {
-        Swal.fire({
-            title: 'Imprimir prefactura',
-            html: `<div style="text-align:left;font-size:12px;">
-                <div><strong>Cuenta:</strong> ${cuentaId}</div>
-                <div style="border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
-                    <label style="display:block;"><strong>Descuento</strong></label>
-                    <select id="pref-desc-modo" class="swal2-select" style="margin:4px 0;width:100%;">
-                        <option value="porcentaje">Porcentaje (%)</option>
-                        <option value="importe">Importe fijo (C$)</option>
-                    </select>
-                    <input id="pref-desc" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Descuento (%)" autocomplete="off">
-                    <label style="display:block;margin-top:6px;"><strong>Propina</strong></label>
-                    <select id="pref-prop-modo" class="swal2-select" style="margin:4px 0;width:100%;">
-                        <option value="porcentaje">Porcentaje (%)</option>
-                        <option value="importe">Importe fijo (C$)</option>
-                    </select>
-                    <input id="pref-prop" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Propina (%)" autocomplete="off">
-                    <div id="pref-resumen" style="margin-top:8px;font-size:12px;color:#333;"></div>
-                </div>
-                <p style="font-size:11px;color:#666;margin-top:6px;">Documento de consulta: NO es factura fiscal. Valores temporales, sin persistencia.</p>
-            </div>`,
-            showCancelButton: true,
-            confirmButtonText: 'Abrir e imprimir',
-            cancelButtonText: 'Cancelar',
-            didOpen: () => {
-                const modoD = document.getElementById('pref-desc-modo');
-                const modoP = document.getElementById('pref-prop-modo');
-                const inpD = document.getElementById('pref-desc');
-                const inpP = document.getElementById('pref-prop');
-                const res = document.getElementById('pref-resumen');
-                const refrescar = () => {
-                    modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
-                    modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
-                    const descTexto = inpD.value.trim();
-                    const propTexto = inpP.value.trim();
-                    let desc = 0, prop = 0;
-                    const vd = descTexto === ''
-                        ? 0
-                        : (modoD.value === 'porcentaje' ? numeroPorcentaje(descTexto, 2) : numeroEstricto(descTexto, 2));
-                    if (vd === null) {
-                        res.innerHTML = '<span style="color:#b91c1c;">Descuento inválido: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
-                        return;
-                    }
-                    if (modoD.value === 'porcentaje' && vd > 100) {
-                        res.innerHTML = '<span style="color:#b91c1c;">El porcentaje de descuento debe estar entre 0 y 100.</span>';
-                        return;
-                    }
-                    if (vd >= 0) {
-                        desc = modoD.value === 'porcentaje' ? (Number(consumo || 0) * vd / 100) : vd;
-                    }
-                    const vp = propTexto === ''
-                        ? 0
-                        : (modoP.value === 'porcentaje' ? numeroPorcentaje(propTexto, 2) : numeroEstricto(propTexto, 2));
-                    if (vp === null) {
-                        res.innerHTML = '<span style="color:#b91c1c;">Propina inválida: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
-                        return;
-                    }
-                    if (vp >= 0) {
-                        prop = modoP.value === 'porcentaje' ? ((Number(consumo || 0) - desc) * vp / 100) : vp;
-                    }
-                    desc = Math.max(0, Math.min(desc, Number(consumo || 0)));
-                    prop = Math.max(0, prop);
-                    const base = Math.max(0, Number(consumo || 0) - desc);
-                    const totalEst = base + prop;
-                    res.innerHTML = `Consumo: C$ ${Number(consumo || 0).toFixed(2)}<br>Descuento: C$ ${desc.toFixed(2)}<br>Base: C$ ${base.toFixed(2)}<br>Propina: C$ ${prop.toFixed(2)}<br><strong>Total estimado: C$ ${totalEst.toFixed(2)}</strong><br><em style="color:#666;">Estimado, no confirmado</em>`;
-                };
-                modoD.addEventListener('change', () => { inpD.value = ''; refrescar(); });
-                modoP.addEventListener('change', () => { inpP.value = ''; refrescar(); });
-                inpD.addEventListener('input', refrescar);
-                inpP.addEventListener('input', refrescar);
-                refrescar();
-            },
-            preConfirm: () => {
-                const modoD = document.getElementById('pref-desc-modo').value;
-                const modoP = document.getElementById('pref-prop-modo').value;
-                const inpD = document.getElementById('pref-desc').value;
-                const inpP = document.getElementById('pref-prop').value;
-                const params = {};
-                if (inpD !== '') {
-                    const vd = modoD === 'porcentaje' ? numeroPorcentaje(inpD, 2) : numeroEstricto(inpD, 2);
-                    if (vd === null) {
-                        return Swal.showValidationMessage('El descuento debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
-                    }
-                    if (modoD === 'porcentaje' && (vd < 0 || vd > 100)) {
-                        return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
-                    }
-                    if (modoD === 'porcentaje') {
-                        params.descuento_porcentaje = vd;
-                    } else {
-                        params.descuento = vd;
-                    }
-                }
-                if (inpP !== '') {
-                    const vp = modoP === 'porcentaje' ? numeroPorcentaje(inpP, 2) : numeroEstricto(inpP, 2);
-                    if (vp === null) {
-                        return Swal.showValidationMessage('La propina debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
-                    }
-                    if (modoP === 'porcentaje') {
-                        params.propina_porcentaje = vp;
-                    } else {
-                        params.propina = vp;
-                    }
-                }
-                return { cuentaId: Number(cuentaId), params };
-            }
-        }).then(resultado => {
-            if (!resultado.isConfirmed || !resultado.value) {
-                return;
-            }
-            abrirPrefacturaUrl(resultado.value.cuentaId, resultado.value.params);
-        });
-    }
 
     function abrirPrefactura() {
         const campoCuenta = document.getElementById('cuenta-actual-id');
         if (campoCuenta && campoCuenta.value) {
             fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
-                .then(response => response.json())
-                .then(data => {
-                    const c = (data.cuentas || []).find(x => String(x.id) === String(campoCuenta.value));
-                    abrirPrefacturaModalCuenta(campoCuenta.value, c ? c.total : 0);
+                .then(function (response) { return response.json(); })
+                .then(function (data) {
+                    const c = (data.cuentas || []).find(function (x) { return String(x.id) === String(campoCuenta.value); });
+                    window.abrirPrefacturaModal(campoCuenta.value, c ? c.total : 0);
                 })
-                .catch(() => {
-                    abrirPrefacturaModalCuenta(campoCuenta.value, 0);
+                .catch(function () {
+                    window.abrirPrefacturaModal(campoCuenta.value, 0);
                 });
             return;
         }
-
-        fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
-            .then(response => response.json())
-            .then(data => {
-                const abiertas = (data.cuentas || []).filter(cuenta => cuenta.estado === 'ABIERTA');
-                if (!abiertas.length) {
-                    throw new Error('No hay cuentas abiertas para imprimir prefactura.');
-                }
-
-                const opciones = abiertas.map(cuenta => `<option value="${cuenta.id}" data-total="${cuenta.total || 0}">${escaparHtml(cuenta.nombre)} — C$ ${Number(cuenta.total || 0).toFixed(2)}</option>`).join('');
-
-                Swal.fire({
-                    title: 'Imprimir prefactura',
-                    html: `<div style="text-align:left;font-size:12px;">
-                        <label style="display:block;margin-bottom:4px;">Cuenta</label>
-                        <select id="cuenta-prefactura" class="swal2-select" style="width:100%;margin:4px 0;">${opciones}</select>
-                        <div style="border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
-                            <label style="display:block;"><strong>Descuento</strong></label>
-                            <select id="pref-desc-modo" class="swal2-select" style="margin:4px 0;width:100%;">
-                                <option value="porcentaje">Porcentaje (%)</option>
-                                <option value="importe">Importe fijo (C$)</option>
-                            </select>
-                            <input id="pref-desc" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Descuento (%)" autocomplete="off">
-                            <label style="display:block;margin-top:6px;"><strong>Propina</strong></label>
-                            <select id="pref-prop-modo" class="swal2-select" style="margin:4px 0;width:100%;">
-                                <option value="porcentaje">Porcentaje (%)</option>
-                                <option value="importe">Importe fijo (C$)</option>
-                            </select>
-                            <input id="pref-prop" class="swal2-input" style="margin:4px 0;width:100%;" placeholder="Propina (%)" autocomplete="off">
-                            <div id="pref-resumen" style="margin-top:8px;font-size:12px;color:#333;"></div>
-                        </div>
-                        <p style="font-size:11px;color:#666;margin-top:6px;">Documento de consulta: NO es factura fiscal. Valores temporales, sin persistencia.</p>
-                    </div>`,
-                    showCancelButton: true,
-                    confirmButtonText: 'Abrir e imprimir',
-                    cancelButtonText: 'Cancelar',
-                    didOpen: () => {
-                        const selCuenta = document.getElementById('cuenta-prefactura');
-                        const modoD = document.getElementById('pref-desc-modo');
-                        const modoP = document.getElementById('pref-prop-modo');
-                        const inpD = document.getElementById('pref-desc');
-                        const inpP = document.getElementById('pref-prop');
-                        const res = document.getElementById('pref-resumen');
-                        const refrescar = () => {
-                            modoD.value === 'porcentaje' ? inpD.placeholder = 'Descuento (%)' : inpD.placeholder = 'Descuento (C$)';
-                            modoP.value === 'porcentaje' ? inpP.placeholder = 'Propina (%)' : inpP.placeholder = 'Propina (C$)';
-                            const consumo = Number(selCuenta.options[selCuenta.selectedIndex]?.dataset?.total || 0);
-                            const descTexto = inpD.value.trim();
-                            const propTexto = inpP.value.trim();
-                            let desc = 0, prop = 0;
-                            const vd = descTexto === ''
-                                ? 0
-                                : (modoD.value === 'porcentaje' ? numeroPorcentaje(descTexto, 2) : numeroEstricto(descTexto, 2));
-                            if (vd === null) {
-                                res.innerHTML = '<span style="color:#b91c1c;">Descuento inválido: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
-                                return;
-                            }
-                            if (modoD.value === 'porcentaje' && vd > 100) {
-                                res.innerHTML = '<span style="color:#b91c1c;">El porcentaje de descuento debe estar entre 0 y 100.</span>';
-                                return;
-                            }
-                            if (vd >= 0) {
-                                desc = modoD.value === 'porcentaje' ? (consumo * vd / 100) : vd;
-                            }
-                            const vp = propTexto === ''
-                                ? 0
-                                : (modoP.value === 'porcentaje' ? numeroPorcentaje(propTexto, 2) : numeroEstricto(propTexto, 2));
-                            if (vp === null) {
-                                res.innerHTML = '<span style="color:#b91c1c;">Propina inválida: usa solo números, sin letras ni notación científica, con hasta 2 decimales.</span>';
-                                return;
-                            }
-                            if (vp >= 0) {
-                                prop = modoP.value === 'porcentaje' ? ((consumo - desc) * vp / 100) : vp;
-                            }
-                            desc = Math.max(0, Math.min(desc, consumo));
-                            prop = Math.max(0, prop);
-                            const base = Math.max(0, consumo - desc);
-                            const totalEst = base + prop;
-                            res.innerHTML = `Consumo: C$ ${consumo.toFixed(2)}<br>Descuento: C$ ${desc.toFixed(2)}<br>Base: C$ ${base.toFixed(2)}<br>Propina: C$ ${prop.toFixed(2)}<br><strong>Total estimado: C$ ${totalEst.toFixed(2)}</strong><br><em style="color:#666;">Estimado, no confirmado</em>`;
-                        };
-                        selCuenta.addEventListener('change', refrescar);
-                        modoD.addEventListener('change', () => { inpD.value = ''; refrescar(); });
-                        modoP.addEventListener('change', () => { inpP.value = ''; refrescar(); });
-                        inpD.addEventListener('input', refrescar);
-                        inpP.addEventListener('input', refrescar);
-                        refrescar();
-                    },
-                    preConfirm: () => {
-                        const cuentaId = Number(document.getElementById('cuenta-prefactura').value);
-                        const modoD = document.getElementById('pref-desc-modo').value;
-                        const modoP = document.getElementById('pref-prop-modo').value;
-                        const inpD = document.getElementById('pref-desc').value;
-                        const inpP = document.getElementById('pref-prop').value;
-                        const params = {};
-                        if (inpD !== '') {
-                            const vd = modoD === 'porcentaje' ? numeroPorcentaje(inpD, 2) : numeroEstricto(inpD, 2);
-                            if (vd === null) {
-                                return Swal.showValidationMessage('El descuento debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
-                            }
-                            if (modoD === 'porcentaje' && (vd < 0 || vd > 100)) {
-                                return Swal.showValidationMessage('El porcentaje de descuento debe estar entre 0 y 100.');
-                            }
-                            if (modoD === 'porcentaje') {
-                                params.descuento_porcentaje = vd;
-                            } else {
-                                params.descuento = vd;
-                            }
-                        }
-                        if (inpP !== '') {
-                            const vp = modoP === 'porcentaje' ? numeroPorcentaje(inpP, 2) : numeroEstricto(inpP, 2);
-                            if (vp === null) {
-                                return Swal.showValidationMessage('La propina debe ser un número válido (sin letras, sin notación científica y con hasta 2 decimales).');
-                            }
-                            if (modoP === 'porcentaje') {
-                                params.propina_porcentaje = vp;
-                            } else {
-                                params.propina = vp;
-                            }
-                        }
-                        return { cuentaId, params };
-                    }
-                }).then(resultado => {
-                    if (!resultado.isConfirmed || !resultado.value) {
-                        return;
-                    }
-                    abrirPrefacturaUrl(resultado.value.cuentaId, resultado.value.params);
-                });
-            })
-            .catch(error => Swal.fire('Prefactura', error.message, 'warning'));
+        window.abrirPrefacturaModal(null, 0);
     }
 
-    function abrirPrefacturaModal(cuentaId) {
-        fetch('{{ route("pos.cuentas", ["mesaId" => $mesa->id]) }}')
-            .then(r => r.json())
-            .then(data => {
-                const c = (data.cuentas || []).find(x => String(x.id) === String(cuentaId));
-                abrirPrefacturaModalCuenta(cuentaId, c ? c.total : 0);
-            })
-            .catch(() => {
-                abrirPrefacturaModalCuenta(cuentaId, 0);
-            });
+    /**
+     * Mantiene la referencia esperada por el POS y las pruebas: abre el modal
+     * de configuración fiscal de la prefactura para una cuenta concreta. La
+     * lógica reside en la función compartida window.abrirPrefacturaModal.
+     */
+    function abrirPrefacturaModalCuenta(cuentaId, consumo) {
+        window.abrirPrefacturaModal(cuentaId, consumo);
     }
 
     function cobrarCuenta() {
@@ -2960,25 +2742,41 @@
                 // Si el rol no puede aplicarlos, el modal ni siquiera los muestra.
                 // El descuento y la propina se pueden introducir como PORCENTAJE
                 // (%) o como IMPORTE (C$): el servidor recalcula siempre.
-                const htmlAjustes = PUEDE_AJUSTAR_COBRO ? `
+                const htmlFiscales = `
                     <div style="text-align:left;font-size:12px;color:#555;border-top:1px dashed #aaa;margin-top:8px;padding-top:8px;">
-                        <strong>Descuento</strong>
-                        <select id="descuento-modo" class="swal2-select" style="margin:4px 0;">
-                            <option value="porcentaje">Porcentaje (%)</option>
-                            <option value="importe">Importe fijo (C$)</option>
-                        </select>
-                        <input id="descuento-cobro" class="swal2-input" type="number" min="0" max="9999999999.99" step="0.01" placeholder="Descuento (%)">
-                        <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
+                        <strong>Conceptos fiscales</strong>
+                        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;">
+                            <button type="button" class="fiscal-toggle" data-concepto="descuento" data-active="${descuentoActivo ? 'true' : 'false'}" aria-pressed="${descuentoActivo}" ${!descuentoActivo && !PUEDE_EXCEPCION_FISCAL ? 'disabled' : ''} style="min-height:44px;border:1px solid ${descuentoActivo ? '#47c363' : '#ccc'};background:${descuentoActivo ? '#e7f7ed' : '#f5f5f5'};color:${descuentoActivo ? '#1e7e46' : '#999'};border-radius:6px;cursor:${descuentoActivo || PUEDE_EXCEPCION_FISCAL ? 'pointer' : 'not-allowed'};font-weight:700;">Descuento${!descuentoActivo && !PUEDE_EXCEPCION_FISCAL ? '<br><small>Descuento desactivado globalmente</small>' : ''}</button>
+                            <button type="button" class="fiscal-toggle" data-concepto="propina" data-active="${propinaActiva ? 'true' : 'false'}" aria-pressed="${propinaActiva}" ${!propinaActiva && !PUEDE_EXCEPCION_FISCAL ? 'disabled' : ''} style="min-height:44px;border:1px solid ${propinaActiva ? '#47c363' : '#ccc'};background:${propinaActiva ? '#e7f7ed' : '#f5f5f5'};color:${propinaActiva ? '#1e7e46' : '#999'};border-radius:6px;cursor:${propinaActiva || PUEDE_EXCEPCION_FISCAL ? 'pointer' : 'not-allowed'};font-weight:700;">Propina${!propinaActiva && !PUEDE_EXCEPCION_FISCAL ? '<br><small>Propina desactivada globalmente</small>' : ''}</button>
+                            <button type="button" class="fiscal-toggle" data-concepto="iva" data-active="${ivaActivo ? 'true' : 'false'}" aria-pressed="${ivaActivo}" ${!ivaActivo && !PUEDE_EXCEPCION_FISCAL ? 'disabled' : ''} style="min-height:44px;border:1px solid ${ivaActivo ? '#47c363' : '#ccc'};background:${ivaActivo ? '#e7f7ed' : '#f5f5f5'};color:${ivaActivo ? '#1e7e46' : '#999'};border-radius:6px;cursor:${ivaActivo || PUEDE_EXCEPCION_FISCAL ? 'pointer' : 'not-allowed'};font-weight:700;">IVA 15%${!ivaActivo && !PUEDE_EXCEPCION_FISCAL ? '<br><small>IVA desactivado en la configuración</small>' : ''}</button>
+                            <button type="button" class="fiscal-toggle" data-concepto="dgi" data-active="${retDgiActivo ? 'true' : 'false'}" aria-pressed="${retDgiActivo}" ${!retDgiActivo && !PUEDE_EXCEPCION_FISCAL ? 'disabled' : ''} style="min-height:44px;border:1px solid ${retDgiActivo ? '#47c363' : '#ccc'};background:${retDgiActivo ? '#e7f7ed' : '#f5f5f5'};color:${retDgiActivo ? '#1e7e46' : '#999'};border-radius:6px;cursor:${retDgiActivo || PUEDE_EXCEPCION_FISCAL ? 'pointer' : 'not-allowed'};font-weight:700;">Retención DGI 2%${!retDgiActivo && !PUEDE_EXCEPCION_FISCAL ? '<br><small>' + (!RET_DGI_HABILITADO ? 'Desactivada en la configuración' : 'Cliente no sujeto a retención') + '</small>' : ''}</button>
+                            <button type="button" class="fiscal-toggle" data-concepto="alc" data-active="${retAlcActivo ? 'true' : 'false'}" aria-pressed="${retAlcActivo}" ${!retAlcActivo && !PUEDE_EXCEPCION_FISCAL ? 'disabled' : ''} style="min-height:44px;border:1px solid ${retAlcActivo ? '#47c363' : '#ccc'};background:${retAlcActivo ? '#e7f7ed' : '#f5f5f5'};color:${retAlcActivo ? '#1e7e46' : '#999'};border-radius:6px;cursor:${retAlcActivo || PUEDE_EXCEPCION_FISCAL ? 'pointer' : 'not-allowed'};font-weight:700;">Retención Alcaldía 1%${!retAlcActivo && !PUEDE_EXCEPCION_FISCAL ? '<br><small>' + (!RET_ALC_HABILITADO ? 'Desactivada en la configuración' : 'Cliente no sujeto a retención') + '</small>' : ''}</button>
+                        </div>
+                    </div>
+                `;
 
-                        <strong>Propina</strong>
-                        <select id="propina-modo" class="swal2-select" style="margin:4px 0;">
-                            <option value="porcentaje">Porcentaje (%)</option>
-                            <option value="importe">Importe fijo (C$)</option>
-                        </select>
-                        <input id="propina-cobro" class="swal2-input" type="number" min="0" max="9999999999.99" step="0.01" placeholder="Propina (%)">
-                        <div style="margin:-4px 0 4px;">
-                            <button type="button" id="propina-sugerir" style="background:#6777ef;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Propina 15%</button>
-                            <button type="button" id="propina-quitar" style="margin-left:4px;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">Quitar</button>
+                const htmlAjustes = PUEDE_AJUSTAR_COBRO ? `
+                    <div class="cobro-grid">
+                        <div class="cobro-bloque" id="bloque-descuento" style="${descuentoActivo ? 'display:flex;' : 'display:none;'}">
+                            <strong>Descuento</strong>
+                            <label for="descuento-porcentaje-cobro" style="display:block;margin:4px 0 2px;">Porcentaje (%)</label>
+                            <input id="descuento-porcentaje-cobro" class="swal2-input" type="number" min="0" max="100" step="0.01" inputmode="decimal" placeholder="0.00" aria-describedby="error-descuento-cobro" style="min-height:44px;">
+                            <label for="descuento-importe-cobro" style="display:block;margin:4px 0 2px;">Importe fijo (C$)</label>
+                            <input id="descuento-importe-cobro" class="swal2-input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" aria-describedby="error-descuento-cobro" style="min-height:44px;">
+                            <input id="motivo-cobro" class="swal2-input" type="text" maxlength="255" placeholder="Motivo del descuento (opcional)">
+                            <div id="error-descuento-cobro" style="color:#c0392b;font-size:11px;min-height:12px;margin-top:2px;"></div>
+                        </div>
+                        <div class="cobro-bloque" id="bloque-propina" style="${propinaActiva ? 'display:flex;' : 'display:none;'}">
+                            <strong>Propina</strong>
+                            <label for="propina-porcentaje-cobro" style="display:block;margin:4px 0 2px;">Porcentaje (%)</label>
+                            <input id="propina-porcentaje-cobro" class="swal2-input" type="number" min="0" max="100" step="0.01" inputmode="decimal" placeholder="0.00" aria-describedby="error-propina-cobro" style="min-height:44px;">
+                            <label for="propina-importe-cobro" style="display:block;margin:4px 0 2px;">Importe fijo (C$)</label>
+                            <input id="propina-importe-cobro" class="swal2-input" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" aria-describedby="error-propina-cobro" style="min-height:44px;">
+                            <div style="display:flex;gap:6px;">
+                                <button type="button" id="propina-sugerir" style="flex:1;background:#6777ef;color:#fff;border:0;border-radius:4px;padding:8px;cursor:pointer;font-size:11px;min-height:44px;">Propina 15%</button>
+                                <button type="button" id="propina-quitar" style="flex:1;background:#c0392b;color:#fff;border:0;border-radius:4px;padding:8px;cursor:pointer;font-size:11px;min-height:44px;">Quitar</button>
+                            </div>
+                            <div id="error-propina-cobro" style="color:#c0392b;font-size:11px;min-height:12px;margin-top:2px;"></div>
                         </div>
                     </div>
                 ` : '';
@@ -2998,6 +2796,251 @@
                 // Estado del modal: las líneas de pago que se van agregando.
                 let lineasPago = [];
 
+                // División de pagos: null (sin división), 'AUTOMATICA' o
+                // 'MANUAL'. `totalDivisionAplicado` sirve para bloquear el
+                // cobro si el total cambia después de aplicar la división.
+                let modoDivision = null;
+                let totalDivisionAplicado = null;
+
+                // Métodos disponibles en la división. Son SOLO los métodos
+                // reales del sistema. El efectivo USD se sigue agregando como
+                // línea de pago normal (requiere tasa y no permite garantizar
+                // centavos exactos en una división en córdobas).
+                const metodosDivision = ['EFECTIVO_CORDOBA', 'TARJETA_DEBITO', 'TARJETA_CREDITO', 'TRANSFERENCIA'];
+                const bancosDivision = ['Banpro', 'Ficohsa', 'BAC', 'Lafise'];
+
+                const redondearCentavos = valor => Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
+
+                // Reparte un total en `cantidad` partes iguales resolviendo los
+                // centavos: las últimas partes reciben 1 centavo adicional.
+                // La suma SIEMPRE coincide exactamente con el total.
+                function repartirPartes(total, cantidad) {
+                    const centavos = Math.round(Number(total) * 100);
+                    const base = Math.floor(centavos / cantidad);
+                    const resto = centavos - (base * cantidad);
+
+                    return Array.from({ length: cantidad }, function (_, indice) {
+                        return (base + (indice >= cantidad - resto ? 1 : 0)) / 100;
+                    });
+                }
+
+                function filaDivisionHtml(indice, metodo, monto, soloLectura) {
+                    const opciones = metodosDivision.map(function (m) {
+                        return `<option value="${m}"${m === metodo ? ' selected' : ''}>${etiquetasMetodo[m]}</option>`;
+                    }).join('');
+
+                    const requiereBanco = esTarjeta(metodo) || esTransferencia(metodo);
+                    const bancos = bancosDivision.map(function (b) {
+                        return `<option value="${b}">${b}</option>`;
+                    }).join('');
+
+                    return `<div class="division-fila" data-indice="${indice}" style="border:1px solid #e3e6f0;border-radius:6px;padding:6px;margin-bottom:6px;">
+                        <div style="display:flex;gap:6px;align-items:center;">
+                            <span style="font-size:11px;color:#777;min-width:18px;">${indice + 1}.</span>
+                            <select class="division-metodo swal2-select" style="margin:0;flex:1;min-height:40px;font-size:12px;" aria-label="Método de la forma de pago ${indice + 1}">${opciones}</select>
+                            <input class="division-monto swal2-input" type="number" min="0" step="0.01" inputmode="decimal" value="${Number(monto).toFixed(2)}" ${soloLectura ? 'readonly' : ''} style="margin:0;width:110px;min-height:40px;font-size:12px;background:${soloLectura ? '#f5f5f5' : '#fff'};" aria-label="Importe de la forma de pago ${indice + 1}">
+                        </div>
+                        <select class="division-banco swal2-select" style="margin:4px 0 0;display:${requiereBanco ? 'block' : 'none'};min-height:40px;font-size:12px;" aria-label="Banco de la forma de pago ${indice + 1}">
+                            <option value="">Seleccionar banco…</option>
+                            ${bancos}
+                        </select>
+                        <input class="division-numero swal2-input" type="text" placeholder="Número de transferencia (solo dígitos)" maxlength="64" style="margin:4px 0 0;display:${esTransferencia(metodo) ? 'block' : 'none'};min-height:40px;font-size:12px;" aria-label="Número de transferencia de la forma de pago ${indice + 1}">
+                    </div>`;
+                }
+
+                function leerFilasDivision(contenedor) {
+                    if (!contenedor) return [];
+
+                    return Array.from(contenedor.querySelectorAll('.division-fila')).map(function (fila) {
+                        return {
+                            metodo: fila.querySelector('.division-metodo').value,
+                            monto: numeroEstricto(fila.querySelector('.division-monto').value, 2),
+                            banco: fila.querySelector('.division-banco').value,
+                            numeroTransferencia: fila.querySelector('.division-numero').value.trim()
+                        };
+                    });
+                }
+
+                function contenedorDivision() {
+                    if (modoDivision === 'AUTOMATICA') return document.getElementById('division-filas-auto');
+                    if (modoDivision === 'MANUAL') return document.getElementById('division-filas-manual');
+                    return null;
+                }
+
+                function totalDistribuidoDivision() {
+                    const filas = leerFilasDivision(contenedorDivision());
+                    return redondearCentavos(filas.reduce(function (suma, fila) {
+                        return suma + (Number(fila.monto) || 0);
+                    }, 0));
+                }
+
+                function construirFilasAutomaticas() {
+                    const cont = document.getElementById('division-filas-auto');
+                    const campoCantidad = document.getElementById('division-cantidad');
+                    if (!cont || !campoCantidad) return;
+
+                    const cantidad = Math.max(2, Math.min(10, parseInt(campoCantidad.value, 10) || 2));
+                    campoCantidad.value = cantidad;
+
+                    // Se conservan los métodos ya elegidos por posición.
+                    const metodosPrevios = Array.from(cont.querySelectorAll('.division-metodo')).map(function (s) { return s.value; });
+                    const bancosPrevios = Array.from(cont.querySelectorAll('.division-banco')).map(function (s) { return s.value; });
+                    const numerosPrevios = Array.from(cont.querySelectorAll('.division-numero')).map(function (i) { return i.value; });
+
+                    const partes = repartirPartes(leerTotales().total, cantidad);
+
+                    cont.innerHTML = partes.map(function (monto, indice) {
+                        return filaDivisionHtml(indice, metodosPrevios[indice] || 'EFECTIVO_CORDOBA', monto, true);
+                    }).join('');
+
+                    Array.from(cont.querySelectorAll('.division-fila')).forEach(function (fila, indice) {
+                        const banco = fila.querySelector('.division-banco');
+                        const numero = fila.querySelector('.division-numero');
+                        if (banco && bancosPrevios[indice]) banco.value = bancosPrevios[indice];
+                        if (numero && numerosPrevios[indice]) numero.value = numerosPrevios[indice];
+                    });
+
+                    actualizarResumenDivision();
+                }
+
+                function agregarFilaManual() {
+                    const cont = document.getElementById('division-filas-manual');
+                    if (!cont) return;
+                    const indice = cont.querySelectorAll('.division-fila').length;
+                    cont.insertAdjacentHTML('beforeend', filaDivisionHtml(indice, 'EFECTIVO_CORDOBA', 0, false));
+                    actualizarResumenDivision();
+                }
+
+                function sincronizarImportesAutomaticos() {
+                    if (modoDivision !== 'AUTOMATICA') return;
+                    const cont = document.getElementById('division-filas-auto');
+                    if (!cont) return;
+
+                    const partes = repartirPartes(leerTotales().total, cont.querySelectorAll('.division-fila').length || 2);
+                    cont.querySelectorAll('.division-fila').forEach(function (fila, indice) {
+                        const campo = fila.querySelector('.division-monto');
+                        if (campo && partes[indice] !== undefined) campo.value = partes[indice].toFixed(2);
+                    });
+                }
+
+                function actualizarResumenDivision(totales) {
+                    const cont = document.getElementById('division-resumen');
+                    if (!cont) return;
+
+                    const t = totales || leerTotales();
+                    const distribuido = totalDistribuidoDivision();
+                    const diferencia = redondearCentavos(distribuido - t.total);
+                    const exacto = Math.abs(diferencia) < 0.005;
+                    const filas = leerFilasDivision(contenedorDivision());
+                    const cantidadFilas = filas.length;
+
+                    let texto = `Total de la cuenta: <strong>C$ ${t.total.toFixed(2)}</strong>`
+                        + ` · Distribuido: <strong>C$ ${distribuido.toFixed(2)}</strong>`;
+
+                    if (exacto) {
+                        texto += ' · <strong style="color:#1e7e46;">Coincide ✓</strong>';
+                    } else if (diferencia < 0) {
+                        texto += ` · <strong style="color:#c0392b;">Saldo pendiente: C$ ${Math.abs(diferencia).toFixed(2)}</strong>`;
+                    } else {
+                        texto += ` · <strong style="color:#c0392b;">Exceso: C$ ${diferencia.toFixed(2)}</strong>`;
+                    }
+
+                    if (modoDivision && totalDivisionAplicado !== null && Math.abs(t.total - totalDivisionAplicado) > 0.005) {
+                        texto += '<br><strong style="color:#c0392b;">El total cambió: vuelva a aplicar la división.</strong>';
+                    }
+
+                    if (modoDivision && cantidadFilas < 2) {
+                        texto += '<br><span style="color:#c0392b;">Se requieren al menos dos formas de pago.</span>';
+                    }
+
+                    cont.innerHTML = texto;
+
+                    const boton = document.getElementById('division-aplicar');
+                    if (boton) {
+                        const habilitado = !!modoDivision && exacto && distribuido > 0 && cantidadFilas >= 2;
+                        boton.disabled = !habilitado;
+                        boton.style.opacity = habilitado ? '1' : '0.5';
+                        boton.style.cursor = habilitado ? 'pointer' : 'not-allowed';
+                    }
+                }
+
+                function refrescarDivision(totales) {
+                    if (modoDivision === 'AUTOMATICA') sincronizarImportesAutomaticos();
+                    actualizarResumenDivision(totales);
+                }
+
+                function aplicarDivision() {
+                    const error = document.getElementById('division-error');
+                    if (error) error.textContent = '';
+
+                    if (!modoDivision) {
+                        if (error) error.textContent = 'Seleccione una modalidad de división.';
+                        return;
+                    }
+
+                    const cont = contenedorDivision();
+                    const filas = leerFilasDivision(cont);
+                    const t = leerTotales();
+                    const suma = redondearCentavos(filas.reduce(function (total, fila) {
+                        return total + (Number(fila.monto) || 0);
+                    }, 0));
+
+                    if (filas.length < 2) {
+                        if (error) error.textContent = 'La división requiere al menos dos formas de pago.';
+                        return;
+                    }
+
+                    if (Math.abs(redondearCentavos(suma - t.total)) >= 0.005) {
+                        if (error) error.textContent = `La división debe coincidir exactamente con el total (C$ ${t.total.toFixed(2)}). Distribuido: C$ ${suma.toFixed(2)}.`;
+                        return;
+                    }
+
+                    const nuevasLineas = [];
+
+                    for (let indice = 0; indice < filas.length; indice++) {
+                        const fila = filas[indice];
+                        const monto = redondearCentavos(fila.monto);
+
+                        if (!Number.isFinite(monto) || !(monto > 0)) {
+                            if (error) error.textContent = `La forma de pago ${indice + 1} debe tener un importe mayor que cero.`;
+                            return;
+                        }
+
+                        if ((esTarjeta(fila.metodo) || esTransferencia(fila.metodo)) && !fila.banco) {
+                            if (error) error.textContent = `Seleccione el banco de la forma de pago ${indice + 1}.`;
+                            return;
+                        }
+
+                        if (esTransferencia(fila.metodo)) {
+                            if (fila.numeroTransferencia === '') {
+                                if (error) error.textContent = `Ingrese el número de transferencia de la forma de pago ${indice + 1}.`;
+                                return;
+                            }
+                            if (!/^\d+$/.test(fila.numeroTransferencia)) {
+                                if (error) error.textContent = `El número de transferencia de la forma de pago ${indice + 1} debe contener solo dígitos.`;
+                                return;
+                            }
+                        }
+
+                        nuevasLineas.push({
+                            claveOperacion: claveOperacionPago(),
+                            metodoPago: fila.metodo,
+                            moneda: 'NIO',
+                            banco: (esTarjeta(fila.metodo) || esTransferencia(fila.metodo)) ? fila.banco : null,
+                            monto: monto,
+                            tasaCambio: null,
+                            montoCordobas: monto,
+                            numeroTransferencia: esTransferencia(fila.metodo) ? fila.numeroTransferencia : null
+                        });
+                    }
+
+                    // La división reemplaza las líneas para no duplicar cobros.
+                    lineasPago = nuevasLineas;
+                    totalDivisionAplicado = t.total;
+                    pintarCobro();
+                    actualizarResumenDivision();
+                }
+
                 const leerConsumo = () => {
                     const sel = document.getElementById('cuenta-cobro');
                     const opt = sel && sel.selectedOptions[0];
@@ -3005,24 +3048,22 @@
                 };
 
                 const leerAjustes = () => {
-                    if (!PUEDE_AJUSTAR_COBRO) return { descuento: 0, motivo: '', propina: 0, descuentoPorcentaje: null, propinaPorcentaje: null };
-                    const desc = document.getElementById('descuento-cobro');
+                    if (!PUEDE_AJUSTAR_COBRO) return { descuento: 0, motivo: '', propina: 0, descuentoPorcentaje: 0, propinaPorcentaje: 0 };
+                    const descPct = document.getElementById('descuento-porcentaje-cobro');
+                    const descImp = document.getElementById('descuento-importe-cobro');
+                    const propPct = document.getElementById('propina-porcentaje-cobro');
+                    const propImp = document.getElementById('propina-importe-cobro');
                     const motivo = document.getElementById('motivo-cobro');
-                    const prop = document.getElementById('propina-cobro');
-                    const modoDesc = (document.getElementById('descuento-modo') || {}).value || 'porcentaje';
-                    const modoProp = (document.getElementById('propina-modo') || {}).value || 'porcentaje';
-                    const descValor = (desc && desc.value !== '')
-                        ? (modoDesc === 'porcentaje' ? numeroPorcentaje(desc.value, 2) : numeroEstricto(desc.value, 2))
-                        : 0;
-                    const propValor = (prop && prop.value !== '')
-                        ? (modoProp === 'porcentaje' ? numeroPorcentaje(prop.value, 2) : numeroEstricto(prop.value, 2))
-                        : 0;
+                    const descPctValor = (descPct && descPct.value !== '') ? numeroPorcentaje(descPct.value, 2) : 0;
+                    const descImpValor = (descImp && descImp.value !== '') ? numeroEstricto(descImp.value, 2) : 0;
+                    const propPctValor = (propPct && propPct.value !== '') ? numeroPorcentaje(propPct.value, 2) : 0;
+                    const propImpValor = (propImp && propImp.value !== '') ? numeroEstricto(propImp.value, 2) : 0;
                     return {
-                        descuentoPorcentaje: modoDesc === 'porcentaje' ? (descValor === null ? Number.NaN : descValor) : null,
-                        descuentoImporte: modoDesc === 'importe' ? (descValor === null ? Number.NaN : descValor) : 0,
+                        descuentoPorcentaje: descPctValor,
+                        descuentoImporte: descImpValor,
                         motivo: motivo ? motivo.value.trim() : '',
-                        propinaPorcentaje: modoProp === 'porcentaje' ? (propValor === null ? Number.NaN : propValor) : null,
-                        propinaImporte: modoProp === 'importe' ? (propValor === null ? Number.NaN : propValor) : 0
+                        propinaPorcentaje: propPctValor,
+                        propinaImporte: propImpValor
                     };
                 };
 
@@ -3033,23 +3074,58 @@
                     const consumo = leerConsumo();
                     const ajustes = leerAjustes();
 
-                    const descuento = ajustes.descuentoPorcentaje !== null
-                        ? Math.round(consumo * ajustes.descuentoPorcentaje) / 100
-                        : Math.round(ajustes.descuentoImporte * 100) / 100;
+                    // Estado activo por concepto (leído de los toggles del DOM;
+                    // si no existe el botón, se usa la variable inicial).
+                    const descBtn = document.querySelector('.fiscal-toggle[data-concepto="descuento"]');
+                    const propBtn = document.querySelector('.fiscal-toggle[data-concepto="propina"]');
+                    const ivaBtn = document.querySelector('.fiscal-toggle[data-concepto="iva"]');
+                    const retDgiBtn = document.querySelector('.fiscal-toggle[data-concepto="dgi"]');
+                    const retAlcBtn = document.querySelector('.fiscal-toggle[data-concepto="alc"]');
+                    const descToggle = descBtn ? descBtn.dataset.active !== 'false' : descuentoActivo;
+                    const propToggle = propBtn ? propBtn.dataset.active !== 'false' : propinaActiva;
+                    const ivaToggle = ivaBtn ? ivaBtn.dataset.active !== 'false' : ivaActivo;
+                    const retDgiToggle = retDgiBtn ? retDgiBtn.dataset.active !== 'false' : retDgiActivo;
+                    const retAlcToggle = retAlcBtn ? retAlcBtn.dataset.active !== 'false' : retAlcActivo;
 
-                    const base = Math.max(0, Math.round((consumo - descuento) * 100) / 100);
+                    // Descuento solo se aplica si su concepto está activo.
+                    const descuentoAplicado = descToggle
+                        ? ((Number.isFinite(ajustes.descuentoPorcentaje) && ajustes.descuentoPorcentaje > 0)
+                            ? Math.round(consumo * ajustes.descuentoPorcentaje) / 100
+                            : Math.round(ajustes.descuentoImporte * 100) / 100)
+                        : 0;
 
-                    const propina = ajustes.propinaPorcentaje !== null
-                        ? Math.round(base * ajustes.propinaPorcentaje) / 100
-                        : Math.round(ajustes.propinaImporte * 100) / 100;
+                    const base = Math.max(0, Math.round((consumo - descuentoAplicado) * 100) / 100);
 
+                    // Propina solo se aplica si su concepto está activo.
+                    const propinaAplicada = propToggle
+                        ? ((Number.isFinite(ajustes.propinaPorcentaje) && ajustes.propinaPorcentaje > 0)
+                            ? Math.round(base * ajustes.propinaPorcentaje) / 100
+                            : Math.round(ajustes.propinaImporte * 100) / 100)
+                        : 0;
+
+                    const iva = (ivaToggle !== false) ? Math.round(consumo * 0.15 * 100) / 100 : 0;
+                    const retDgi = (retDgiToggle !== false) ? Math.round(consumo * 0.02 * 100) / 100 : 0;
+                    const retAlc = (retAlcToggle !== false) ? Math.round(consumo * 0.01 * 100) / 100 : 0;
+                    const totalRet = Math.round((retDgi + retAlc) * 100) / 100;
+                    const totalFactura = Math.round((base + iva + propinaAplicada) * 100) / 100;
+                    const neto = Math.round((totalFactura - totalRet) * 100) / 100;
                     return {
                         consumo: consumo,
-                        descuento: descuento,
+                        descuento: descuentoAplicado,
                         motivo: ajustes.motivo,
                         base: base,
-                        propina: propina,
-                        total: Math.round((base + propina) * 100) / 100,
+                        iva: iva,
+                        propina: propinaAplicada,
+                        retDgi: retDgi,
+                        retAlc: retAlc,
+                        totalRet: totalRet,
+                        totalFactura: totalFactura,
+                        total: neto,
+                        ivaHabilitado: iva > 0,
+                        retDgiHabilitada: retDgi > 0,
+                        retAlcHabilitada: retAlc > 0,
+                        descuentoActivo: descToggle,
+                        propinaActiva: propToggle,
                         descuentoPorcentaje: ajustes.descuentoPorcentaje,
                         propinaPorcentaje: ajustes.propinaPorcentaje
                     };
@@ -3060,7 +3136,23 @@
                 const pintarCobro = () => {
                     const t = leerTotales();
                     const pagado = sumaLineas();
-                    const saldo = t.total - pagado;
+                    const saldo = pagado - t.total;
+                    // Validaciones en vivo: descuento y propina. El descuento no
+                    // puede superar el consumo ni exceder el 100 %; la propina no
+                    // puede ser negativa. El cobro se bloquea hasta corregir.
+                    const errorDescuento = document.getElementById('error-descuento-cobro');
+                    const errorPropina = document.getElementById('error-propina-cobro');
+                    const descuentoInvalido = !Number.isFinite(t.descuento) || t.descuento < 0 || t.descuento > t.consumo || t.descuentoPorcentaje > 100;
+                    const propinaInvalida = !Number.isFinite(t.propina) || t.propina < 0;
+                    if (errorDescuento) { errorDescuento.textContent = descuentoInvalido ? 'Descuento inválido: no puede superar el consumo ni exceder el 100%.' : ''; }
+                    if (errorPropina) { errorPropina.textContent = propinaInvalida ? 'Propina inválida: no puede ser negativa.' : ''; }
+
+                    // Mostrar/ocultar bloques de descuento y propina según su toggle activo.
+                    const bloqueDescuento = document.getElementById('bloque-descuento');
+                    const bloquePropina = document.getElementById('bloque-propina');
+                    if (bloqueDescuento) { bloqueDescuento.style.display = t.descuentoActivo ? 'flex' : 'none'; }
+                    if (bloquePropina) { bloquePropina.style.display = t.propinaActiva ? 'flex' : 'none'; }
+
 
                     document.getElementById('resumen-cobro').innerHTML =
                         `Consumo: <strong>C$ ${t.consumo.toFixed(2)}</strong>` +
@@ -3068,8 +3160,17 @@
                             ? ` · Descuento${t.descuentoPorcentaje !== null ? ` (${t.descuentoPorcentaje}%)` : ''}: <strong>− C$ ${t.descuento.toFixed(2)}</strong>`
                             : '') +
                         ` · Base: C$ ${t.base.toFixed(2)}` +
+                        (t.iva > 0
+                            ? ` · IVA (15%): <strong>+ C$ ${t.iva.toFixed(2)}</strong>`
+                            : '') +
                         (t.propina > 0
                             ? ` · Propina${t.propinaPorcentaje !== null ? ` (${t.propinaPorcentaje}%)` : ''}: <strong>+ C$ ${t.propina.toFixed(2)}</strong>`
+                            : '') +
+                        (t.retDgi > 0
+                            ? ` · Ret. DGI (2%): <strong>− C$ ${t.retDgi.toFixed(2)}</strong>`
+                            : '') +
+                        (t.retAlc > 0
+                            ? ` · Ret. Alcaldía (1%): <strong>− C$ ${t.retAlc.toFixed(2)}</strong>`
                             : '') +
                         `<br>Total por cobrar: <strong>C$ ${t.total.toFixed(2)}</strong>`;
 
@@ -3099,15 +3200,15 @@
                             ? `Excedente (se devuelve en efectivo): C$ ${(-saldo).toFixed(2)}`
                             : 'Total cubierto ✓');
 
-                    // Enlace de prefactura con los AJUSTES actuales (previsualiza).
-                    const params = new URLSearchParams();
-                    if (t.descuento > 0) params.set('descuento', t.descuento.toFixed(2));
-                    if (t.propina > 0) params.set('propina', t.propina.toFixed(2));
-                    const consulta = params.toString();
+                    // La división se recalcula con el total vigente: en
+                    // automática vuelve a repartir las partes y en manual
+                    // muestra el saldo pendiente o el exceso en vivo.
+                    refrescarDivision(t);
 
-                    document.getElementById('enlace-prefactura').href =
-                        '{{ url("/pos/cuentas") }}/' + encodeURIComponent(document.getElementById('cuenta-cobro').value) + '/prefactura'
-                        + (consulta ? '?' + consulta : '');
+                    // Enlace de prefactura: se abre el modal de configuración
+                    // fiscal primero y, solo al confirmar, se genera la
+                    // prefactura (no se genera directamente desde el cobro).
+                    // La vinculación del clic se establece en didOpen.
                 };
 
                 Swal.fire({
@@ -3117,6 +3218,38 @@
                         <select id="cuenta-cobro" class="swal2-select">${opciones}</select>
                         <div id="resumen-cobro" style="font-size:13px;color:#333;margin:6px 0;"></div>
                         ${htmlAjustes}
+                        ${htmlFiscales}
+                        
+                        <div id="division-pagos" style="border-top:1px dashed #aaa;margin:8px 0 0;padding-top:8px;text-align:left;font-size:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                                <strong style="font-size:13px;">División de pagos</strong>
+                                <select id="modo-division" class="swal2-select" style="margin:0;max-width:230px;min-height:40px;font-size:12px;" aria-label="Modalidad de división de pagos">
+                                    <option value="">Sin división</option>
+                                    <option value="AUTOMATICA">Automática (partes iguales)</option>
+                                    <option value="MANUAL">Manual (importe por método)</option>
+                                </select>
+                            </div>
+
+                            <div id="panel-division-automatica" style="display:none;margin-top:6px;">
+                                <label for="division-cantidad" style="font-size:12px;font-weight:bold;">Cantidad de formas de pago</label>
+                                <input id="division-cantidad" class="swal2-input" type="number" min="2" max="10" step="1" value="2" style="margin:4px 0;min-height:40px;" aria-label="Cantidad de formas de pago">
+                                <div id="division-filas-auto"></div>
+                            </div>
+
+                            <div id="panel-division-manual" style="display:none;margin-top:6px;">
+                                <div id="division-filas-manual"></div>
+                                <button type="button" id="division-agregar-fila" style="background:#6777ef;color:#fff;border:0;border-radius:5px;padding:6px 10px;font-size:12px;cursor:pointer;margin-top:4px;">+ Agregar método</button>
+                            </div>
+
+                            <div id="division-resumen" style="margin-top:6px;font-size:12px;color:#333;"></div>
+
+                            <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
+                                <button type="button" id="division-aplicar" style="background:#17a2b8;color:#fff;border:0;border-radius:5px;padding:8px 12px;font-size:12px;font-weight:bold;cursor:pointer;">Aplicar división al cobro</button>
+                                <span style="color:#777;font-size:11px;">La división no cambia el total de la cuenta.</span>
+                            </div>
+                            <div id="division-error" style="color:#c0392b;font-size:12px;min-height:14px;"></div>
+                        </div>
+
                         <div style="border-top:1px dashed #aaa;margin:8px 0 0;padding-top:8px;text-align:left;font-size:13px;">
                             <strong>Líneas de pago</strong> <span style="color:#777;font-weight:normal;">(varias permitidas)</span>
                             <select id="metodo-linea" class="swal2-select">
@@ -3151,26 +3284,47 @@
                     confirmButtonText: 'Confirmar pago',
                     cancelButtonText: 'Cancelar',
                     didOpen: () => {
-                        // Banco: tarjeta y transferencia. Tasa: dólares
-                        // (efectivo USD o transferencia en USD). Moneda y
-                        // número de transferencia: solo transferencia.
-                        document.getElementById('metodo-linea').addEventListener('change', function () {
-                            const m = this.value;
-                            document.getElementById('banco-linea').style.display = (esTarjeta(m) || esTransferencia(m)) ? '' : 'none';
-                            document.getElementById('moneda-linea').style.display = esTransferencia(m) ? '' : 'none';
-                            document.getElementById('numero-transferencia-linea').style.display = esTransferencia(m) ? '' : 'none';
-                            const esDolares = m === 'EFECTIVO_USD' || (esTransferencia(m) && document.getElementById('moneda-linea').value === 'USD');
-                            document.getElementById('tasa-linea').style.display = esDolares ? '' : 'none';
-                        });
+                        // ----------------------------------------------------
+                        // LÍNEAS DE PAGO: alta, método, importe y moneda.
+                        // El botón "+ Agregar línea de pago" NO tenía listener
+                        // (se perdió en un refactor), por eso el cobro no
+                        // avanzaba. Aquí se vuelve a enlazar y se valida en el
+                        // navegador con las MISMAS reglas del backend; el
+                        // servidor vuelve a validar y recalcular siempre.
+                        // ----------------------------------------------------
+                        const campoMetodoLinea = document.getElementById('metodo-linea');
+                        const campoBancoLinea = document.getElementById('banco-linea');
+                        const campoMonedaLinea = document.getElementById('moneda-linea');
+                        const campoNumeroTransferencia = document.getElementById('numero-transferencia-linea');
+                        const campoTasaLinea = document.getElementById('tasa-linea');
 
-                        // Al cambiar la moneda de una transferencia en
-                        // dólares se muestra/oculta la tasa correspondiente.
-                        document.getElementById('moneda-linea').addEventListener('change', function () {
-                            const m = document.getElementById('metodo-linea').value;
-                            if (esTransferencia(m)) {
-                                document.getElementById('tasa-linea').style.display = this.value === 'USD' ? '' : 'none';
-                            }
-                        });
+                        const esLineaDolares = function (metodo, moneda) {
+                            return metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD');
+                        };
+
+                        if (campoMetodoLinea) {
+                            campoMetodoLinea.addEventListener('change', function () {
+                                const m = this.value;
+                                const requiereBanco = esTarjeta(m) || esTransferencia(m);
+                                if (campoBancoLinea) campoBancoLinea.style.display = requiereBanco ? '' : 'none';
+                                if (campoMonedaLinea) campoMonedaLinea.style.display = esTransferencia(m) ? '' : 'none';
+                                if (campoNumeroTransferencia) campoNumeroTransferencia.style.display = esTransferencia(m) ? '' : 'none';
+                                if (campoTasaLinea) {
+                                    const moneda = campoMonedaLinea ? campoMonedaLinea.value : 'NIO';
+                                    campoTasaLinea.style.display = esLineaDolares(m, moneda) ? '' : 'none';
+                                }
+                            });
+                        }
+
+                        if (campoMonedaLinea) {
+                            campoMonedaLinea.addEventListener('change', function () {
+                                if (!campoTasaLinea || !campoMetodoLinea) return;
+                                const m = campoMetodoLinea.value;
+                                if (esTransferencia(m)) {
+                                    campoTasaLinea.style.display = this.value === 'USD' ? '' : 'none';
+                                }
+                            });
+                        }
 
                         // Tasa USD SUGERIDA por el servidor (configuraciones o
                         // último cierre de caja). Si no hay ninguna, el cajero
@@ -3178,115 +3332,315 @@
                         fetch('{{ route("pos.tipoCambio") }}')
                             .then(respuesta => respuesta.json())
                             .then(detalle => {
-                                const campo = document.getElementById('tasa-linea');
-                                if (campo && detalle.exito && detalle.tasa) campo.value = Number(detalle.tasa).toFixed(4);
+                                if (campoTasaLinea && detalle.exito && detalle.tasa) {
+                                    campoTasaLinea.value = Number(detalle.tasa).toFixed(4);
+                                }
                             })
                             .catch(() => { /* sin sugerencia: el cajero captura la tasa */ });
 
-                        document.getElementById('agregar-linea').addEventListener('click', () => {
-                            const error = document.getElementById('error-linea');
-                            const metodo = document.getElementById('metodo-linea').value;
-                            const monto = Number(document.getElementById('monto-linea').value || 0);
-                            const banco = (esTarjeta(metodo) || esTransferencia(metodo)) ? document.getElementById('banco-linea').value : '';
-                            const moneda = document.getElementById('moneda-linea') ? document.getElementById('moneda-linea').value : 'NIO';
-                            const tasa = (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD'))
-                                ? Number(document.getElementById('tasa-linea').value || 0) : 0;
-                            const numeroTransferencia = document.getElementById('numero-transferencia-linea')
-                                ? document.getElementById('numero-transferencia-linea').value.trim() : '';
+                        const btnAgregarLinea = document.getElementById('agregar-linea');
+                        if (btnAgregarLinea) {
+                            btnAgregarLinea.addEventListener('click', () => {
+                                const error = document.getElementById('error-linea');
+                                const metodo = document.getElementById('metodo-linea').value;
+                                const montoTexto = document.getElementById('monto-linea').value;
+                                const monto = numeroEstricto(montoTexto, 2);
+                                const requiereBanco = esTarjeta(metodo) || esTransferencia(metodo);
+                                const banco = requiereBanco ? document.getElementById('banco-linea').value : '';
+                                const monedaSeleccionada = campoMonedaLinea ? campoMonedaLinea.value : 'NIO';
+                                // El efectivo USD siempre se guarda como USD.
+                                const moneda = metodo === 'EFECTIVO_USD' ? 'USD' : monedaSeleccionada;
+                                const usaDolares = esLineaDolares(metodo, moneda);
+                                const tasaTexto = campoTasaLinea ? campoTasaLinea.value : '';
+                                const tasa = usaDolares ? numeroEstricto(tasaTexto, 4) : 0;
+                                const numeroTransferencia = campoNumeroTransferencia
+                                    ? campoNumeroTransferencia.value.trim() : '';
 
-                            if (!(monto > 0)) { error.textContent = 'Ingrese un monto mayor que cero.'; return; }
-                            if ((esTarjeta(metodo) || esTransferencia(metodo)) && !banco) {
-                                error.textContent = 'Seleccione el banco.'; return;
-                            }
-                            if (esTransferencia(metodo) && !(moneda === 'NIO' || moneda === 'USD')) {
-                                error.textContent = 'Seleccione la moneda de la transferencia.'; return;
-                            }
-                            if (esTransferencia(metodo) && numeroTransferencia === '') {
-                                error.textContent = 'Ingrese el número de transferencia.'; return;
-                            }
-                            if (esTransferencia(metodo) && !/^\d+$/.test(numeroTransferencia)) {
-                                error.textContent = 'El número de transferencia debe contener exclusivamente dígitos.'; return;
-                            }
-                            if ((metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD')) && !(tasa > 0)) {
-                                error.textContent = 'Capture la tasa de cambio USD del día (el sistema no la inventa).'; return;
-                            }
+                                if (error) error.textContent = '';
 
-                            // Vista previa: el servidor recalcula siempre.
-                            const montoCordobas = (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD'))
-                                ? Math.round(monto * tasa * 100) / 100 : monto;
+                                if (monto === null || !(monto > 0)) {
+                                    if (error) error.textContent = 'Ingrese un monto válido mayor que cero (máximo 2 decimales).';
+                                    return;
+                                }
+                                if (monto > 9999999999.99) {
+                                    if (error) error.textContent = 'El monto de la línea supera el máximo permitido.';
+                                    return;
+                                }
+                                if (requiereBanco && !banco) {
+                                    if (error) error.textContent = 'Seleccione el banco.';
+                                    return;
+                                }
+                                if (esTransferencia(metodo) && !(monedaSeleccionada === 'NIO' || monedaSeleccionada === 'USD')) {
+                                    if (error) error.textContent = 'Seleccione la moneda de la transferencia.';
+                                    return;
+                                }
+                                if (esTransferencia(metodo) && numeroTransferencia === '') {
+                                    if (error) error.textContent = 'Ingrese el número de transferencia.';
+                                    return;
+                                }
+                                if (esTransferencia(metodo) && !/^\d+$/.test(numeroTransferencia)) {
+                                    if (error) error.textContent = 'El número de transferencia debe contener exclusivamente dígitos.';
+                                    return;
+                                }
+                                if (usaDolares && (tasa === null || !(tasa > 0))) {
+                                    if (error) error.textContent = 'Capture la tasa de cambio USD del día (el sistema no la inventa).';
+                                    return;
+                                }
 
-                            lineasPago.push({
-                                claveOperacion: claveOperacionPago(),
-                                metodoPago: metodo,
-                                moneda: moneda,
-                                banco: banco || null,
-                                monto: monto,
-                                tasaCambio: (metodo === 'EFECTIVO_USD' || (esTransferencia(metodo) && moneda === 'USD')) ? tasa : null,
-                                montoCordobas: montoCordobas,
-                                numeroTransferencia: esTransferencia(metodo) ? numeroTransferencia : null
+                                // Vista previa: el servidor recalcula siempre.
+                                const montoCordobas = usaDolares
+                                    ? Math.round(monto * tasa * 100) / 100
+                                    : monto;
+
+                                lineasPago.push({
+                                    claveOperacion: claveOperacionPago(),
+                                    metodoPago: metodo,
+                                    moneda: moneda,
+                                    banco: banco || null,
+                                    monto: monto,
+                                    tasaCambio: usaDolares ? tasa : null,
+                                    montoCordobas: montoCordobas,
+                                    numeroTransferencia: esTransferencia(metodo) ? numeroTransferencia : null
+                                });
+
+                                document.getElementById('monto-linea').value = '';
+                                if (campoNumeroTransferencia) campoNumeroTransferencia.value = '';
+                                pintarCobro();
                             });
+                        }
 
-                            error.textContent = '';
-                            document.getElementById('monto-linea').value = '';
-                            document.getElementById('numero-transferencia-linea').value = '';
-                            pintarCobro();
+                        // Botoneras fiscales (IVA / Retención DGI / Retención
+                        // Alcaldía): SIEMPRE visibles. Si el interruptor global está
+                        // apagado o el cliente no está sujeto a retención, el control
+                        // queda deshabilitado con una nota corta.
+                        document.querySelectorAll('.fiscal-toggle').forEach(boton => {
+                            boton.addEventListener('click', () => {
+                                if (boton.disabled) return;
+                                const concepto = boton.dataset.concepto;
+                                const activo = boton.dataset.active !== 'false';
+                                boton.dataset.active = activo ? 'false' : 'true';
+                                boton.setAttribute('aria-pressed', activo ? 'false' : 'true');
+                                boton.style.background = activo ? '#fff' : '#e7f7ed';
+                                boton.style.color = activo ? '#9a6700' : '#1e7e46';
+                                boton.style.borderColor = activo ? '#ccc' : '#47c363';
+                                // Mantener sincronizadas las variables de estado JS.
+                                if (concepto === 'descuento') descuentoActivo = !activo;
+                                if (concepto === 'propina') propinaActiva = !activo;
+                                if (concepto === 'iva') ivaActivo = !activo;
+                                if (concepto === 'dgi') retDgiActivo = !activo;
+                                if (concepto === 'alc') retAlcActivo = !activo;
+                                pintarCobro();
+                            });
                         });
 
-                        // Resumen, saldo y prefactura se recalculan en vivo.
-                        ['cuenta-cobro', 'descuento-cobro', 'motivo-cobro', 'propina-cobro', 'descuento-modo', 'propina-modo'].forEach(id => {
+                        // Enlace de prefactura: abre el modal de configuración
+                        // fiscal primero. Solo al confirmar se genera la
+                        // prefactura (no se abre directamente desde el cobro).
+                        const enlacePrefactura = document.getElementById('enlace-prefactura');
+                        if (enlacePrefactura && !enlacePrefactura.dataset.prefacturaVinculado) {
+                            enlacePrefactura.dataset.prefacturaVinculado = '1';
+                            enlacePrefactura.addEventListener('click', function (e) {
+                                e.preventDefault();
+                                const sel = document.getElementById('cuenta-cobro');
+                                const cuentaId = Number(sel.value);
+                                const opt = sel.selectedOptions[0];
+                                const consumo = opt ? Number(opt.dataset.total || 0) : 0;
+                                // SweetAlert2 v11: Swal.close() NO devuelve una
+                                // promesa. Encadenar .then() lanzaba un
+                                // TypeError y el clic no avanzaba nunca.
+                                Swal.close();
+                                // Se espera el cierre del modal antes de abrir
+                                // el de la prefactura (no se encadena .then()).
+                                setTimeout(function () {
+                                    window.abrirPrefacturaModal(cuentaId, consumo);
+                                }, 150);
+                            });
+                        }
+
+                        // Sincronización descuento % <-> importe fijo y propina % <-> importe.
+                        const descPct = document.getElementById('descuento-porcentaje-cobro');
+                        const descImp = document.getElementById('descuento-importe-cobro');
+                        const propPct = document.getElementById('propina-porcentaje-cobro');
+                        const propImp = document.getElementById('propina-importe-cobro');
+
+                        const leerBaseConDescuento = () => {
+                            const consumo = leerConsumo();
+                            const pct = Number((descPct && descPct.value) || 0);
+                            const imp = Number((descImp && descImp.value) || 0);
+                            const descuento = (pct > 0) ? (consumo * pct) / 100 : imp;
+                            return Math.max(0, consumo - descuento);
+                        };
+
+                        const sincronizarDescuento = () => {
+                            const consumo = leerConsumo();
+                            const pct = Number((descPct && descPct.value) || 0);
+                            if (!descImp) { return; }
+                            if (pct > 0 && consumo > 0) {
+                                descImp.value = (consumo * pct / 100).toFixed(2);
+                            } else {
+                                descImp.value = '';
+                            }
+                            pintarCobro();
+                        };
+
+                        const sincronizarPropina = () => {
+                            const base = leerBaseConDescuento();
+                            const pct = Number((propPct && propPct.value) || 0);
+                            if (!propImp) { return; }
+                            if (pct > 0 && base > 0) {
+                                propImp.value = (base * pct / 100).toFixed(2);
+                            } else {
+                                propImp.value = '';
+                            }
+                            pintarCobro();
+                        };
+
+                        if (descPct && descImp) {
+                            descPct.addEventListener('input', sincronizarDescuento);
+                            descImp.addEventListener('input', function () {
+                                const consumo = leerConsumo();
+                                const imp = Number(descImp.value || 0);
+                                if (imp > 0 && consumo > 0) {
+                                    descPct.value = (imp / consumo * 100).toFixed(2);
+                                } else {
+                                    descPct.value = '';
+                                }
+                                if (imp <= 0) { descImp.value = ''; }
+                                pintarCobro();
+                            });
+                        }
+
+                        if (propPct && propImp) {
+                            propPct.addEventListener('input', function () {
+                                const base = leerBaseConDescuento();
+                                const pct = Number(propPct.value || 0);
+                                if (pct > 0 && base > 0) {
+                                    propImp.value = (base * pct / 100).toFixed(2);
+                                } else {
+                                    propImp.value = '';
+                                }
+                                pintarCobro();
+                            });
+                            propImp.addEventListener('input', function () {
+                                const base = leerBaseConDescuento();
+                                const imp = Number(propImp.value || 0);
+                                if (imp > 0 && base > 0) {
+                                    propPct.value = (imp / base * 100).toFixed(2);
+                                } else {
+                                    propPct.value = '';
+                                }
+                                pintarCobro();
+                            });
+                        }
+
+                        ['cuenta-cobro', 'motivo-cobro'].forEach(function (id) {
                             const campo = document.getElementById(id);
-                            if (!campo) return;
+                            if (!campo) { return; }
                             campo.addEventListener('input', pintarCobro);
                             campo.addEventListener('change', pintarCobro);
                         });
 
                         if (PUEDE_AJUSTAR_COBRO) {
-                            // Al cambiar de modalidad (porcentaje <-> importe) el
-                            // campo se LIMPIA y se reetiqueta. Así el mismo número
-                            // nunca se reinterpreta en silencio (un 10 % no pasa a
-                            // valer C$ 10): el cajero vuelve a capturar el valor en
-                            // la unidad correcta. El servidor SIEMPRE recalcula y es
-                            // la fuente de verdad.
-                            const refrescarPlaceholders = () => {
-                                const modoDesc = document.getElementById('descuento-modo').value;
-                                const modoProp = document.getElementById('propina-modo').value;
-                                document.getElementById('descuento-cobro').placeholder =
-                                    modoDesc === 'porcentaje' ? 'Descuento (%)' : 'Descuento (C$)';
-                                document.getElementById('propina-cobro').placeholder =
-                                    modoProp === 'porcentaje' ? 'Propina (%)' : 'Propina (C$)';
-                            };
-
-                            // Etiqueta + limpieza + repintado al cambiar de modalidad.
-                            const cambiarModo = (idCampo) => {
-                                document.getElementById(idCampo).value = '';
-                                refrescarPlaceholders();
-                                pintarCobro();
-                            };
-
-                            document.getElementById('descuento-modo').addEventListener('change', () => cambiarModo('descuento-cobro'));
-                            document.getElementById('propina-modo').addEventListener('change', () => cambiarModo('propina-cobro'));
-
                             const btnSugerir = document.getElementById('propina-sugerir');
                             const btnQuitar = document.getElementById('propina-quitar');
 
-                            // Atajos de propina: "Propina 15%" fija 15 % y "Quitar"
-                            // deja la propina en cero (campo vacío = 0). Se fuerzan
-                            // en modo porcentaje para que el valor sea inequívoco;
-                            // se pueden escribir otros porcentajes a mano.
+                            // Atajos de propina: "Propina 15%" fija la propina al 15% de
+                            // la base (consumo menos descuento); "Quitar" la deja en 0.
                             if (btnSugerir) btnSugerir.addEventListener('click', () => {
-                                document.getElementById('propina-modo').value = 'porcentaje';
-                                document.getElementById('propina-cobro').value = '15';
-                                refrescarPlaceholders();
+                                const base = leerBaseConDescuento();
+                                propPct.value = '15';
+                                propImp.value = (base > 0) ? (base * 0.15).toFixed(2) : '';
                                 pintarCobro();
                             });
 
                             if (btnQuitar) btnQuitar.addEventListener('click', () => {
-                                // Se limpia el campo: vacío se interpreta como 0.
-                                document.getElementById('propina-cobro').value = '';
+                                propPct.value = '';
+                                propImp.value = '';
                                 pintarCobro();
                             });
+                        }
 
-                            refrescarPlaceholders();
+                        // ----------------------------------------------------
+                        // DIVISIÓN DE PAGOS (automática o manual).
+                        // Todos los importes se validan otra vez en el servidor;
+                        // aquí solo se arma la interfaz y se exige que la suma
+                        // de las formas de pago coincida exactamente con el
+                        // total antes de permitir el cobro.
+                        // ----------------------------------------------------
+                        const selectorModoDivision = document.getElementById('modo-division');
+
+                        const actualizarPanelesDivision = () => {
+                            const valor = selectorModoDivision ? selectorModoDivision.value : '';
+                            modoDivision = (valor === 'AUTOMATICA' || valor === 'MANUAL') ? valor : null;
+                            totalDivisionAplicado = null;
+
+                            const panelAuto = document.getElementById('panel-division-automatica');
+                            const panelManual = document.getElementById('panel-division-manual');
+                            const filasAuto = document.getElementById('division-filas-auto');
+                            const filasManual = document.getElementById('division-filas-manual');
+                            const errorDivision = document.getElementById('division-error');
+
+                            if (panelAuto) panelAuto.style.display = modoDivision === 'AUTOMATICA' ? 'block' : 'none';
+                            if (panelManual) panelManual.style.display = modoDivision === 'MANUAL' ? 'block' : 'none';
+                            if (filasAuto) filasAuto.innerHTML = '';
+                            if (filasManual) filasManual.innerHTML = '';
+                            if (errorDivision) errorDivision.textContent = '';
+
+                            if (modoDivision === 'AUTOMATICA') {
+                                construirFilasAutomaticas();
+                            } else if (modoDivision === 'MANUAL') {
+                                // Se arranca con dos métodos (mínimo exigido).
+                                agregarFilaManual();
+                                agregarFilaManual();
+                            }
+
+                            actualizarResumenDivision();
+                        };
+
+                        if (selectorModoDivision) {
+                            selectorModoDivision.addEventListener('change', actualizarPanelesDivision);
+                        }
+
+                        const campoCantidadDivision = document.getElementById('division-cantidad');
+                        if (campoCantidadDivision) {
+                            campoCantidadDivision.addEventListener('input', construirFilasAutomaticas);
+                            campoCantidadDivision.addEventListener('change', construirFilasAutomaticas);
+                        }
+
+                        const btnAgregarFilaDivision = document.getElementById('division-agregar-fila');
+                        if (btnAgregarFilaDivision) {
+                            btnAgregarFilaDivision.addEventListener('click', agregarFilaManual);
+                        }
+
+                        // Delegación: las filas se crean y se destruyen
+                        // dinámicamente, así que el listener vive en el panel.
+                        const panelDivision = document.getElementById('division-pagos');
+                        if (panelDivision) {
+                            panelDivision.addEventListener('change', function (evento) {
+                                const fila = evento.target.closest('.division-fila');
+                                if (!fila) return;
+
+                                if (evento.target.classList.contains('division-metodo')) {
+                                    const metodo = evento.target.value;
+                                    const banco = fila.querySelector('.division-banco');
+                                    const numero = fila.querySelector('.division-numero');
+                                    if (banco) banco.style.display = (esTarjeta(metodo) || esTransferencia(metodo)) ? 'block' : 'none';
+                                    if (numero) numero.style.display = esTransferencia(metodo) ? 'block' : 'none';
+                                }
+
+                                actualizarResumenDivision();
+                            });
+
+                            panelDivision.addEventListener('input', function (evento) {
+                                if (evento.target.classList.contains('division-monto') && modoDivision !== 'AUTOMATICA') {
+                                    actualizarResumenDivision();
+                                }
+                            });
+                        }
+
+                        const btnAplicarDivision = document.getElementById('division-aplicar');
+                        if (btnAplicarDivision) {
+                            btnAplicarDivision.addEventListener('click', aplicarDivision);
                         }
 
                         pintarCobro();
@@ -3338,6 +3692,43 @@
                             return Swal.showValidationMessage('Los pagos con tarjeta no pueden exceder el total: el excedente solo se admite en efectivo.');
                         }
 
+                        // ----------------------------------------------------
+                        // DIVISIÓN APLICADA: debe coincidir al centavo.
+                        // No se admite cambio ni exceso: la división reparte
+                        // exactamente el total entre las formas de pago.
+                        // ----------------------------------------------------
+                        if (modoDivision) {
+                            if (lineasPago.length < 2) {
+                                return Swal.showValidationMessage('La división requiere al menos dos formas de pago.');
+                            }
+
+                            const centavosLineas = Math.round(pagado * 100);
+                            const centavosTotal = Math.round(t.total * 100);
+
+                            if (centavosLineas !== centavosTotal) {
+                                const diferencia = (centavosLineas - centavosTotal) / 100;
+                                return Swal.showValidationMessage(
+                                    'La división debe coincidir exactamente con el total (C$ '
+                                    + t.total.toFixed(2) + '): '
+                                    + (diferencia > 0
+                                        ? 'sobran C$ ' + diferencia.toFixed(2)
+                                        : 'faltan C$ ' + Math.abs(diferencia).toFixed(2))
+                                    + '.'
+                                );
+                            }
+
+                            if (totalDivisionAplicado === null || Math.round(totalDivisionAplicado * 100) !== centavosTotal) {
+                                return Swal.showValidationMessage('El total cambió después de aplicar la división: vuelva a aplicarla antes de cobrar.');
+                            }
+
+                            if (modoDivision === 'AUTOMATICA') {
+                                const centavosPartes = lineasPago.map(linea => Math.round(linea.montoCordobas * 100));
+                                if (Math.max.apply(null, centavosPartes) - Math.min.apply(null, centavosPartes) > 1) {
+                                    return Swal.showValidationMessage('La división automática debe repartir el total en partes iguales (solo se admite 1 centavo de diferencia por redondeo).');
+                                }
+                            }
+                        }
+
                         // Se envían AMBAS formas: el porcentaje (si el modo es %)
                         // y el importe resultante. El servidor prioriza el
                         // porcentaje y recalcula el importe él mismo, así un
@@ -3346,9 +3737,15 @@
                             cuentaId: Number(document.getElementById('cuenta-cobro').value),
                             descuento: t.descuento,
                             descuentoPorcentaje: t.descuentoPorcentaje,
+                            descuentoActivo: t.descuentoActivo,
                             motivo: t.motivo,
                             propina: t.propina,
                             propinaPorcentaje: t.propinaPorcentaje,
+                            propinaActiva: t.propinaActiva,
+                            ivaHabilitado: t.ivaHabilitado,
+                            retDgiHabilitada: t.retDgiHabilitada,
+                            retAlcHabilitada: t.retAlcHabilitada,
+                            modoDivision: modoDivision,
                             lineas: lineasPago
                         };
                     }
@@ -3360,13 +3757,19 @@
                     form.append('_token', '{{ csrf_token() }}');
                     form.append('descuento', cobro.descuento.toFixed(2));
                     form.append('propina', cobro.propina.toFixed(2));
-                    if (cobro.descuentoPorcentaje !== null && cobro.descuentoPorcentaje !== undefined) {
+                    if (cobro.descuentoPorcentaje > 0) {
                         form.append('descuento_porcentaje', String(cobro.descuentoPorcentaje));
                     }
-                    if (cobro.propinaPorcentaje !== null && cobro.propinaPorcentaje !== undefined) {
+                    if (cobro.propinaPorcentaje > 0) {
                         form.append('propina_porcentaje', String(cobro.propinaPorcentaje));
                     }
                     if (cobro.motivo) form.append('descuento_motivo', cobro.motivo);
+                    form.append('iva_habilitado', cobro.ivaHabilitado ? '1' : '0');
+                    form.append('retencion_dgi_habilitada', cobro.retDgiHabilitada ? '1' : '0');
+                    form.append('retencion_alcaldia_habilitada', cobro.retAlcHabilitada ? '1' : '0');
+                    form.append('descuento_activo', cobro.descuentoActivo ? '1' : '0');
+                    form.append('propina_activa', cobro.propinaActiva ? '1' : '0');
+                    if (cobro.modoDivision) form.append('modo_division', cobro.modoDivision);
 
                     // Una fila en pagos_cuenta POR LÍNEA (nunca concatenados).
                     cobro.lineas.forEach((linea, indice) => {

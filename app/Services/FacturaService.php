@@ -77,16 +77,29 @@ class FacturaService
         $lineas = $this->detalleCuenta((int) $cuenta->id);
         $mesa = $this->descripcionMesa($venta, $cuenta);
 
-        // `detalle_consumo` es JSON. Se conserva la clave "nota" porque el
-        // ticket histórico y `FacturaController::ticket` ya la interpretan, y
-        // se añade "lineas" con el detalle real para las facturas nuevas.
-        // "ajustes" (si el cobro tuvo descuento/propina) deja constancia de
-        // cómo se llegó al total facturado: consumo − descuento + propina.
-        $detalleConsumo = json_encode(array_merge([
+        // Snapshot del cliente asociado a la cuenta cobrada (si existe).
+        // Se guarda dentro del JSON existente `detalle_consumo` para no
+        // modificar el esquema de la tabla ni facturas históricas sin snapshot.
+        // Si el cliente no está asociado a la cuenta (o la cuenta no tiene
+        // cliente propio y la venta tampoco tiene), el snapshot es null y
+        // se conserva el comportamiento actual (factura histórica).
+        $clienteSnapshot = $this->snapshotCliente($cuenta, $venta);
+
+        $detalleConsumoBase = [
             'nota' => $this->resumenTexto($lineas, $mesa),
             'lineas' => $lineas,
             'cuenta' => (string) $cuenta->nombre,
-        ], $ajustes !== [] ? ['ajustes' => $ajustes] : []), JSON_UNESCAPED_UNICODE);
+        ];
+
+        if ($clienteSnapshot !== null) {
+            $detalleConsumoBase['cliente_snapshot'] = $clienteSnapshot;
+        }
+
+        if ($ajustes !== []) {
+            $detalleConsumoBase['ajustes'] = $ajustes;
+        }
+
+        $detalleConsumo = json_encode($detalleConsumoBase, JSON_UNESCAPED_UNICODE);
 
         // 1) Fila con número provisional único (ver docblock). OJO: el
         //    marcador debe caber en varchar(20) — por eso se trunca el UUID
@@ -224,5 +237,46 @@ class FacturaService
         }
 
         return mb_substr($texto, 0, 500);
+    }
+
+    /**
+     * Construye el snapshot del cliente para la factura.
+     *
+     * Prioridad:
+     *  1. Cliente asociado directamente a la cuenta cobrada.
+     *  2. Cliente de la venta (respaldo) si la cuenta no tiene cliente propio.
+     *
+     * Solo se snapshotiea cuando existe cliente (id, nombre e, opcionalmente,
+     * identificación o teléfono). No se snapshotiea almodonio/claro del día.
+     *
+     * Observe que el snapshot es una COPIA (no una referencia): si el cliente
+     * se edita después, la factura conserva lo que tenía al emitirse.
+     */
+    private function snapshotCliente(object $cuenta, object $venta): ?array
+    {
+        $clienteId = null;
+
+        if ((int) ($cuenta->cliente_id ?? 0) > 0) {
+            $clienteId = (int) $cuenta->cliente_id;
+        } elseif ((int) ($venta->cliente_id ?? 0) > 0) {
+            $clienteId = (int) $venta->cliente_id;
+        }
+
+        if ($clienteId <= 0) {
+            return null;
+        }
+
+        $cliente = DB::table('clientes')->where('id', $clienteId)->first();
+
+        if (!$cliente) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $cliente->id,
+            'nombre' => $cliente->nombre,
+            'identificacion' => $cliente->identificacion,
+            'telefono' => $cliente->telefono,
+        ];
     }
 }

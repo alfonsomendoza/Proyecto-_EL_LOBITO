@@ -3,6 +3,7 @@
 namespace Tests\Feature\Concerns;
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
@@ -97,12 +98,58 @@ trait CreaEsquemaTrasladosPagos
                 // que aún no la tengan; la migración de producción la crea
                 // formalmente y este guardia la ignora si ya existe.
                 $t->string('numero_transferencia', 64)->nullable();
+                // Reversión lógica y vínculo con la factura
+                // (migración 2026_11_11_000001). Se crean aquí para que los
+                // esquemas manuales de pruebas reflejen el esquema real.
+                $t->unsignedBigInteger('factura_id')->nullable();
+                $t->string('estado', 20)->nullable();
+                $t->timestamp('reversado_en')->nullable();
+                $t->unsignedBigInteger('reversado_por')->nullable();
+                $t->string('motivo_reversion', 255)->nullable();
+                $t->unsignedBigInteger('anulacion_id')->nullable();
+                $t->string('devolucion_estado', 20)->nullable();
+                $t->timestamp('devolucion_en')->nullable();
+                $t->unsignedBigInteger('devolucion_por')->nullable();
                 $t->index('cuenta_id');
                 $t->index('venta_id');
+                $t->index('factura_id');
             });
         }
 
+        // Esquemas antiguos que ya crearon `pagos_cuenta` sin estas columnas
+        // (o despliegues parciales) se completan de forma aditiva.
+        if (Schema::hasTable('pagos_cuenta')) {
+            $columnasReversion = [
+                'factura_id' => fn (Blueprint $t) => $t->unsignedBigInteger('factura_id')->nullable(),
+                'estado' => fn (Blueprint $t) => $t->string('estado', 20)->nullable(),
+                'reversado_en' => fn (Blueprint $t) => $t->timestamp('reversado_en')->nullable(),
+                'reversado_por' => fn (Blueprint $t) => $t->unsignedBigInteger('reversado_por')->nullable(),
+                'motivo_reversion' => fn (Blueprint $t) => $t->string('motivo_reversion', 255)->nullable(),
+                'anulacion_id' => fn (Blueprint $t) => $t->unsignedBigInteger('anulacion_id')->nullable(),
+                'devolucion_estado' => fn (Blueprint $t) => $t->string('devolucion_estado', 20)->nullable(),
+                'devolucion_en' => fn (Blueprint $t) => $t->timestamp('devolucion_en')->nullable(),
+                'devolucion_por' => fn (Blueprint $t) => $t->unsignedBigInteger('devolucion_por')->nullable(),
+            ];
+
+            foreach ($columnasReversion as $nombre => $definicion) {
+                if (!Schema::hasColumn('pagos_cuenta', $nombre)) {
+                    Schema::table('pagos_cuenta', function (Blueprint $t) use ($definicion) {
+                        $definicion($t);
+                    });
+                }
+            }
+        }
+
         // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // 0. Cliente independiente por subcuenta (cuentas.cliente_id).
+        // ---------------------------------------------------------------
+        if (Schema::hasTable('cuentas') && !Schema::hasColumn('cuentas', 'cliente_id')) {
+            Schema::table('cuentas', function (Blueprint $t) {
+                $t->integer('cliente_id')->nullable();
+            });
+        }
+
         // 5. Ajustes opcionales de cobro en la cuenta.
         // ---------------------------------------------------------------
         if (Schema::hasTable('cuentas') && !Schema::hasColumn('cuentas', 'descuento')) {
@@ -112,6 +159,91 @@ trait CreaEsquemaTrasladosPagos
                 $t->integer('descuento_usuario_id')->nullable();
                 $t->decimal('propina', 12, 2)->default(0);
             });
+        }
+
+        // -----------
+        // Traslados + pagos/ajustes del cobro (replica migraciones 2026_10_18).
+        // -----------
+        // clientes minimalistas: tabla que los tests de cliente/subcuenta/factura/ traslado esperan.
+        if (!Schema::hasTable('clientes')) {
+            Schema::create('clientes', function (Blueprint $t) {
+                $t->increments('id');
+                $t->string('nombre', 150);
+                $t->string('telefono', 30)->nullable();
+                $t->string('identificacion', 50)->nullable();
+                $t->text('direccion')->nullable();
+                $t->boolean('activo')->default(true);
+                $t->string('identificacion_normalizada', 50)->nullable();
+                $t->string('telefono_normalizado', 30)->nullable();
+                // La tabla real usa `creado_en`; no tiene created_at/updated_at.
+                $t->timestamp('creado_en')->nullable();
+            });
+        }
+
+        // Índice único de identificación normalizada: solo en MySQL real.
+        if (Schema::hasTable('clientes') && Schema::getConnection()->getDriverName() === 'mysql') {
+            Schema::table('clientes', function (Blueprint $t) {
+                $t->unique('identificacion_normalizada');
+            });
+        }
+
+        // Control de cuenta principal por mesa, tasas discount propina y resumen diario global (sin backfill).
+        if (!Schema::hasTable('control_caja_mesas')) {
+            Schema::create('control_caja_mesas', function (Blueprint $t) {
+                $t->bigIncrements('id');
+                $t->integer('mesa_id');
+                $t->integer('usuario_id');
+                $t->integer('apertura_id');
+                $t->string('estado', 255)->default('ABIERTO');
+                $t->timestamp('creado_en')->nullable();
+            });
+        }
+
+        if (!Schema::hasTable('control_tasas_resumen')) {
+            Schema::create('control_tasas_resumen', function (Blueprint $t) {
+                $t->id();
+                $t->string('modulo', 60)->nullable();
+                $t->string('parametro', 60)->nullable();
+                $t->text('lectura_json');
+                $t->timestamp('creado_en');
+            });
+        }
+
+        // snapshots de pymes en bloques dairy / snapshot_log: vacíos para tests.
+        if (!Schema::hasTable('control_snapshots_pymes_dairy')) {
+            Schema::create('control_snapshots_pymes_dairy', function (Blueprint $t) {
+                $t->id();
+                $t->string('parametro', 60)->nullable();
+                $t->json('dato_json');
+                $t->timestamp('creado_en');
+            });
+        }
+
+        // Control de cliente general (ID 1) como cliente por defecto y su
+        // snapshot de previsualización de factura liberado desde la cocina.
+        if (Schema::hasTable('clientes') && !DB::table('clientes')->where('id', 1)->exists()) {
+            // Cada prueba construye un esquema manual distinto (algunas usan
+            // `creado_en` y otras timestamps de Eloquent). Se inserta solo en
+            // las columnas que realmente existan para no romper su preparación.
+            $datos = [
+                'id' => 1,
+                'nombre' => 'Cliente General',
+                'activo' => true,
+            ];
+
+            foreach (['identificacion_normalizada', 'telefono_normalizado'] as $columna) {
+                if (Schema::hasColumn('clientes', $columna)) {
+                    $datos[$columna] = null;
+                }
+            }
+
+            foreach (['creado_en', 'created_at', 'updated_at'] as $columna) {
+                if (Schema::hasColumn('clientes', $columna)) {
+                    $datos[$columna] = now();
+                }
+            }
+
+            DB::table('clientes')->insert($datos);
         }
     }
 }

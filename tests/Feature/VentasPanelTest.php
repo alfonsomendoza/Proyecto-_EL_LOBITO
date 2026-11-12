@@ -440,4 +440,38 @@ class VentasPanelTest extends TestCase
             ->assertSee('Ventas cobradas')
             ->assertSee('321.12');
     }
+
+    public function test_muestra_facturas_anuladas_marcadas_y_no_duplica_total(): void
+    {
+        $mesa = $this->crearMesa('8');
+        $venta = $this->crearVenta($mesa, 'PAGADA', 550.00);
+        $cuenta = $this->crearCuenta($venta, 'Principal', 'PAGADA');
+
+        DB::table('facturas')->insert([
+            'numero_factura' => 'FAC-0900',
+            'venta_id' => $venta,
+            'cuenta_id' => $cuenta,
+            'total' => 550.00,
+            'estado' => 'ANULADA',
+            'fecha_emision' => now(),
+        ]);
+        DB::table('facturas')->insert([
+            'numero_factura' => 'FAC-0901',
+            'venta_id' => $venta,
+            'cuenta_id' => $cuenta,
+            'total' => 550.00,
+            'estado' => 'EMITIDA',
+            'fecha_emision' => now(),
+        ]);
+
+        $html = $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('ventas.index'))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('FAC-0900', $html);
+        $this->assertStringContainsString('ANULADA', $html);
+        $this->assertStringContainsString('FAC-0901', $html);
+        $this->assertStringContainsString('550.00', $html);
+    }
 }

@@ -1,22 +1,37 @@
 @extends('layouts.app')
 
 @section('content')
+@php
+    // Rango de fechas consultado (vacío = turno activo, como siempre).
+    $filtrandoFechas = ! empty($rango['filtrado'] ?? false);
+    $rangoInvalido = ($rango['valido'] ?? true) === false;
+
+    // Parámetros actuales para los enlaces de estado (se limpia la página al
+    // cambiar de filtro, pero se conservan las fechas).
+    $paramsEstado = request()->query();
+    unset($paramsEstado['pagina']);
+
+    $tituloListado = $filtrandoFechas
+        ? 'Gastos del período '.$rango['desde'].' → '.$rango['hasta']
+        : 'Gastos Registrados en este Turno';
+@endphp
 <div class="monitor-card" style="max-width: 900px; margin: 0 auto;">
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <span><i class="fas fa-file-invoice-dollar"></i> Gastos — Salidas de Dinero</span>
-        @if ($apertura)
+        @if ($apertura || $filtrandoFechas)
             {{-- Tres impresiones independientes: cada botón aplica su propio
-                 criterio de estado, sin depender del filtro en pantalla. --}}
+                 criterio de estado, sin depender del filtro en pantalla. El
+                 ticket conserva el rango de fechas si está seleccionado. --}}
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <a href="{{ route('gastos.ticket', ['estado' => 'todos']) }}" target="_blank"
+                <a href="{{ route('gastos.ticket', array_merge($paramsEstado, ['estado' => 'todos'])) }}" target="_blank"
                    style="background-color:#5a6268; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
                     <i class="fas fa-print"></i> Imprimir todos los gastos
                 </a>
-                <a href="{{ route('gastos.ticket', ['estado' => 'activos']) }}" target="_blank"
+                <a href="{{ route('gastos.ticket', array_merge($paramsEstado, ['estado' => 'activos'])) }}" target="_blank"
                    style="background-color:#28a745; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
                     <i class="fas fa-print"></i> Imprimir gastos activos
                 </a>
-                <a href="{{ route('gastos.ticket', ['estado' => 'anulados']) }}" target="_blank"
+                <a href="{{ route('gastos.ticket', array_merge($paramsEstado, ['estado' => 'anulados'])) }}" target="_blank"
                    style="background-color:#c0392b; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
                     <i class="fas fa-print"></i> Imprimir gastos anulados
                 </a>
@@ -78,17 +93,52 @@
         </div>
         @endif
 
-        {{-- Historial del turno --}}
+        {{-- Historial --}}
         <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
             <div style="padding:12px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px;">
-                <i class="fas fa-list-alt"></i> Gastos Registrados en este Turno
+                <i class="fas fa-list-alt"></i> {{ $tituloListado }}
             </div>
 
-            {{-- Filtros por estado. El comportamiento predeterminado es "Activos". --}}
+            {{-- Búsqueda por rango de fechas. Sin fechas el módulo muestra el
+                 turno activo, igual que siempre. --}}
+            <form method="GET" action="{{ route('gastos.index') }}"
+                  style="padding:12px 16px; display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; border-bottom:1px solid #f1f1f1; background:#fbfbfd;">
+                <input type="hidden" name="estado" value="{{ $filtro }}">
+                <div style="display:flex; flex-direction:column; gap:5px;">
+                    <label for="desde" style="font-size:0.8rem; font-weight:bold; color:#555;">Fecha desde:</label>
+                    <input type="date" id="desde" name="desde" value="{{ $rango['desde'] ?? '' }}"
+                           style="padding:8px 12px; border:1px solid #ced4da; border-radius:5px;">
+                </div>
+                <div style="display:flex; flex-direction:column; gap:5px;">
+                    <label for="hasta" style="font-size:0.8rem; font-weight:bold; color:#555;">Fecha hasta:</label>
+                    <input type="date" id="hasta" name="hasta" value="{{ $rango['hasta'] ?? '' }}"
+                           style="padding:8px 12px; border:1px solid #ced4da; border-radius:5px;">
+                </div>
+                <button type="submit"
+                        style="background-color:#6777ef; color:#fff; border:none; padding:9px 18px; border-radius:5px; font-weight:bold; cursor:pointer;">
+                    <i class="fas fa-search"></i> Consultar
+                </button>
+                <a href="{{ route('gastos.index') }}"
+                   style="background-color:#e9ecef; color:#333; padding:9px 18px; border-radius:5px; font-weight:bold; text-decoration:none;">
+                    <i class="fas fa-eraser"></i> Limpiar filtros
+                </a>
+                <span style="font-size:11px; color:#8a94a6;">
+                    Usa la misma fecha en ambos campos para consultar un solo día.
+                </span>
+            </form>
+
+            @if ($rangoInvalido)
+                <div style="margin:12px 16px; background:#fff7e6; border:1px solid #f5d9a8; border-radius:6px; padding:12px 14px; font-size:13px; color:#7a5a1a;">
+                    <i class="fas fa-exclamation-triangle"></i> {{ $rango['error'] ?? 'Las fechas indicadas no son válidas.' }}
+                </div>
+            @endif
+
+            {{-- Filtros por estado. El comportamiento predeterminado es "Activos".
+                 Conservan las fechas seleccionadas. --}}
             <div style="padding:10px 16px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; border-bottom:1px solid #f1f1f1;">
                 <span style="font-size:12px; color:#6c757d; font-weight:600;">Mostrar:</span>
                 @foreach (['activos' => 'Activos', 'anulados' => 'Anulados', 'todos' => 'Todos'] as $clave => $etiqueta)
-                    <a href="{{ route('gastos.index', ['estado' => $clave]) }}"
+                    <a href="{{ route('gastos.index', array_merge($paramsEstado, ['estado' => $clave])) }}"
                        style="text-decoration:none; font-size:12px; font-weight:600; padding:5px 12px; border-radius:14px; border:1px solid {{ $filtro === $clave ? '#6777ef' : '#ced4da' }}; background:{{ $filtro === $clave ? '#6777ef' : '#fff' }}; color:{{ $filtro === $clave ? '#fff' : '#495057' }};">
                         {{ $etiqueta }}
                     </a>
@@ -107,9 +157,11 @@
                     </tr>
                 </thead>
                 <tbody>
-                    @forelse ($gastos as $gasto)
+                    @forelse ($paginaGastos as $gasto)
                         <tr style="border-bottom:1px solid #f1f1f1;">
-                            <td style="padding:10px 12px;">{{ $gasto->fecha ? $gasto->fecha->format('H:i') : '--:--' }}</td>
+                            <td style="padding:10px 12px; white-space:nowrap;">
+                                {{ $gasto->fecha ? ($filtrandoFechas ? $gasto->fecha->format('d/m/Y H:i') : $gasto->fecha->format('H:i')) : '--:--' }}
+                            </td>
                             <td style="padding:10px 12px;"><strong>{{ $gasto->concepto }}</strong></td>
                             <td style="padding:10px 12px;">{{ $gasto->usuario->nombre ?? 'Cajero' }}</td>
                             <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format((float) $gasto->monto, 2) }}</td>
@@ -137,7 +189,12 @@
                     @empty
                         <tr>
                             <td colspan="6" style="text-align:center; padding:20px; color:#888;">
-                                @if ($filtro === 'anulados')
+                                @if ($rangoInvalido)
+                                    No hay gastos en el período.
+                                @elseif ($filtrandoFechas)
+                                    No hay gastos {{ $filtro === 'todos' ? '' : $filtro.' ' }}en el período
+                                    {{ $rango['desde'] }} → {{ $rango['hasta'] }}.
+                                @elseif ($filtro === 'anulados')
                                     No hay gastos anulados en este turno.
                                 @elseif ($filtro === 'todos')
                                     No hay gastos registrados en este turno.
@@ -165,6 +222,30 @@
                     </tfoot>
                 @endif
             </table>
+
+            {{-- Paginación: solo cambia la página visible; los totales de arriba
+                 siguen correspondiendo al conjunto COMPLETO filtrado. --}}
+            @if ($paginaGastos->total() > 0)
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 16px; border-top:1px solid #f1f1f1; font-size:12px; flex-wrap:wrap;">
+                    <span style="color:#6c757d;">
+                        Mostrando {{ $paginaGastos->firstItem() }}–{{ $paginaGastos->lastItem() }} de {{ $paginaGastos->total() }} gasto(s). Los totales cubren el período completo.
+                    </span>
+                    <span style="display:flex; gap:8px;">
+                        @if ($paginaGastos->onFirstPage())
+                            <span style="padding:6px 12px; border:1px solid #e3e6f0; border-radius:5px; color:#adb5bd;">Anterior</span>
+                        @else
+                            <a href="{{ $paginaGastos->previousPageUrl() }}"
+                               style="padding:6px 12px; border:1px solid #ced4da; border-radius:5px; color:#495057; text-decoration:none;">Anterior</a>
+                        @endif
+                        @if ($paginaGastos->hasMorePages())
+                            <a href="{{ $paginaGastos->nextPageUrl() }}"
+                               style="padding:6px 12px; border:1px solid #ced4da; border-radius:5px; color:#495057; text-decoration:none;">Siguiente</a>
+                        @else
+                            <span style="padding:6px 12px; border:1px solid #e3e6f0; border-radius:5px; color:#adb5bd;">Siguiente</span>
+                        @endif
+                    </span>
+                </div>
+            @endif
         </div>
     </div>
 </div>

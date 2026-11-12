@@ -21,14 +21,17 @@
         <h2>RESTAURANTE EL LOBITO</h2>
         <p>REPORTE DE EGRESOS / GASTOS</p>
         <p>Filtro: {{ ['activos' => 'Activos', 'anulados' => 'Anulados', 'todos' => 'Todos'][$filtro] ?? 'Activos' }}</p>
-        @if ($apertura)
+        @if (! empty($rango['filtrado'] ?? false))
+            {{-- Consulta por rango de fechas: no corresponde indicar un turno. --}}
+            <p><strong>Período:</strong> {{ $rango['desde'] }} → {{ $rango['hasta'] }}</p>
+        @elseif ($apertura)
             <p>Turno Apertura #{{ $apertura->id }}</p>
         @endif
     </div>
 
     <div class="linea"></div>
 
-    @if ($apertura)
+    @if ($apertura && empty($rango['filtrado'] ?? false))
         <p><strong>Fecha Apertura:</strong> {{ \Carbon\Carbon::parse($apertura->fecha)->format('Y-m-d H:i:s') }}</p>
     @endif
     <p><strong>Fecha Impresión:</strong> {{ now()->format('Y-m-d H:i:s') }}</p>

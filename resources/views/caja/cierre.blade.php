@@ -113,22 +113,32 @@
                            class="calc-cierre" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px; text-align:right;">
                 </div>
                 @foreach (\App\Services\CajaCierreService::DENOMINACIONES_DOLAR as $den)
-                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; align-items:center;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; align-items:center; gap:8px;">
                         <label style="width:110px; font-size:13px;">$ {{ number_format($den, 2) }}:</label>
                         <input type="number" data-den="{{ $den }}" data-moneda="dolar" name="conteo_dolar[{{ $den }}]" value="0"
                                class="calc-cierre" min="0" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px;">
+                        <span style="width:110px; text-align:right; font-weight:bold;">$ <span class="subtotal-cierre" data-moneda="dolar" data-den="{{ $den }}">0.00</span></span>
                     </div>
                 @endforeach
+                <div style="display:flex; justify-content:space-between; margin:8px 0 4px; font-weight:bold; border-top:1px solid #eee; padding-top:6px;">
+                    <span>Total USD contado:</span>
+                    <span>$ <span id="lbl_total_usd">0.00</span></span>
+                </div
 
                 <h4 style="color:var(--color-primary, #34495e); border-bottom:1px solid #eee; padding-bottom:8px; margin:25px 0 14px; font-size:14px;">Moneda Local (C$)</h4>
                 @foreach (\App\Services\CajaCierreService::DENOMINACIONES_LOCAL as $den)
                     @php $formato = $den < 1 ? '0.50' : number_format($den, 2); @endphp
-                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; align-items:center;">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; align-items:center; gap:8px;">
                         <label style="width:110px; font-size:13px;">C$ {{ $formato }}:</label>
                         <input type="number" data-den="{{ $den }}" data-moneda="local" name="conteo_local[{{ $den }}]" value="0"
                                class="calc-cierre" min="0" style="flex:1; padding:8px; border:1px solid #ddd; border-radius:4px;">
+                        <span style="width:110px; text-align:right; font-weight:bold;">C$ <span class="subtotal-cierre" data-moneda="local" data-den="{{ $den }}">0.00</span></span>
                     </div>
                 @endforeach
+                <div style="display:flex; justify-content:space-between; margin:8px 0 4px; font-weight:bold; border-top:1px solid #eee; padding-top:6px;">
+                    <span>Total C$ contado (sin conversión):</span>
+                    <span>C$ <span id="lbl_total_local">0.00</span></span>
+                </div
 
                 <h4 style="color:var(--color-primary, #34495e); border-bottom:1px solid #eee; padding-bottom:8px; margin:25px 0 14px; font-size:14px;">Ajustes del Turno</h4>
                 <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px;">
@@ -258,20 +268,31 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function calcular() {
         let contado = 0;
+        let totalLocal = 0;
         inputs.forEach(input => {
             const cantidad = cantidadConteo(input);
+            const den = Number(input.getAttribute('data-den'));
+            const subtotal = cantidad * den;
+            const span = document.querySelector('.subtotal-cierre[data-moneda="' + input.getAttribute('data-moneda') + '"][data-den="' + den + '"]');
+            if (span) span.textContent = subtotal.toFixed(2);
+
             if (input.getAttribute('data-moneda') === 'local') {
-                contado += cantidad * Number(input.getAttribute('data-den'));
+                contado += subtotal;
+                totalLocal += subtotal;
             }
         });
 
         // Dólares convertidos a córdobas con la tasa indicada.
         const tasa = num(document.getElementById('tasa_cambio'), 4);
         let dolares = 0;
+        let totalDolar = 0;
         inputs.forEach(input => {
             if (input.getAttribute('data-moneda') === 'dolar') {
                 const cantidad = cantidadConteo(input);
-                dolares += cantidad * Number(input.getAttribute('data-den'));
+                const den = Number(input.getAttribute('data-den'));
+                const subtotal = cantidad * den;
+                totalDolar += subtotal;
+                dolares += subtotal;
             }
         });
         contado += dolares * tasa;
@@ -283,6 +304,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
         document.getElementById('lbl_contado').textContent = contado.toFixed(2);
         document.getElementById('lbl_esperado').textContent = esperado.toFixed(2);
+        if (document.getElementById('lbl_total_usd')) document.getElementById('lbl_total_usd').textContent = totalDolar.toFixed(2);
+        if (document.getElementById('lbl_total_local')) document.getElementById('lbl_total_local').textContent = totalLocal.toFixed(2);
 
         const lblDif = document.getElementById('lbl_diferencia');
         lblDif.textContent = 'C$ ' + diferencia.toFixed(2);

@@ -60,6 +60,27 @@
         <tr><td>Cambios Entregados:</td><td class="derecha">C$ {{ number_format($resumen['cambios_entregados'], 2) }}</td></tr>
     </table>
 
+    <div class="linea"></div>
+    <div class="centro"><p><strong>PROPINAS</strong></p></div>
+    @if ($resumen['propinas']['disponible'] ?? false)
+        <table>
+            <tr><td>Propinas cobradas al cliente:</td><td class="derecha">C$ {{ number_format($resumen['propinas']['cobradas'], 2) }}</td></tr>
+            <tr><td>Cuentas con propina:</td><td class="derecha">{{ (int) $resumen['propinas']['cantidad'] }}</td></tr>
+            <tr><td>Pagadas al personal:</td><td class="derecha">No registrado</td></tr>
+        </table>
+        <p style="font-size:10px; color:#555; margin-top:4px;">
+            El sistema no registra la entrega de propinas al personal.
+        </p>
+    @else
+        <p>Propinas: no disponible.</p>
+    @endif
+
+    <div class="linea"></div>
+    <table>
+        <tr><td>Cierres registrados:</td><td class="derecha">{{ (int) $resumen['cantidad_cierres'] }}</td></tr>
+        <tr><td>Diferencia de caja:</td><td class="derecha">C$ {{ number_format($resumen['diferencia_caja'], 2) }}</td></tr>
+    </table>
+
     <div class="linea-doble"></div>
     <table>
         <tr><td class="resaltado">EFECTIVO ESPERADO DEL DÍA:</td></tr>

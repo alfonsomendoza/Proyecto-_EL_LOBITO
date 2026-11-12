@@ -39,6 +39,14 @@ class VerificarSesionUnica
 {
     public function handle(Request $request, Closure $next): Response
     {
+        // Asegurar que la sesión esté iniciada antes de validar.
+        if (! $request->hasSession()) {
+            $request->setLaravelSession(app('session')->driver());
+        }
+        if ($request->session() && ! $request->session()->isStarted()) {
+            $request->session()->start();
+        }
+
         // Sin usuario autenticado no hay sesión que validar.
         $usuario = $request->user();
 
@@ -89,7 +97,7 @@ class VerificarSesionUnica
         // es válida. Además de cerrarla, se LIBERA el registro de la base para
         // que el usuario pueda iniciar sesión de inmediato con la contraseña
         // nueva (si no se liberara, la política de sesión única lo rechazaría
-        // durante los 15 minutos siguientes). Este middleware corre ANTES de
+        // durante la ventana de inactividad). Este middleware corre ANTES de
         // AuthenticateSession para poder hacer esa limpieza (ver bootstrap/app.php).
         if ($this->contrasenaCambiada($request, $usuario)) {
             $this->liberarSiEsPropia($request, $usuario->id, $sesionActual);
@@ -103,8 +111,10 @@ class VerificarSesionUnica
 
         // Sesión no autorizada: otra sesión reclamó el acceso o el registro
         // se liberó. No se toca el registro actual (podría ser de otra sesión).
-        if ($registro->session_id === null
-            || ! hash_equals((string) $registro->session_id, $sesionActual)) {
+        $sessionIdRegistrado = $registro->session_id === null ? null : (string) $registro->session_id;
+        if ($sessionIdRegistrado === null
+            || $sessionIdRegistrado === ''
+            || ! hash_equals($sessionIdRegistrado, (string) $sesionActual)) {
             return $this->cerrarSesion(
                 $request,
                 401,
@@ -115,20 +125,62 @@ class VerificarSesionUnica
         // Renovación condicional de la actividad. El WHERE repite id,
         // session_id y activo: si entre la lectura y este UPDATE otra sesión
         // reclamó el acceso, se actualizan 0 filas y esta petición se rechaza.
-        $actualizada = DB::table('usuarios')
-            ->where('id', $usuario->id)
-            ->where('session_id', $sesionActual)
-            ->where('activo', 1)
-            ->update([
-                'ultima_actividad' => now(),
-            ]);
+        try {
+            $actualizada = DB::transaction(function () use ($usuario, $sesionActual) {
+                $fila = DB::table('usuarios')
+                    ->where('id', $usuario->id)
+                    ->where('session_id', $sesionActual)
+                    ->where('activo', 1)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $fila) {
+                    return 0; // No es nuestra sesión
+                }
+
+                DB::table('usuarios')
+                    ->where('id', $usuario->id)
+                    ->where('session_id', $sesionActual)
+                    ->where('activo', 1)
+                    ->update([
+                        'ultima_actividad' => now(),
+                    ]);
+
+                return 1;
+            });
+        } catch (\Throwable $e) {
+            $actualizada = DB::table('usuarios')
+                ->where('id', $usuario->id)
+                ->where('session_id', $sesionActual)
+                ->where('activo', 1)
+                ->update([
+                    'ultima_actividad' => now(),
+                ]);
+        }
 
         if ($actualizada !== 1) {
-            return $this->cerrarSesion(
-                $request,
-                401,
-                'Esta sesión ya no está autorizada. Inicia sesión nuevamente.'
-            );
+            /*
+             * MySQL informa filas CAMBIADAS, no filas ENCONTRADAS. Cuando la
+             * petición llega en el mismo segundo en que se guardó
+             * `ultima_actividad` (caso habitual en la petición que sigue al
+             * login), el UPDATE escribe exactamente el mismo timestamp y
+             * devuelve 0 aunque la sesión siga siendo la autorizada. Un 0,
+             * por sí solo, NO significa pérdida de autorización: se confirma
+             * releyendo el registro antes de cerrar la sesión.
+             */
+            $sigueAutorizada = DB::table('usuarios')
+                ->where('id', $usuario->id)
+                ->where('session_id', $sesionActual)
+                ->where('activo', 1)
+                ->exists();
+
+            if (! $sigueAutorizada) {
+                return $this->cerrarSesion(
+                    $request,
+                    401,
+                    'Esta sesión ya no está autorizada. Inicia sesión nuevamente.'
+                );
+            }
         }
 
         return $next($request);
