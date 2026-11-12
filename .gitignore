@@ -258,3 +258,12 @@ Homestead.yaml
 *:Zone.Identifier
 Zone.Identifier
 **/*:Zone.Identifier
+*.md
+**/*.md
+compose.yaml.backup-*
+opencode-config.ts.save
+opencode-security-skills-el-lobito.zip
+*.zip
+**/*.zip
+*.txt
+**/*.txt
