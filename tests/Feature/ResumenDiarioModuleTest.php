@@ -566,4 +566,206 @@ class ResumenDiarioModuleTest extends TestCase
 
         $this->assertSame($antes, $despues, 'Consultar/imprimir no debe modificar datos.');
     }
+
+    public function test_caja_abierta_sin_cierre_muestra_resumen_inmediato(): void
+    {
+        $aperturaId = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 200, 'Ana');
+        $this->cuenta(300, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $aperturaId);
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame(1, $r['cantidad_turnos']);
+
+        $turno = $r['turnos'][0];
+        $this->assertSame('ABIERTA', $turno['estado']);
+        $this->assertSame('ABIERTA', $turno['estado_caja']);
+        $this->assertTrue($turno['cierre'] === null || $turno['cierre']->id > 0);
+        $this->assertNull($turno['diferencia']);
+        $this->assertEqualsWithDelta(300.0, $turno['total_ventas'], 0.001);
+
+        $html = $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('reportes.resumen', ['fecha' => $this->fechaHoy()]))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('CAJA ABIERTA', $html);
+        $this->assertStringNotContainsString('No se encontraron aperturas', $html);
+    }
+
+    public function test_caja_abierta_sin_ventas_muestra_movimientos_cero(): void
+    {
+        $this->apertura($this->fechaHoy().' 09:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 150, 'Ana');
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame(1, $r['cantidad_turnos']);
+        $this->assertEqualsWithDelta(0.0, $r['turnos'][0]['total_ventas'], 0.001);
+        $this->assertEqualsWithDelta(150.0, (float) ($r['aperturas'][0]->monto_inicial ?? 0), 0.001, 'El fondo debe aparecer en el detalle.');
+    }
+
+    public function test_caja_abierta_con_gastos_y_retiros_aparece_y_suma_bien(): void
+    {
+        $aperturaId = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 500, 'Ana');
+        $this->cuenta(1000, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $aperturaId);
+        $this->gasto($aperturaId, 200, 'ACTIVO');
+
+        // Retiro registrado en la "ventana" del turno se modela como retiro del cierre.
+        $cierreId = DB::table('caja_cierre')->insertGetId([
+            'apertura_id' => $aperturaId,
+            'fecha' => now(),
+            'cajero' => 'Ana',
+            'turno' => 'Tarde',
+            'caja_id' => 1,
+            'monto_apertura' => 500,
+            'ventas_efectivo' => 1000,
+            'otros_ingresos' => 0,
+            'egresos' => 200,
+            'retiros' => 100,
+            'total_esperado' => 1200,
+            'tasa_cambio' => 1,
+            'monto_extranjero' => 0,
+            'total_contado' => 1200,
+            'diferencia' => 0,
+            'estado' => 'CUADRA',
+            'conteo_json' => null,
+            'observaciones' => null,
+            'creado_en' => now(),
+            'usuario_id' => null,
+        ]);
+
+        // Si existe cierre, el resumen es definitivo. El retiro es del cierre.
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame(1, $r['cantidad_turnos']);
+        $this->assertEqualsWithDelta(200.0, $r['turnos'][0]['gastos_activos'], 0.001);
+        $this->assertEqualsWithDelta(100.0, $r['turnos'][0]['retiros'], 0.001);
+    }
+
+    public function test_periodo_con_caja_abierta_y_una_cerrada_muestra_ambas(): void
+    {
+        $aperturaAbierta = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 300, 'Ana');
+        $aperturaCerrada = $this->apertura($this->fechaHoy().' 12:00:00', now()->subHours(3)->format('Y-m-d H:i:s'), 400, 'Ana');
+        $this->cuenta(300, 'EFECTIVO', null, now()->subHours(5)->format('Y-m-d H:i:s'), $aperturaAbierta);
+        $this->cuenta(200, 'EFECTIVO', null, now()->subHours(2)->format('Y-m-d H:i:s'), $aperturaCerrada);
+        $this->cierre($aperturaCerrada);
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame(2, $r['cantidad_turnos']);
+        $this->assertSame(1, $r['turnos_abiertos']);
+        $this->assertSame(1, $r['cantidad_cierres']);
+
+        $html = $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('reportes.resumen', ['fecha' => $this->fechaHoy()]))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('CAJA ABIERTA', $html);
+        $this->assertStringContainsString('Cierre', $html);
+    }
+
+    public function test_tres_aperturas_en_un_dia_cada_una_aparece_y_no_se_duplica(): void
+    {
+        $a1 = $this->apertura($this->fechaHoy().' 07:00:00', now()->subHours(7)->format('Y-m-d H:i:s'), 100, 'Ana');
+        $a2 = $this->apertura($this->fechaHoy().' 10:00:00', now()->subHours(5)->format('Y-m-d H:i:s'), 200, 'Ana');
+        $a3 = $this->apertura($this->fechaHoy().' 15:00:00', now()->subHours(2)->format('Y-m-d H:i:s'), 300, 'Ana');
+        $this->cuenta(100, 'EFECTIVO', null, now()->subHours(6)->format('Y-m-d H:i:s'), $a1);
+        $this->cuenta(200, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $a2);
+        $this->cuenta(300, 'EFECTIVO', null, now()->subHours(1)->format('Y-m-d H:i:s'), $a3);
+        $this->cierre($a1);
+        $this->cierre($a2);
+        $this->cierre($a3);
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertSame(3, $r['cantidad_turnos']);
+        $this->assertSame(3, $r['cantidad_cierres']);
+        $this->assertSame(0, $r['turnos_abiertos']);
+        $this->assertEqualsWithDelta(600.0, (float) $r['total_ventas'], 0.001);
+        $this->assertEqualsWithDelta(600.0, (float) $r['efectivo'], 0.001);
+    }
+
+    public function test_periodo_sin_cierres_pero_con_aperturas_muestra_aperturas_no_mensaje_de_error(): void
+    {
+        $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 200, 'Ana');
+
+        $html = $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('reportes.resumen', ['fecha' => $this->fechaHoy()]))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('CAJA ABIERTA', $html);
+        $this->assertStringNotContainsString('No se encontraron aperturas', $html);
+        $this->assertStringNotContainsString('No se encontraron cierres', $html);
+    }
+
+    public function test_filtro_por_cajero_con_caja_abierta(): void
+    {
+        $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 300, 'Ana');
+        $this->apertura($this->fechaHoy().' 10:00:00', now()->subHours(4)->format('Y-m-d H:i:s'), 500, 'Beto');
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy(), 'Ana');
+
+        $this->assertTrue($r['exito']);
+        $this->assertSame(1, $r['cantidad_turnos']);
+        $this->assertSame('Ana', $r['cajero']);
+    }
+
+    public function test_al_cerrar_la_misma_caja_conserva_operaciones_sin_duplicar(): void
+    {
+        $aperturaId = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 300, 'Ana');
+        $this->cuenta(400, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $aperturaId);
+
+        // Antes de cerrar: CAJA ABIERTA con 400 de ventas.
+        $previa = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+        $this->assertSame(1, $previa['cantidad_turnos']);
+        $this->assertEqualsWithDelta(400.0, $previa['turnos'][0]['total_ventas'], 0.001);
+
+        // Cerrar la MISMA apertura.
+        $this->cierre($aperturaId);
+
+        // Después de cerrar: aparece de nuevo el mismo turno, mismos 400.
+        $definitiva = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+        $this->assertSame(1, $definitiva['cantidad_turnos']);
+        $this->assertEqualsWithDelta(400.0, $definitiva['turnos'][0]['total_ventas'], 0.001);
+        $this->assertEqualsWithDelta(400.0, $definitiva['efectivo'], 0.001);
+        $this->assertSame(1, $definitiva['cantidad_cierres']);
+    }
+
+    public function test_propinas_se_informan_con_pendiente(): void
+    {
+        $aperturaId = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 200, 'Ana');
+
+        $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
+
+        $this->assertTrue($r['exito']);
+        $this->assertArrayHasKey('propinas', $r);
+        $this->assertIsArray($r['propinas']);
+    }
+
+    public function test_pantalla_y_ticket_coinciden_en_datos(): void
+    {
+        $aperturaId = $this->apertura($this->fechaHoy().' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 200, 'Ana');
+        $this->cuenta(500, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'), $aperturaId);
+
+        $admin = $this->usuario('ADMIN');
+        $htmlPantalla = $this->actingAs($admin)
+            ->get(route('reportes.resumen', ['fecha' => $this->fechaHoy()]))
+            ->assertStatus(200)
+            ->getContent();
+
+        $htmlTicket = $this->actingAs($admin)
+            ->get(route('reportes.resumen.ticket', ['fecha' => $this->fechaHoy()]))
+            ->assertStatus(200)
+            ->getContent();
+
+        $this->assertStringContainsString('500.00', $htmlPantalla);
+        $this->assertStringContainsString('500.00', $htmlTicket);
+        $this->assertStringContainsString('Ana', $htmlPantalla);
+        $this->assertStringContainsString('Ana', $htmlTicket);
+    }
 }

@@ -158,26 +158,27 @@ class ResumenDiarioService
         if ($fechaInicio > $fechaFin) {
             [$fechaInicio, $fechaFin] = [$fechaFin, $fechaInicio];
         }
-        // El resumen se genera POR CIERRE DE CAJA: cada cierre vigente del
-        // período es una sección independiente. No se agrupan aperturas por
-        // fecha ni se combinan importes entre cierres.
-        $cierres = \App\Models\CajaCierre::query()
+        // -----------------------------------------------------------------
+        // El resumen se genera POR APERTURA DE CAJA. Cada apertura del
+        // período (abierta o cerrada) es una sección independiente; el cierre
+        // (si existe) se relaciona con esa misma apertura. Las aperturas
+        // todavía abiertas aparecen como resumen PROVISIONAL.
+        // -----------------------------------------------------------------
+        $aperturasQuery = \App\Models\CajaApertura::query()
             ->whereBetween(DB::raw('DATE(fecha)'), [$fechaInicio, $fechaFin])
-            ->where('estado', '!=', 'ANULADO')
             ->orderBy('fecha')
-            ->orderBy('id')
-            ->get();
+            ->orderBy('id');
+
         if ($this->cajeroValido($cajero)) {
-            $cierres = $cierres->filter(function ($c) use ($cajero) {
-                $apertura = $c->apertura_id ? CajaApertura::find($c->apertura_id) : null;
-                $nombre = $c->cajero ?: ($apertura->cajero ?? null);
-                return $nombre === $cajero;
-            })->values();
+            $aperturasQuery->where('cajero', $cajero);
         }
-        if ($cierres->isEmpty()) {
+
+        $aperturas = $aperturasQuery->get();
+
+        if ($aperturas->isEmpty()) {
             return [
                 'exito' => false,
-                'error' => 'No se encontraron cierres de caja registrados para el período seleccionado.',
+                'error' => 'No se encontraron aperturas de caja para el período seleccionado.',
                 'fecha' => $fechaInicio,
                 'fecha_inicio' => $fechaInicio,
                 'fecha_fin' => $fechaFin,
@@ -186,6 +187,7 @@ class ResumenDiarioService
         }
         $todasAperturas = CajaApertura::query()->get();
         $turnos = [];
+        $turnosAbiertos = 0;
 
         $totales = [
             'monto_apertura' => 0.0,
@@ -206,16 +208,19 @@ class ResumenDiarioService
             'cantidad_cierres' => 0,
         ];
         $tarjetasPorBanco = [];
-        foreach ($cierres as $cierre) {
-            $apertura = $cierre->apertura_id ? CajaApertura::find($cierre->apertura_id) : null;
-            if (! $apertura) {
-                continue;
-            }
+        // Resumen por apertura: las aperturas todavía abiertas aparecen como
+        // «CAJA ABIERTA — resumen provisional» y las cerradas como definitivas.
+        foreach ($aperturas as $apertura) {
+            $cierre = $this->cierre->cierreVigente((int)$apertura->id);
             $fin = $this->finDeTurno($apertura, $todasAperturas);
+
             $ventas = $this->cierre->resumenVentas($apertura, $fin, true);
+            if ($cierre === null) {
+                $turnosAbiertos++;
+            }
             $egresosTurno = 0.0;
-            $otrosIngresosTurno = (float) ($cierre->otros_ingresos ?? 0);
-            $retirosTurno = (float) ($cierre->retiros ?? 0);
+            $otrosIngresosTurno = (float) ($cierre?->otros_ingresos ?? 0);
+            $retirosTurno = (float) ($cierre?->retiros ?? 0);
             $cambiosTurno = 0.0;
             foreach ($ventas['cuentas'] as $cuenta) {
                 $cambiosTurno += (float) ($cuenta->cambio ?? 0);
@@ -252,13 +257,15 @@ class ResumenDiarioService
             $totales['ventas_anuladas'] += $anuladas['monto'];
             $totales['cantidad_ventas_anuladas'] += $anuladas['cantidad'];
             $totales['cantidad_cuentas'] += $ventas['cantidad'];
-            $totales['diferencia_caja'] += (float) $cierre->diferencia;
-            $totales['cantidad_cierres']++;
+            $totales['diferencia_caja'] += round((float) ($cierre?->diferencia ?? 0), 2);
+            if ($cierre !== null) {
+                $totales['cantidad_cierres']++;
+            }
 
             $aperturaId = (int) $apertura->id;
             $perTurnoPropinas = $this->propinasDelTurno($aperturaId, $fechaInicio, $fechaFin);
 
-            $idsUsuarios = array_filter([(int) $apertura->usuario_id, (int) ($cierre->usuario_id ?? 0)]);
+            $idsUsuarios = array_filter([(int) $apertura->usuario_id, (int) ($cierre?->usuario_id ?? 0)]);
             $nombresUsuarios = [];
             if ($idsUsuarios !== [] && Schema::hasTable('usuarios')) {
                 $nombresUsuarios = DB::table('usuarios')
@@ -283,16 +290,17 @@ class ResumenDiarioService
                 'cantidad_gastos_anulados' => $cantidadGastosAnuladosTurno,
                 'abrio' => $this->nombreUsuario($apertura->usuario_id, $nombresUsuarios)
                     ?? ($apertura->cajero !== null && $apertura->cajero !== '' ? (string) $apertura->cajero : null),
-                'cerro' => $this->nombreUsuario($cierre->usuario_id ?? null, $nombresUsuarios)
-                    ?? (($cierre->cajero ?? null) !== null && ($cierre->cajero ?? '') !== '' ? (string) $cierre->cajero : null),
+                'cerro' => $this->nombreUsuario($cierre?->usuario_id ?? null, $nombresUsuarios)
+                    ?? (($cierre?->cajero ?? null) !== null && ($cierre?->cajero ?? '') !== '' ? (string) $cierre->cajero : null),
                 'fecha_apertura' => $apertura->fecha,
-                'fecha_cierre' => $cierre->fecha,
+                'fecha_cierre' => $cierre?->fecha,
+                'estado_caja' => $cierre !== null ? 'CERRADA' : 'ABIERTA',
                 'total_ventas' => round((float) $ventas['total'], 2),
-                'diferencia' => round((float) $cierre->diferencia, 2),
+                'diferencia' => $cierre !== null ? round((float) $cierre->diferencia, 2) : null,
                 'propinas' => $perTurnoPropinas,
             ];
         }
-        $cajeros = $cierres->pluck('cajero')->filter()->unique()->values()->all();
+        $cajeros = $aperturas->pluck('cajero')->filter()->unique()->values()->all();
         $propinas = $this->propinasDelPeriodo($fechaInicio, $fechaFin);
         return [
             'exito' => true,
@@ -300,7 +308,7 @@ class ResumenDiarioService
             'fecha_inicio' => $fechaInicio,
             'fecha_fin' => $fechaFin,
             'cajero' => $etiquetaCajero,
-            'aperturas' => $cierres->map(fn ($c) => $c->apertura_id ? CajaApertura::find($c->apertura_id) : null)->filter()->values(),
+            'aperturas' => $aperturas,
             'turnos' => $turnos,
             'cantidad_turnos' => count($turnos),
             'cajeros' => $cajeros,
@@ -326,7 +334,7 @@ class ResumenDiarioService
             'efectivo_esperado' => round($totales['monto_apertura'] + $totales['efectivo'] + $totales['otros_ingresos'] - $totales['gastos_activos'] - $totales['retiros'], 2),
             'diferencia_caja' => round($totales['diferencia_caja'], 2),
             'cantidad_cierres' => $totales['cantidad_cierres'],
-            'turnos_abiertos' => 0,
+            'turnos_abiertos' => $turnosAbiertos,
             'propinas' => $propinas,
         ];
     }

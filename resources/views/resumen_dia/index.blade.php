@@ -47,13 +47,14 @@
         @if (! ($resumen['exito'] ?? false))
             <div style="background:#fff7e6; border:1px solid #f5d9a8; border-radius:6px; padding:14px 16px; font-size:13px; color:#7a5a1a; line-height:1.5;">
                 <i class="fas fa-exclamation-triangle"></i>
-                {{ $resumen['error'] ?? 'No hay cierres registrados para el período seleccionado.' }}
+                {{ $resumen['error'] ?? 'No se encontraron aperturas de caja para el período seleccionado.' }}
             </div>
         @else
 
         <p style="font-size:12px; color:#6c757d; margin-bottom:14px;">
-            Cada sección corresponde a un <strong>cierre de caja registrado</strong> dentro del período.
-            Los importes no se combinan entre cierres.
+            Cada sección corresponde a una <strong>apertura de caja</strong> registrada en el período.
+            Si la apertura está abierta, el resumen es <strong>provisional</strong>; si existe un cierre, es <strong>definitivo</strong>.
+            Los importes no se combinan ni duplican entre aperturas.
         </p>
 
         @foreach ($resumen['turnos'] as $detalle)
@@ -67,14 +68,23 @@
                 <div style="padding:10px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;">
                     <span>
                         <i class="fas fa-cash-register"></i>
-                        Cierre #{{ $cierre->id }} — {{ $turno->turno ?? 'Turno' }} —
+                        @if ($cierre)
+                            Cierre #{{ $cierre->id }}
+                        @else
+                            CAJA ABIERTA
+                        @endif
+                        — {{ $turno->turno ?? 'Turno' }} —
                         {{ $turno->cajero ?: 'Sin cajero' }}
                     </span>
                     <span style="font-weight:400; font-size:12px; opacity:0.9;">
                         Abrió: {{ $detalle['abrio'] ?? '—' }} ·
-                        Cerró: {{ $detalle['cerro'] ?? '—' }} ·
+                        @if ($cierre)
+                            Cerró: {{ $detalle['cerro'] ?? '—' }} ·
+                        @endif
                         Apertura: {{ $turno->fecha ? \Carbon\Carbon::parse($turno->fecha)->format('d/m/Y H:i') : '—' }}
-                        · Cierre: {{ $cierre->fecha ? \Carbon\Carbon::parse($cierre->fecha)->format('d/m/Y H:i') : '—' }}
+                        @if ($cierre)
+                            · Cierre: {{ \Carbon\Carbon::parse($cierre->fecha)->format('d/m/Y H:i') }}
+                        @endif
                     </span>
                 </div>
 
@@ -113,25 +123,62 @@
                             <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Retiros:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['retiros'], 2) }}</td></tr>
                             <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 12px;">Gastos anulados (informativo):</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['gastos_anulados'], 2) }} ({{ (int) $detalle['cantidad_gastos_anulados'] }})</td></tr>
                             <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 12px;">Cambios entregados (informativo):</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['cambios'], 2) }}</td></tr>
-                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Diferencia de caja:</td><td style="padding:8px 12px; text-align:right; font-weight:bold; color:{{ ($detalle['diferencia'] ?? 0) < 0 ? '#c0392b' : '#1e7e34' }}">C$ {{ number_format((float) $detalle['diferencia'], 2) }}</td></tr>
+                            @if ($detalle['diferencia'] !== null)
+                                <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Diferencia de caja:</td><td style="padding:8px 12px; text-align:right; font-weight:bold; color:{{ ($detalle['diferencia'] ?? 0) < 0 ? '#c0392b' : '#1e7e34' }}">C$ {{ number_format((float) $detalle['diferencia'], 2) }}</td></tr>
+                            @else
+                                <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px; color:#6c757d;">Diferencia de caja:</td><td style="padding:8px 12px; text-align:right; color:#6c757d; font-style:italic;">Pendiente (caja abierta)</td></tr>
+                            @endif
                             <tr style="background:#fff8e1; font-weight:bold;"><td style="padding:8px 12px;">EFECTIVO ESPERADO:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $turno->monto_inicial + (float) $ventas['efectivo'] + (float) $detalle['otros_ingresos'] - (float) $detalle['gastos_activos'] - (float) $detalle['retiros'], 2) }}</td></tr>
                         </table>
                     </div>
 
-                    {{-- Propinas del cierre: cobradas vs atribuidas. --}}
-                    <div style="padding:10px 14px; border-top:1px solid #eee; font-size:12px; background:#f8f9fa;">
-                        <strong>Propinas</strong> — cobradas: C$ {{ number_format((float) ($detalle['propinas']['total'] ?? 0), 2) }}
-                        ({{ (int) ($detalle['propinas']['cantidad'] ?? 0) }} cuentas) ·
-                        atribuidas a meseros: C$ {{ number_format((float) ($detalle['propinas']['atribuidas'] ?? 0), 2) }} ·
-                        pendientes de atribución: C$ {{ number_format((float) ($detalle['propinas']['pendientes'] ?? 0), 2) }}
-                        · Personal: <em>no registrado</em>
-                        @if (!empty($detalle['propinas']['meseros'] ?? null))
-                            <br><small>Atribuidas a:
-                            @foreach (($detalle['propinas']['meseros'] ?? collect()) as $rm)
-                                {{ $rm['mesero'] }}: C$ {{ number_format((float) $rm['propinas'], 2) }}@if (!$loop->last), @endif
-                            @endforeach
-                            </small>
-                        @endif
+                    {{-- Propinas (detalle) --}}
+                    <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden; margin:14px;">
+                        <div style="padding:8px 14px; background:#8e44ad; color:#fff; font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:0.5px;">
+                            <i class="fas fa-hand-holding-usd"></i> Propinas
+                        </div>
+                        <div style="padding:14px; background:#fff; font-size:13px;">
+                            <div style="display:flex; flex-wrap:wrap; gap:14px 24px; border-bottom:1px solid #f1f1f1; padding-bottom:10px;">
+                                <div style="min-width:140px;">
+                                    <div style="font-size:11px; color:#6c757d; font-weight:600; text-transform:uppercase; letter-spacing:0.4px;">Cobradas</div>
+                                    <div style="font-size:20px; font-weight:800; color:#191d21;">C$ {{ number_format((float) ($detalle['propinas']['total'] ?? 0), 2) }}</div>
+                                    <div style="font-size:11px; color:#6c757d;">{{ (int) ($detalle['propinas']['cantidad'] ?? 0) }} cuentas</div>
+                                </div>
+                                <div style="min-width:140px;">
+                                    <div style="font-size:11px; color:#6c757d; font-weight:600; text-transform:uppercase; letter-spacing:0.4px;">Atribuidas a meseros</div>
+                                    <div style="font-size:20px; font-weight:800; color:#16a085;">C$ {{ number_format((float) ($detalle['propinas']['atribuidas'] ?? 0), 2) }}</div>
+                                </div>
+                                <div style="min-width:140px;">
+                                    <div style="font-size:11px; color:#6c757d; font-weight:600; text-transform:uppercase; letter-spacing:0.4px;">Pendientes</div>
+                                    <div style="font-size:20px; font-weight:800; color:#b02a37;">C$ {{ number_format((float) ($detalle['propinas']['pendientes'] ?? 0), 2) }}</div>
+                                </div>
+                                <div style="min-width:140px;">
+                                    <div style="font-size:11px; color:#6c757d; font-weight:600; text-transform:uppercase; letter-spacing:0.4px;">Pago al personal</div>
+                                    <div style="font-size:14px; font-weight:700; color:#6c757d; font-style:italic;">No registrado</div>
+                                </div>
+                            </div>
+                            @php
+                                $meserosCierre = $detalle['propinas']['meseros'] ?? collect();
+                            @endphp
+                            @if ($meserosCierre->isNotEmpty())
+                                <div style="margin-top:10px;">
+                                    <div style="font-size:11px; color:#6c757d; font-weight:600; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Desglose por mesero</div>
+                                    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                                        @foreach ($meserosCierre as $rm)
+                                            <tr style="border-bottom:1px solid #f1f1f1;">
+                                                <td style="padding:6px 0;">{{ $rm['mesero'] }}</td>
+                                                <td style="padding:6px 0; text-align:right; font-weight:700; color:#191d21;">C$ {{ number_format((float) $rm['propinas'], 2) }}</td>
+                                                <td style="padding:6px 0; text-align:right; color:#6c757d;">{{ (int) ($rm['cuentas_cobradas'] ?? 0) }} cuentas</td>
+                                            </tr>
+                                        @endforeach
+                                    </table>
+                                </div>
+                            @else
+                                <div style="margin-top:10px; font-size:13px; color:#6c757d; font-style:italic;">
+                                    Sin meseros con propina atribuida en este cierre.
+                                </div>
+                            @endif
+                        </div>
                     </div>
                 </div>
             </div>

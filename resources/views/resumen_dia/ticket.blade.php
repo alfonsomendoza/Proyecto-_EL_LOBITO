@@ -23,7 +23,7 @@
         <p>RESUMEN DEL DÍA</p>
         <p>Desde: {{ $fechaInicio }}  Hasta: {{ $fechaFin }}</p>
         <p>Cajero: {{ $cajero }}</p>
-        <p>{{ (int) $resumen['cantidad_turnos'] }} cierre(s)</p>
+        <p>{{ (int) $resumen['cantidad_turnos'] }} apertura(s)</p>
     </div>
 
     @foreach ($resumen['turnos'] as $detalle)
@@ -37,11 +37,13 @@
 
         <div class="linea-doble"></div>
         <div class="centro">
-            <p><strong>CIERRE #{{ $cierre->id }} — {{ $turno->turno ?? 'Turno' }}</strong></p>
+            <p><strong>{{ $cierre ? 'CIERRE #'.$cierre->id : 'CAJA ABIERTA' }} — {{ $turno->turno ?? 'Turno' }}</strong></p>
             <p>{{ $turno->cajero ?: 'Sin cajero' }}</p>
             <p style="font-size:10px;">
-                Apertura {{ $turno->fecha ? \Carbon\Carbon::parse($turno->fecha)->format('d/m/Y H:i') : '—' }} ·
-                Cierre {{ $cierre->fecha ? \Carbon\Carbon::parse($cierre->fecha)->format('d/m/Y H:i') : '—' }}
+                Apertura {{ $turno->fecha ? \Carbon\Carbon::parse($turno->fecha)->format('d/m/Y H:i') : '—' }}
+                @if ($cierre)
+                    · Cierre {{ \Carbon\Carbon::parse($cierre->fecha)->format('d/m/Y H:i') }}
+                @endif
             </p>
         </div>
 
@@ -78,7 +80,7 @@
             <tr><td>Retiros:</td><td class="derecha">C$ {{ number_format((float) $detalle['retiros'], 2) }}</td></tr>
             <tr><td>Gastos Anulados:</td><td class="derecha">C$ {{ number_format((float) $detalle['gastos_anulados'], 2) }} ({{ (int) $detalle['cantidad_gastos_anulados'] }})</td></tr>
             <tr><td>Cambios Entregados:</td><td class="derecha">C$ {{ number_format((float) $detalle['cambios'], 2) }}</td></tr>
-            <tr><td>Diferencia de caja:</td><td class="derecha">C$ {{ number_format((float) $detalle['diferencia'], 2) }}</td></tr>
+            <tr><td>Diferencia de caja:</td><td class="derecha">{{ $detalle['diferencia'] !== null ? 'C$ '.number_format((float) $detalle['diferencia'], 2) : 'Pendiente (caja abierta)' }}</td></tr>
         </table>
 
         <div class="linea"></div>
