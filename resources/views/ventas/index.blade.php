@@ -36,7 +36,7 @@
                         <th style="padding: 12px 15px;">Mesa</th>
                         <th style="padding: 12px 15px;">Cuenta</th>
                         <th style="padding: 12px 15px;">Fecha</th>
-                        <th style="padding: 12px 15px; text-align: right;">Total</th>
+                        <th style="padding: 12px 15px; text-align: right;" title="Consumo real de la cuenta; la propina, el descuento y los impuestos se aplican al cobrar">Consumo</th>
                         <th style="padding: 12px 15px; text-align: center;">Acciones</th>
                     </tr>
                 </thead>
@@ -137,6 +137,7 @@
             <div style="flex:1; min-width:180px; border:1px solid #e3e6f0; border-radius:8px; padding:12px 16px; background:#e8f8f5;">
                 <div style="font-size:12px; color:#6c757d; text-transform:uppercase; letter-spacing:0.5px;">Total cobrado</div>
                 <div style="font-size:20px; font-weight:bold; color: var(--color-success);">C$ {{ number_format($totalCobrado, 2) }}</div>
+                <div style="font-size:11px; color:#6c757d; margin-top:2px;">Importe neto según facturas EMITIDAS</div>
             </div>
         </div>
 
@@ -148,8 +149,8 @@
                         <th style="padding: 12px 15px;">Mesa</th>
                         <th style="padding: 12px 15px;">Fecha</th>
                         <th style="padding: 12px 15px;">Método</th>
-                        <th style="padding: 12px 15px;">Cuenta(s) cobrada(s)</th>
-                        <th style="padding: 12px 15px; text-align: right;">Total</th>
+                        <th style="padding: 12px 15px;">Cuenta(s) cobrada(s) — consumo · dto · propina · impuestos</th>
+                        <th style="padding: 12px 15px; text-align: right;">Total global</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -169,7 +170,7 @@
                             <td style="padding: 12px 15px;">{{ $venta->metodo_pago ?? '—' }}</td>
                             <td style="padding: 12px 15px;">
                                 @forelse (($cuentasCobradas[$venta->venta_id] ?? collect()) as $cobro)
-                                    <div style="font-size: 12px; line-height: 1.5; @if (($cobro->factura_estado ?? '') === 'ANULADA') color: #b02a37; text-decoration: line-through; @endif">
+                                    <div style="font-size: 12px; line-height: 1.5; border-bottom:1px dashed #f1f1f1; padding-bottom:4px; margin-bottom:4px; @if (($cobro->factura_estado ?? '') === 'ANULADA') color: #b02a37; text-decoration: line-through; @endif">
                                         {{ $cobro->numero_factura }}
                                         @if (($cobro->factura_estado ?? '') === 'ANULADA')
                                             <strong style="text-decoration: none; margin-left: 4px;">ANULADA</strong>
@@ -178,13 +179,31 @@
                                         {{ $cobro->cuenta_nombre ?? 'Cuenta' }}
                                         <small style="color: #6c757d;">(#{{ $cobro->cuenta_id }})</small>:
                                         C$ {{ number_format((float) $cobro->total, 2) }}
+                                        <small style="color:#6c757d; display:block; margin-top:2px;">
+                                            consumo C$ {{ number_format((float) ($cobro->des_consumo ?? 0), 2) }}
+                                            · desc. C$ {{ number_format((float) ($cobro->des_descuento ?? 0), 2) }}
+                                            · propina C$ {{ number_format((float) ($cobro->des_propina ?? 0), 2) }}
+                                            @if (! is_null($cobro->des_iva ?? null) && (float) $cobro->des_iva > 0)
+                                                · IVA C$ {{ number_format((float) $cobro->des_iva, 2) }}
+                                            @endif
+                                            @if (! is_null($cobro->des_ret_dgi ?? null) && (float) $cobro->des_ret_dgi > 0)
+                                                · ret. DGI C$ {{ number_format((float) $cobro->des_ret_dgi, 2) }}
+                                            @endif
+                                            @if (! is_null($cobro->des_ret_alc ?? null) && (float) $cobro->des_ret_alc > 0)
+                                                · ret. alcaldía C$ {{ number_format((float) $cobro->des_ret_alc, 2) }}
+                                            @endif
+                                        </small>
                                     </div>
                                 @empty
                                     <span style="color: #aaa;">—</span>
                                 @endforelse
                             </td>
                             <td style="padding: 12px 15px; text-align: right; font-weight: bold; color: var(--color-dark);">
-                                C$ {{ number_format((float) $venta->monto, 2) }}
+                                @if (! is_null($venta->total_global ?? null))
+                                    C$ {{ number_format((float) $venta->total_global, 2) }}
+                                @else
+                                    <span style="color: #aaa;" title="Venta sin factura vigente: no se puede determinar el importe">—</span>
+                                @endif
                             </td>
                         </tr>
                     @empty
@@ -200,6 +219,10 @@
                     @endforelse
                 </tbody>
             </table>
+            <div style="padding:8px 12px; font-size:11px; color:#8a94a6; border-top:1px solid #f1f1f1; background:#fbfbfd;">
+                <strong>Total global</strong> = consumo − descuento + IVA + propina − retenciones (importe que registró la factura EMITIDA).
+                Las facturas ANULADAS se muestran tachadas y no suman; una venta sin factura vigente aparece como «—».
+            </div>
         </div>
 
         @endif

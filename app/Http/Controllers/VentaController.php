@@ -160,30 +160,28 @@ class VentaController extends Controller
                 ->where('ventas.fecha', '<', $rango['finExclusivo']);
         }
 
+        // IMPORTANTE: `ventas.monto` es el CONSUMO neto de la venta, NO el
+        // dinero cobrado (nunca incluye descuento, IVA, propina ni
+        // retenciones). Por eso NO se usa para el total cobrado: el importe
+        // final real vive en la FACTURA (neto cobrado dentro de
+        // `facturas.total`) y su desglose quedó guardado en
+        // `facturas.detalle_consumo->ajustes`.
         $pagadas = $consultaPagadas
             ->orderByDesc('ventas.fecha')
             ->orderByDesc('ventas.id')
-            // Sin filtro se limita a las últimas 50; con filtro se listan todas.
             ->when(! ($rango['valido'] && $rango['activo']), fn ($q) => $q->limit(50))
             ->get([
                 'ventas.id as venta_id',
                 'ventas.mesa_id as mesa_id',
-                'ventas.monto as monto',
                 'ventas.fecha as fecha',
                 'ventas.metodo_pago as metodo_pago',
                 'mesas.numero as mesa_numero',
             ]);
 
-        // Totales del período MOSTRADO (misma fuente y mismo filtro que el
-        // listado): se calculan en el servidor, no se confía en el navegador.
-        $totalCobrado = round((float) $pagadas->sum('monto'), 2);
         $cantidadCobradas = $pagadas->count();
 
-        // Debajo de cada venta pagada se muestran las facturas de sus
-        // cuentas/subcuentas. Así el historial distingue qué subcuenta se
-        // cobró y con qué comprobante, sin cambiar el total de la venta.
-        // Es solo lectura y usa la MISMA tabla `facturas` que el módulo de
-        // Facturas; no recalcula importes.
+        // Debajo de cada venta pagada se listan las facturas de sus
+        // cuentas/subcuentas. Es solo lectura.
         $cuentasCobradas = DB::table('facturas as f')
             ->leftJoin('cuentas as c', 'c.id', '=', 'f.cuenta_id')
             ->whereIn('f.venta_id', $pagadas->pluck('venta_id')->all())
@@ -194,10 +192,54 @@ class VentaController extends Controller
                 'f.numero_factura',
                 'f.estado as factura_estado',
                 'f.cuenta_id',
+                // Total cobrado real de ESTA factura (neto). Fuente única del
+                // "total global" por cuenta: coincide con la cuenta, el cobro
+                // y el documento fiscal.
                 'f.total',
+                'f.detalle_consumo as detalle_consumo',
                 'c.nombre as cuenta_nombre',
+                'c.total as cuenta_consumo',
+                'c.descuento as cuenta_descuento',
+                'c.propina as cuenta_propina',
             ])
+            ->map(function ($cobro) {
+                // Desglose: se toma de `detalle_consumo->ajustes` (snapshot
+                // del cobro); si falta (históricas), se cae a las columnas
+                // de `cuentas` (antes de existir el JSON).
+                $ajustes = $this->ajustesDeFactura($cobro->detalle_consumo ?? null);
+                $cobro->des_consumo = $ajustes['consumo'] ?? ($cobro->cuenta_consumo !== null ? (float) $cobro->cuenta_consumo : 0.0);
+                $cobro->des_descuento = $ajustes['descuento'] ?? ($cobro->cuenta_descuento !== null ? (float) $cobro->cuenta_descuento : 0.0);
+                $cobro->des_propina = $ajustes['propina'] ?? ($cobro->cuenta_propina !== null ? (float) $cobro->cuenta_propina : 0.0);
+                $cobro->des_iva = ($ajustes !== null && array_key_exists('iva', $ajustes)) ? (float) $ajustes['iva'] : null;
+                $cobro->des_ret_dgi = ($ajustes !== null && array_key_exists('retencion_dgi', $ajustes)) ? (float) $ajustes['retencion_dgi'] : null;
+                $cobro->des_ret_alc = ($ajustes !== null && array_key_exists('retencion_alcaldia', $ajustes)) ? (float) $ajustes['retencion_alcaldia'] : null;
+                unset($cobro->detalle_consumo);
+
+                return $cobro;
+            })
             ->groupBy('venta_id');
+
+        // Total GLOBAL por venta: suma SOLO de las facturas EMITIDAS (una
+        // ANULADA no cuenta como cobrada). Equivale al importe final real y
+        // puede verificarse uno a uno contra cuenta → cobro → factura.
+        $globalesPorVenta = [];
+        foreach ($cuentasCobradas as $ventaId => $cobros) {
+            $suma = 0.0;
+            foreach ($cobros as $cobro) {
+                if (strtoupper((string) $cobro->factura_estado) === 'EMITIDA') {
+                    $suma += (float) $cobro->total;
+                }
+            }
+            $globalesPorVenta[(int) $ventaId] = round($suma, 2);
+        }
+
+        foreach ($pagadas as $p) {
+            $p->total_global = $globalesPorVenta[(int) $p->venta_id] ?? null;
+        }
+
+        // Totales del período mostrado (misma fuente y mismo filtro que el
+        // listado): se calculan en el servidor, no se confía en el navegador.
+        $totalCobrado = round((float) array_sum($globalesPorVenta), 2);
 
         return view('ventas.index', compact(
             'pendientes',
@@ -207,6 +249,33 @@ class VentaController extends Controller
             'totalCobrado',
             'cantidadCobradas'
         ));
+    }
+
+    /**
+     * Extrae el bloque `ajustes` del JSON `detalle_consumo` de una factura.
+     * Devuelve los valores tal como se registraron al cobrar (consumo,
+     * descuento, base, propina, iva, retencion_dgi, retencion_alcaldia,
+     * total_retenciones, total_factura, neto, total) o null si no hay JSON
+     * válido: en ese caso la vista muestra solo lo que existe y nunca
+     * estima importes.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function ajustesDeFactura(?string $detalleConsumo): ?array
+    {
+        if ($detalleConsumo === null || trim($detalleConsumo) === '') {
+            return null;
+        }
+
+        $decoded = json_decode($detalleConsumo, true);
+
+        if (! is_array($decoded)) {
+            return null;
+        }
+
+        $ajustes = $decoded['ajustes'] ?? null;
+
+        return is_array($ajustes) ? $ajustes : null;
     }
 
     /**
