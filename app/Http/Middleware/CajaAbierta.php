@@ -110,12 +110,13 @@ class CajaAbierta
             return $next($request);
         }
 
-        $mensaje = 'No existe una apertura de caja vigente. Todas las operaciones están bloqueadas. Debe abrir la caja para continuar.';
+        $mensaje = 'No hay una caja abierta. Debes abrir una caja antes de realizar operaciones.';
 
         if ($request->expectsJson() || $request->ajax()) {
             return response()->json([
                 'exito' => false,
                 'error' => $mensaje,
+                'caja_cerrada' => true,
             ], 422);
         }
 

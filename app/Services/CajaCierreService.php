@@ -126,26 +126,36 @@ class CajaCierreService
         $inicio = $this->inicioTurno($apertura);
         $fin = $fin ?? now();
 
-        return DB::table('cuentas')
-            ->where('estado', 'PAGADA')
+        $consulta = DB::table('cuentas')
+            ->leftJoin('ventas', 'ventas.id', '=', 'cuentas.venta_id');
+
+        // El ticket necesita el número de mesa; esquemas mínimos de prueba
+        // pueden no tener `mesas`. La consulta funciona igual sin el join.
+        if (Schema::hasTable('mesas')) {
+            $consulta->leftJoin('mesas', 'mesas.id', '=', 'ventas.mesa_id');
+        }
+        return $consulta
+            ->where('cuentas.estado', 'PAGADA')
             ->where(function ($query) use ($apertura, $inicio, $fin, $finExclusivo) {
-                $query->where('apertura_id', $apertura->id);
+                $query->where('cuentas.apertura_id', $apertura->id);
 
                 if ($inicio !== null) {
                     $query->orWhere(function ($sub) use ($inicio, $fin, $finExclusivo) {
-                        $sub->whereNull('apertura_id')
-                            ->where('updated_at', '>=', $inicio);
+                        $sub->whereNull('cuentas.apertura_id')
+                            ->where('cuentas.updated_at', '>=', $inicio);
 
                         if ($finExclusivo) {
-                            $sub->where('updated_at', '<', $fin);
+                            $sub->where('cuentas.updated_at', '<', $fin);
                         } else {
-                            $sub->where('updated_at', '<=', $fin);
+                            $sub->where('cuentas.updated_at', '<=', $fin);
                         }
                     });
                 }
             })
-            ->orderBy('id')
-            ->get();
+            ->orderBy('cuentas.id')
+            ->get(Schema::hasTable('mesas')
+                ? ['cuentas.*', 'ventas.mesa_id as mesa_id', 'mesas.numero as mesa_numero']
+                : ['cuentas.*', 'ventas.mesa_id as mesa_id', DB::raw('NULL as mesa_numero')]);
     }
 
     /**
@@ -162,13 +172,26 @@ class CajaCierreService
      * migrar) se conserva íntegro el cálculo histórico por
      * `cuentas.metodo_pago` + `cuentas.total`.
      *
-     * @return array{cuentas: Collection, cantidad: int, efectivo: float, tarjeta: float, transferencia: float, otro: float, tarjetas_por_banco: array<string, float>, total: float}
+     * @return array{cuentas: Collection, cantidad: int, efectivo: float, tarjeta: float, tarjeta_debito: float, tarjeta_credito: float, transferencia: float, otro: float, tarjetas_por_banco: array<string, float>, total: float}
      */
     public function resumenVentas(CajaApertura $apertura, ?Carbon $fin = null, bool $finExclusivo = false): array
     {
-        $cuentas = $this->cuentasDelTurno($apertura, $fin, $finExclusivo);
+        $cuentas = $this->cuentasDelTurno($apertura, $fin, $finExclusivo)
+            ->map(function ($cuenta) {
+                // Subdivide a C$ qué mesa pertenece: la línea de detalle puede
+                // mostrar Mesa y si es cuenta principal o subcuenta.
+                $cuenta->es_subcuenta = ! empty($cuenta->cuenta_origen_id);
+
+                return $cuenta;
+            });
 
         $totales = ['EFECTIVO' => 0.0, 'TARJETA' => 0.0, 'TRANSFERENCIA' => 0.0, 'OTRO' => 0.0];
+        // Desglose de tarjetas por tipo (débito / crédito). Las tarjetas de
+        // cobros antiguos sin líneas y con método genérico `TARJETA` no
+        // tienen tipo histórico verificable: se exponen en `tarjeta_generico`.
+        $tarjetaDebito = 0.0;
+        $tarjetaCredito = 0.0;
+        $tarjetaGenerico = 0.0;
         $tarjetasPorBanco = [];
 
         // Líneas de pago reales de las cuentas del turno (una consulta sola).
@@ -206,6 +229,14 @@ class CajaCierreService
                     $ingresos[$categoria] += (float) $linea->monto_cordobas;
 
                     if ($categoria === 'TARJETA') {
+                        $tipoTarjeta = $this->tipoTarjetaDe($linea->metodo_pago);
+                        if ($tipoTarjeta === 'DEBITO') {
+                            $tarjetaDebito += (float) $linea->monto_cordobas;
+                        } elseif ($tipoTarjeta === 'CREDITO') {
+                            $tarjetaCredito += (float) $linea->monto_cordobas;
+                        } else {
+                            $tarjetaGenerico += (float) $linea->monto_cordobas;
+                        }
                         $banco = trim((string) ($linea->banco ?? '')) ?: 'SIN BANCO';
                         $bancosDeLaCuenta[$banco] = ($bancosDeLaCuenta[$banco] ?? 0.0) + (float) $linea->monto_cordobas;
                     }
@@ -224,6 +255,16 @@ class CajaCierreService
                     $tarjetasPorBanco[$banco] = ($tarjetasPorBanco[$banco] ?? 0.0) + $monto;
                 }
 
+                // Se exponen las líneas de pago a la vista para que el ticket
+                // muestre el desglose de un cobro mixto sin volver a consultar.
+                $metodosCuenta = collect($lineas)->map(fn ($l) => strtoupper((string) $l->metodo_pago))->unique()->values();
+                $cuenta->pagos = collect($lineas)->map(fn ($l) => [
+                    'metodo_pago' => strtoupper((string) $l->metodo_pago),
+                    'monto_cordobas' => (float) $l->monto_cordobas,
+                    'banco' => $l->banco,
+                ])->values()->all();
+                $cuenta->es_mixto = $metodosCuenta->count() > 1;
+
                 continue;
             }
 
@@ -233,9 +274,24 @@ class CajaCierreService
             $totales[$categoria] += $monto;
 
             if ($categoria === 'TARJETA') {
+                $tipoTarjeta = $this->tipoTarjetaDe($cuenta->metodo_pago);
+                if ($tipoTarjeta === 'DEBITO') {
+                    $tarjetaDebito += $monto;
+                } elseif ($tipoTarjeta === 'CREDITO') {
+                    $tarjetaCredito += $monto;
+                } else {
+                    $tarjetaGenerico += $monto;
+                }
                 $banco = trim((string) ($cuenta->banco ?? '')) ?: 'SIN BANCO';
                 $tarjetasPorBanco[$banco] = ($tarjetasPorBanco[$banco] ?? 0.0) + $monto;
             }
+
+            $cuenta->pagos = [[
+                'metodo_pago' => strtoupper((string) ($cuenta->metodo_pago ?? 'EFECTIVO')),
+                'monto_cordobas' => $monto,
+                'banco' => $cuenta->banco,
+            ]];
+            $cuenta->es_mixto = false;
         }
 
         return [
@@ -243,6 +299,9 @@ class CajaCierreService
             'cantidad' => $cuentas->count(),
             'efectivo' => $totales['EFECTIVO'],
             'tarjeta' => $totales['TARJETA'],
+            'tarjeta_debito' => $tarjetaDebito,
+            'tarjeta_credito' => $tarjetaCredito,
+            'tarjeta_generico' => $tarjetaGenerico,
             'transferencia' => $totales['TRANSFERENCIA'],
             'otro' => $totales['OTRO'],
             'tarjetas_por_banco' => $tarjetasPorBanco,
@@ -574,6 +633,25 @@ class CajaCierreService
         }
 
         return ['exito' => true, 'codigo' => 200, 'mensaje' => 'Cierre anulado correctamente.'];
+    }
+
+    /**
+     * Tipo de tarjeta a partir del método de pago registrado. Históricos
+     * con método genérico `TARJETA` no permiten distinguir y caen en GENERICO.
+     */
+    private function tipoTarjetaDe(?string $metodo): string
+    {
+        $normalizado = strtoupper(trim((string) $metodo));
+
+        if (str_contains($normalizado, 'DEBITO')) {
+            return 'DEBITO';
+        }
+
+        if (str_contains($normalizado, 'CREDITO')) {
+            return 'CREDITO';
+        }
+
+        return 'GENERICO';
     }
 
     /**

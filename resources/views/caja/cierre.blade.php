@@ -70,10 +70,34 @@
                             <td style="padding:8px 12px; text-align:right; font-weight:bold;">C$ {{ number_format($resumen['efectivo'] ?? 0, 2) }}</td>
                         </tr>
                         @if (($resumen['tarjeta'] ?? 0) > 0)
+                            @if (($resumen['tarjeta_debito'] ?? 0) > 0)
+                                <tr style="border-bottom:1px solid #f1f1f1;">
+                                    <td style="padding:8px 12px; color:#555;">&nbsp;&nbsp;Tarjeta Débito <em>(no suma al efectivo)</em></td>
+                                    <td style="padding:8px 12px; text-align:right; color:#555;">C$ {{ number_format($resumen['tarjeta_debito'], 2) }}</td>
+                                </tr>
+                            @endif
+                            @if (($resumen['tarjeta_credito'] ?? 0) > 0)
+                                <tr style="border-bottom:1px solid #f1f1f1;">
+                                    <td style="padding:8px 12px; color:#555;">&nbsp;&nbsp;Tarjeta Crédito <em>(no suma al efectivo)</em></td>
+                                    <td style="padding:8px 12px; text-align:right; color:#555;">C$ {{ number_format($resumen['tarjeta_credito'], 2) }}</td>
+                                </tr>
+                            @endif
+                            @if (($resumen['tarjeta_generico'] ?? 0) > 0)
+                                <tr style="border-bottom:1px solid #f1f1f1;">
+                                    <td style="padding:8px 12px; color:#555;">&nbsp;&nbsp;Tarjeta (tipo histórico) <em>(no suma al efectivo)</em></td>
+                                    <td style="padding:8px 12px; text-align:right; color:#555;">C$ {{ number_format($resumen['tarjeta_generico'], 2) }}</td>
+                                </tr>
+                            @endif
+                            @if (($resumen['tarjeta'] ?? 0) > 0)
+                                <tr style="border-bottom:1px solid #f1f1f1;">
+                                    <td style="padding:8px 12px; font-weight:600; color:#34495e;">&nbsp;&nbsp;Total Tarjetas <em style="font-weight:400; color:#6c757d;">(no suma al efectivo)</em></td>
+                                    <td style="padding:8px 12px; text-align:right; font-weight:bold; color:#34495e;">C$ {{ number_format($resumen['tarjeta'], 2) }}</td>
+                                </tr>
+                            @endif
                             @foreach (($resumen['tarjetas_por_banco'] ?? []) as $banco => $montoBanco)
                                 <tr style="border-bottom:1px solid #f1f1f1;">
-                                    <td style="padding:8px 12px; color:#555;">&nbsp;&nbsp;Tarjeta · {{ $banco }} <em>(no suma al efectivo)</em></td>
-                                    <td style="padding:8px 12px; text-align:right; color:#555;">C$ {{ number_format($montoBanco, 2) }}</td>
+                                    <td style="padding:8px 12px; color:#777; font-size:12px;">&nbsp;&nbsp;&nbsp;&nbsp;{{ $banco }}</td>
+                                    <td style="padding:8px 12px; text-align:right; color:#777; font-size:12px;">C$ {{ number_format($montoBanco, 2) }}</td>
                                 </tr>
                             @endforeach
                         @endif

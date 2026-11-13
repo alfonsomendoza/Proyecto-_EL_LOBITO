@@ -93,16 +93,39 @@
         <tr><td class="resaltado">= Efectivo Esperado:</td><td class="derecha resaltado">C$ {{ number_format((float) $cierre->total_esperado, 2) }}</td></tr>
     </table>
 
+    @php
+        $metodoEtiqueta = fn ($metodo) => $etiquetas[strtoupper((string) $metodo)] ?? ($metodo ?? 'Efectivo');
+        $detallePagosDe = function ($cuenta) use ($metodoEtiqueta) {
+            $partes = [];
+            foreach ($cuenta->pagos ?? [] as $linea) {
+                $tipo = match ($linea['metodo_pago'] ?? '') {
+                    'TARJETA_DEBITO' => 'Débito',
+                    'TARJETA_CREDITO' => 'Crédito',
+                    default => $metodoEtiqueta($linea['metodo_pago'] ?? ''),
+                };
+                $banco = $linea['banco'] ?? null;
+                $partes[] = $tipo . ($banco ? ' ' . $banco : '') . ' C$ ' . number_format((float) ($linea['monto_cordobas'] ?? 0), 2);
+            }
+
+            return implode(' · ', $partes);
+        };
+    @endphp
+
     @if ($resumen && $resumen['cuentas']->isNotEmpty())
         <div class="linea"></div>
         <div class="centro"><p><strong>DETALLE DE VENTAS</strong></p></div>
         <table>
             @foreach ($resumen['cuentas'] as $cuenta)
                 <tr>
-                    <td>{{ $cuenta->nombre }}<br>
-                        <small>{{ $etiquetas[$cuenta->metodo_pago] ?? ($cuenta->metodo_pago ?? 'Efectivo') }}@if (!empty($cuenta->banco)) · {{ $cuenta->banco }}@endif</small>
+                    <td><strong>{{ $cuenta->mesa_numero ? 'Mesa '.$cuenta->mesa_numero : 'Mostrador' }}</strong>
+                        @if (!empty($cuenta->es_subcuenta))
+                            · Subcuenta
+                        @endif
+                        <br>
+                        <small>{{ $cuenta->nombre }}</small><br>
+                        <small>{{ $detallePagosDe($cuenta) }}</small>
                     </td>
-                    <td class="derecha">C$ {{ number_format((float) $cuenta->total, 2) }}</td>
+                    <td class="derecha" style="vertical-align:bottom;">C$ {{ number_format((float) $cuenta->total, 2) }}</td>
                 </tr>
             @endforeach
         </table>
@@ -111,19 +134,22 @@
     @if ($resumen && ($resumen['tarjeta'] > 0 || $resumen['transferencia'] > 0))
         <div class="linea-doble"></div>
         <div class="centro"><p><strong>PAGOS QUE NO ENTRAN A LA GAVETA</strong></p></div>
-        @if ($resumen['tarjeta'] > 0)
-            <table>
+        <table>
+            @if (($resumen['tarjeta'] ?? 0) > 0)
+                <tr><td>Tarjeta Débito:</td><td class="derecha">C$ {{ number_format((float) ($resumen['tarjeta_debito'] ?? 0), 2) }}</td></tr>
+                <tr><td>Tarjeta Crédito:</td><td class="derecha">C$ {{ number_format((float) ($resumen['tarjeta_credito'] ?? 0), 2) }}</td></tr>
+                @if (($resumen['tarjeta_generico'] ?? 0) > 0)
+                    <tr><td>Tarjeta (tipo histórico):</td><td class="derecha">C$ {{ number_format((float) $resumen['tarjeta_generico'], 2) }}</td></tr>
+                @endif
+                <tr><td class="resaltado">Total Tarjetas:</td><td class="derecha resaltado">C$ {{ number_format((float) $resumen['tarjeta'], 2) }}</td></tr>
                 @foreach ($resumen['tarjetas_por_banco'] as $banco => $monto)
-                    <tr><td>Tarjeta {{ $banco }}:</td><td class="derecha">C$ {{ number_format($monto, 2) }}</td></tr>
+                    <tr><td>&nbsp;&nbsp;{{ $banco }}:</td><td class="derecha">C$ {{ number_format($monto, 2) }}</td></tr>
                 @endforeach
-                <tr><td class="resaltado">Total Tarjetas:</td><td class="derecha resaltado">C$ {{ number_format($resumen['tarjeta'], 2) }}</td></tr>
-            </table>
-        @endif
-        @if ($resumen['transferencia'] > 0)
-            <table>
+            @endif
+            @if (($resumen['transferencia'] ?? 0) > 0)
                 <tr><td class="resaltado">Transferencias:</td><td class="derecha resaltado">C$ {{ number_format($resumen['transferencia'], 2) }}</td></tr>
-            </table>
-        @endif
+            @endif
+        </table>
     @endif
 
     @if ($gastos->isNotEmpty())

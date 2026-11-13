@@ -138,9 +138,45 @@
                 fd.append('accion', 'crear_mesa');
                 fd.append('numero', result.value.trim());
 
-                fetch('{{ route("mesas.api") }}', { method: 'POST', body: fd })
-                .then(response => response.json())
+                fetch('{{ route("mesas.api") }}', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: fd,
+                })
+                .then(async response => {
+                    const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                    const raw = await response.text();
+                    let data = null;
+                    if (contentType.includes('application/json') || contentType === '') {
+                        try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
+                    }
+                    return data;
+                })
                 .then(data => {
+                    if (!data || typeof data.exito === 'undefined') {
+                        Swal.fire({
+                            title: 'No se pudo crear la mesa',
+                            text: 'El servidor devolvió una respuesta no válida. Intenta de nuevo.',
+                            icon: 'error',
+                        });
+                        return;
+                    }
+                    if (data.caja_cerrada) {
+                        Swal.fire({
+                            title: 'No hay una caja abierta',
+                            text: data.error || 'No hay una caja abierta. Debes abrir una caja antes de realizar operaciones.',
+                            icon: 'warning',
+                            confirmButtonText: 'Ir a apertura de caja',
+                            confirmButtonColor: '#6777ef',
+                            showCancelButton: true,
+                            cancelButtonText: 'Cerrar',
+                        }).then(result => {
+                            if (result.isConfirmed) {
+                                window.location.href = "{{ route('caja.apertura') }}";
+                            }
+                        });
+                        return;
+                    }
                     if (data.exito) {
                         Swal.fire('¡Creada!', data.mensaje, 'success').then(() => location.reload());
                     } else {
@@ -481,18 +517,57 @@
         if (clienteId) formData.append('cliente_id', clienteId);
         if (meseroId) formData.append('mesero_id', meseroId);
 
-        fetch('{{ route("mesas.api") }}', { method: 'POST', body: formData })
-        // Eliminamos la barrera de response.ok para obligarlo a leer siempre el JSON del servidor
-        .then(response => response.json())
-        .then(data => {
+        fetch('{{ route("mesas.api") }}', {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: formData,
+        })
+        // Lee el contenido crudo primero y comprueba el content-type antes de
+        // intentar interpretarlo. Así un HTML (p. ej. redirección del bloqueo)
+        // nunca se confunde con JSON y se muestra un mensaje claro.
+        .then(async response => {
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            const raw = await response.text();
+            let data = null;
+
+            if (contentType.includes('application/json') || contentType === '') {
+                try { data = raw ? JSON.parse(raw) : null; } catch (e) { data = null; }
+            }
+
+            if (!data || typeof data.exito === 'undefined') {
+                Swal.fire({
+                    title: 'No se pudo abrir la mesa',
+                    text: 'El servidor devolvió una respuesta no válida. Intenta de nuevo.',
+                    icon: 'error',
+                });
+                return;
+            }
+
+            if (data.caja_cerrada) {
+                Swal.fire({
+                    title: 'No hay una caja abierta',
+                    text: data.error || 'No hay una caja abierta. Debes abrir una caja antes de realizar operaciones.',
+                    icon: 'warning',
+                    confirmButtonText: 'Ir a apertura de caja',
+                    confirmButtonColor: '#6777ef',
+                    showCancelButton: true,
+                    cancelButtonText: 'Cerrar',
+                }).then(result => {
+                    if (result.isConfirmed) {
+                        window.location.href = "{{ route('caja.apertura') }}";
+                    }
+                });
+                return;
+            }
+
             if (data.exito) {
                 // Tras preparar la mesa, entra al POS para registrar el primer
                 // producto. La mesa no se marca OCUPADA hasta que exista consumo.
                 window.location.href = URL_POS_MESA + '/' + mesaId;
-            } else {
-                // Muestra el mensaje real devuelto por el servidor.
-                Swal.fire('Atención', data.error || 'No fue posible realizar la acción.', 'warning');
+                return;
             }
+
+            Swal.fire('Atención', data.error || 'No fue posible realizar la acción.', 'warning');
         })
         .catch(error => {
             Swal.fire('Error del Servidor', 'Revisa tu conexión o los logs de Laravel.', 'error');
