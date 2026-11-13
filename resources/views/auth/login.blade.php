@@ -33,6 +33,12 @@
                 <p>Sistema de Gestión POS</p>
             </div>
             <div class="login-body">
+                @if (session('info'))
+                    <div style="background-color: #2980b9; color: white; padding: 10px; border-radius: 4px; margin-bottom: 15px; font-size: 13px;">
+                        {{ session('info') }}
+                    </div>
+                @endif
+
                 @if ($errors->any())
                     <div style="background-color: #fc544b; color: white; padding: 10px; border-radius: 4px; margin-bottom: 15px; font-size: 13px;">
                         {{ $errors->first() }}

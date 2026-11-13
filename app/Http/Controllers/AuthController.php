@@ -291,6 +291,19 @@ class AuthController extends Controller
         // Generamos un nuevo token CSRF.
         $request->session()->regenerateToken();
 
+        // Salidas explícitas desde el flujo 2FA. Se informa en el login sin
+        // modificar el usuario ni su configuración 2FA.
+        $mensajesSalida = [
+            '2fa_sin_activar' => 'Has salido sin activar la verificación en dos pasos.',
+            '2fa_challenge_salir' => 'Has cerrado tu sesión sin completar la verificación 2FA.',
+        ];
+
+        $motivo = (string) $request->input('motivo');
+
+        if (isset($mensajesSalida[$motivo])) {
+            return redirect()->route('login')->with('info', $mensajesSalida[$motivo]);
+        }
+
         // Regresamos al login.
         return redirect()->route('login');
     }

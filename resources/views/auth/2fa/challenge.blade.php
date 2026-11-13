@@ -19,6 +19,8 @@
         .input-group { position: relative; }
         .input-group input { width: 100%; padding: 12px 15px; border: 1px solid #e4e6fc; border-radius: 4px; font-size: 14px; }
         .btn-login { width: 100%; background-color: #6777ef; color: #fff; border: none; padding: 12px; border-radius: 4px; font-size: 15px; font-weight: bold; cursor: pointer; }
+        .btn-salir { width: 100%; background-color: #ffffff; color: #6c757d; border: 1px solid #e4e6fc; padding: 11px; border-radius: 4px; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.3s; }
+        .btn-salir:hover { background-color: #f4f6f9; color: #34395e; }
     </style>
 </head>
 <body>
@@ -50,6 +52,17 @@
                 <p style="text-align: center; margin-top: 15px; font-size: 12px; color: #666;">
                     Puedes usar un código de recuperación si no tienes acceso a tu app
                 </p>
+
+                {{-- Salida segura desde el desafío: usa el logout oficial, que
+                     invalida la sesión y regenera el token CSRF. No completa la
+                     verificación ni modifica el estado 2FA del usuario. --}}
+                <form method="POST" action="{{ route('logout') }}" style="margin-top: 15px;">
+                    @csrf
+                    <input type="hidden" name="motivo" value="2fa_challenge_salir">
+                    <button type="submit" class="btn-salir">
+                        <i class="fas fa-right-from-bracket" style="margin-right: 5px;"></i> SALIR DEL SISTEMA
+                    </button>
+                </form>
             </div>
         </div>
     </div>
