@@ -228,11 +228,35 @@ class VentaController extends Controller
             ->where('ventas.estado', 'PAGADA');
 
         if ($rango['valido'] && $rango['activo']) {
-            $consultaPagadas
-                ->where('ventas.fecha', '>=', $rango['inicio'])
-                ->where('ventas.fecha', '<', $rango['finExclusivo']);
+            $consultaPagadas->where(function ($q) use ($rango) {
+                $q->where('ventas.fecha', '>=', $rango['inicio'])
+                    ->where('ventas.fecha', '<', $rango['finExclusivo']);
+            })
+            ->orWhere(function ($q) use ($rango) {
+                // Cuentas marcadas PAGADA en el rango de cobro.
+                $q->whereExists(function ($sub) use ($rango) {
+                    $sub->select(DB::raw(1))
+                        ->from('cuentas as c')
+                        ->whereColumn('c.venta_id', 'ventas.id')
+                        ->where('c.updated_at', '>=', $rango['inicio'])
+                        ->where('c.updated_at', '<', $rango['finExclusivo']);
+                });
+            })
+            ->orWhere(function ($q) use ($rango) {
+                // Facturas EMITIDAS con fecha_emision en el rango.
+                $q->whereExists(function ($sub) use ($rango) {
+                    $sub->select(DB::raw(1))
+                        ->from('facturas as f')
+                        ->whereColumn('f.venta_id', 'ventas.id')
+                        ->where('f.fecha_emision', '>=', $rango['inicio'])
+                        ->where('f.fecha_emision', '<', $rango['finExclusivo']);
+                });
+            });
         }
 
+        // No hace falta DISTINCT: ventas.mesa_id es 1:1 y los $whereExists
+        // no multiplican filas (en todo caso el join produce una fila por venta).
+        //
         // IMPORTANTE: `ventas.monto` es el CONSUMO neto de la venta, NO el
         // dinero cobrado (nunca incluye descuento, IVA, propina ni
         // retenciones). Por eso NO se usa para el total cobrado: el importe

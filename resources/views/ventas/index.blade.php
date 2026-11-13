@@ -156,7 +156,7 @@
                 <tbody>
                     @forelse($pagadas as $venta)
                         <tr style="border-bottom: 1px solid #f0f0f0;">
-                            <td style="padding: 12px 15px; color: #666;">#{{ $venta->venta_id }}</td>
+                            <td style="padding: 12px 15px; color: #666;">Venta #{{ $venta->venta_id }}</td>
                             <td style="padding: 12px 15px;">
                                 @if($venta->mesa_numero)
                                     Mesa {{ $venta->mesa_numero }}

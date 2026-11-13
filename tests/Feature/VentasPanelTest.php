@@ -506,6 +506,39 @@ class VentasPanelTest extends TestCase
             ->assertSee('321.12');
     }
 
+    public function test_ventas_cobradas_hoy_con_fecha_negocio_anterior_aparecen(): void
+    {
+        $mesa = $this->crearMesa('901');
+        $venta = $this->crearVenta($mesa, 'PAGADA', 495.00, '2026-11-09 16:54:00');
+
+        // Cuenta PAGADA hoy (cobro hoy) pese a venta con fecha de negocio antigua.
+        DB::table('cuentas')->insert([
+            'venta_id' => $venta,
+            'nombre' => 'Cuenta principal',
+            'total' => 495.00,
+            'estado' => 'PAGADA',
+            'metodo_pago' => 'EFECTIVO',
+            'usuario_cobro' => $this->usuario('ADMIN')->id,
+            'updated_at' => now(),
+        ]);
+        $cuentaId = (int) DB::table('cuentas')->where('venta_id', $venta)->value('id');
+        DB::table('facturas')->insert([
+            'numero_factura' => 'FAC-4951',
+            'venta_id' => $venta,
+            'cuenta_id' => $cuentaId,
+            'total' => 495.00,
+            'estado' => 'EMITIDA',
+            'fecha_emision' => now(),
+            'usuario_id' => 1,
+            'detalle_consumo' => json_encode(['ajustes' => ['consumo' => 450.00, 'descuento' => 0, 'base' => 450.00, 'propina' => 45.00, 'iva' => 0, 'total_factura' => 495.00, 'neto' => 495.00]]),
+        ]);
+
+        $this->actingAs($this->usuario('ADMIN'))
+            ->get(route('ventas.index', ['desde' => now()->format('Y-m-d'), 'hasta' => now()->format('Y-m-d')]))
+            ->assertStatus(200)
+            ->assertSee('495.00');
+    }
+
     public function test_muestra_facturas_anuladas_marcadas_y_no_duplica_total(): void
     {
         $mesa = $this->crearMesa('8');
