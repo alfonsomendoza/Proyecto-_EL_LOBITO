@@ -216,8 +216,50 @@ class CajaCierreService
                 ->groupBy(fn ($pago) => (int) $pago->cuenta_id);
         }
 
+        // Última factura EMITIDA por cuenta: es la fuente AUTORITATIVA del
+        // importe cobrado (incluye propina e impuestos u otros ajustes
+        // registrados al cobrar). Las ANULADAS quedan fuera.
+        $facturasPorCuenta = collect();
+        if (Schema::hasTable('facturas') && $cuentas->isNotEmpty()) {
+            $facturasPorCuenta = DB::table('facturas')
+                ->whereIn('cuenta_id', $cuentas->pluck('id'))
+                ->where('estado', 'EMITIDA')
+                ->orderBy('id')
+                ->get(['id', 'cuenta_id', 'numero_factura', 'total', 'detalle_consumo'])
+                ->groupBy('cuenta_id')
+                ->map(fn ($filas) => $filas->last())
+                ->mapWithKeys(fn ($f) => [(int) $f->cuenta_id => $f]);
+        }
+
         foreach ($cuentas as $cuenta) {
             $lineas = $pagosPorCuenta->get((int) $cuenta->id);
+
+            // Importes del cobro VENDIENDO: se leen del snapshot histórico
+            // de la factura EMITIDA (o, a falta de ella, de las columnas de
+            // la cuenta). NUNCA de la configuración fiscal vigente.
+            $facturaVigente = $facturasPorCuenta->get((int) $cuenta->id);
+            $ajustes = null;
+            $decodificado = $facturaVigente ? json_decode((string) $facturaVigente->detalle_consumo, true) : null;
+            if (is_array($decodificado)) {
+                $ajustes = $decodificado['ajustes'] ?? null;
+            }
+
+            $cuenta->consumo = $ajustes['consumo']
+                ?? (float) $cuenta->total;
+            $cuenta->descuento = $ajustes['descuento']
+                ?? (isset($cuenta->descuento) ? (float) $cuenta->descuento : 0.0);
+            $cuenta->propina = $ajustes['propina']
+                ?? (isset($cuenta->propina) ? (float) $cuenta->propina : 0.0);
+            $cuenta->iva = $ajustes['iva'] ?? 0.0;
+            $cuenta->retencion_dgi = $ajustes['retencion_dgi'] ?? 0.0;
+            $cuenta->retencion_alcaldia = $ajustes['retencion_alcaldia'] ?? 0.0;
+            $cuenta->base = $ajustes['base'] ?? round($cuenta->consumo - $cuenta->descuento, 2);
+            $cuenta->cobrado = $facturaVigente
+                ? (float) $facturaVigente->total
+                : round($cuenta->base + $cuenta->iva + $cuenta->propina
+                    - $cuenta->retencion_dgi - $cuenta->retencion_alcaldia, 2);
+            $cuenta->numero_factura = $facturaVigente ? $facturaVigente->numero_factura : null;
+            $cuenta->tiene_factura_vigente = $facturaVigente !== null;
 
             if ($lineas !== null && $lineas->isNotEmpty()) {
                 // ---- Cobro con líneas de pago (mixtos o simples) ----

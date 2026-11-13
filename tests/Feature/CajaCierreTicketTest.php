@@ -41,7 +41,7 @@ class CajaCierreTicketTest extends TestCase
 
     private function crearEsquema(): void
     {
-        foreach (['pagos_cuenta', 'caja_cierre', 'caja_gastos', 'caja_apertura', 'caja_bloqueo', 'venta_detalles', 'cuenta_detalles', 'cuentas', 'ventas', 'mesas', 'usuarios', 'roles'] as $tabla) {
+        foreach (['pagos_cuenta', 'caja_cierre', 'caja_gastos', 'caja_apertura', 'caja_bloqueo', 'venta_detalles', 'cuenta_detalles', 'cuentas', 'ventas', 'mesas', 'usuarios', 'roles', 'facturas'] as $tabla) {
             Schema::dropIfExists($tabla);
         }
 
@@ -112,6 +112,8 @@ class CajaCierreTicketTest extends TestCase
             $t->string('banco', 30)->nullable();
             $t->decimal('monto_recibido', 12, 2)->nullable();
             $t->decimal('cambio', 12, 2)->nullable();
+            $t->decimal('descuento', 12, 2)->default(0);
+            $t->decimal('propina', 12, 2)->default(0);
             $t->unsignedBigInteger('usuario_cobro')->nullable();
             $t->timestamps();
         });
@@ -177,6 +179,19 @@ class CajaCierreTicketTest extends TestCase
             $t->text('conteo_json')->nullable();
             $t->text('observaciones')->nullable();
             $t->integer('usuario_id')->nullable();
+        });
+
+        Schema::create('facturas', function (Blueprint $t) {
+            $t->increments('id');
+            $t->string('numero_factura', 20)->nullable();
+            $t->integer('venta_id');
+            $t->integer('cuenta_id')->nullable();
+            $t->string('mesa', 50)->nullable();
+            $t->text('detalle_consumo')->nullable();
+            $t->decimal('total', 10, 2)->default(0);
+            $t->dateTime('fecha_emision')->nullable();
+            $t->integer('usuario_id')->nullable();
+            $t->string('estado', 20)->default('EMITIDA');
         });
 
         Schema::create('caja_bloqueo', function (Blueprint $t) {
@@ -273,6 +288,22 @@ class CajaCierreTicketTest extends TestCase
                 'creado_en' => now()->subMinutes(30),
             ]);
         }
+    }
+
+    /** @param array<string, mixed> $ajustes */
+    private function crearFactura(int $ventaId, int $cuentaId, float $total, array $ajustes = [], string $estado = 'EMITIDA', ?string $numero = null): int
+    {
+        return DB::table('facturas')->insertGetId([
+            'numero_factura' => $numero ?? ('FAC-' . str_pad((string) random_int(1, 999999), 4, '0', STR_PAD_LEFT)),
+            'venta_id' => $ventaId,
+            'cuenta_id' => $cuentaId,
+            'mesa' => 'Mesa',
+            'detalle_consumo' => json_encode(['nota' => 'test', 'ajustes' => $ajustes], JSON_UNESCAPED_UNICODE),
+            'total' => $total,
+            'fecha_emision' => now()->subMinutes(30),
+            'usuario_id' => 1,
+            'estado' => $estado,
+        ]);
     }
 
     private function gasto(int $aperturaId, float $monto, string $estado = 'ACTIVO'): void
@@ -503,5 +534,235 @@ class CajaCierreTicketTest extends TestCase
         $this->assertStringContainsString('Grupo tarjeta abonada', $ticket);
         $this->assertStringContainsString('400.00', $ticket);
         $this->assertStringContainsString('500.00', $ticket);
+    }
+    /* ------------------------------------------------------------------
+     | Total cobrado por mesa en el ticket de cierre de caja
+     | ------------------------------------------------------------------ */
+
+    public function test_factura_con_consumo_y_propina_muestra_cobrado_real(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        // FAC-0036: consumo 2190 + propina 219 = 2409
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('17'), 'Cuenta Principal', 2190, 'MIXTO', 0, 'PAGADA', false, $aperturaId);
+        DB::table('cuentas')->where('id', $cId)->update(['propina' => 219]);
+        $this->crearPago($v, $cId, [
+            ['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 2000],
+            ['metodo' => 'TARJETA_DEBITO', 'monto' => 409, 'banco' => 'BANPRO'],
+        ]);
+        $this->crearFactura($v, $cId, 2409.00, [
+            'consumo' => 2190.00, 'descuento' => 0.00, 'base' => 2190.00,
+            'propina' => 219.00, 'iva' => 0.00, 'total_factura' => 2409.00, 'neto' => 2409.00,
+        ], 'EMITIDA', 'FAC-0036');
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        $html = $this->actingAs($admin)->get(route('caja.cierre.ticket'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('Mesa 17', $html);
+        $this->assertStringContainsString('Cuenta Principal', $html);
+        $this->assertStringContainsString('2,190.00', $html);
+        $this->assertStringContainsString('219.00', $html);
+        $this->assertStringContainsString('2,409.00', $html);
+        $this->assertStringContainsString('FAC-0036', $html);
+        $this->assertStringContainsString('Consumo C$', $html);
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+        $this->assertEqualsWithDelta(2409.00, (float) $cuenta->cobrado, 0.001);
+        $this->assertEqualsWithDelta(2190.00, (float) $cuenta->consumo, 0.001);
+        $this->assertEqualsWithDelta(219.00, (float) $cuenta->propina, 0.001);
+    }
+
+    public function test_factura_con_descuento_y_propina_total_cobrado_refleja_ajustes(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        // consumo 500, descuento 50, propina 40 → base 450, total 490.
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('18'), 'Cuenta Principal', 500, 'EFECTIVO_CORDOBA', 0, 'PAGADA', false, $aperturaId);
+        DB::table('cuentas')->where('id', $cId)->update(['descuento' => 50, 'propina' => 40]);
+        $this->crearPago($v, $cId, [
+            ['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 490],
+        ]);
+        $this->crearFactura($v, $cId, 490.00, [
+            'consumo' => 500.00, 'descuento' => 50.00, 'base' => 450.00,
+            'propina' => 40.00, 'iva' => 0.00, 'total_factura' => 490.00, 'neto' => 490.00,
+        ], 'EMITIDA', 'FAC-0051');
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        $html = $this->actingAs($admin)->get(route('caja.cierre.ticket'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('450.00', $html);
+        $this->assertStringContainsString('490.00', $html);
+        $this->assertStringContainsString('Desc. C$', $html);
+        $this->assertStringContainsString('Propina C$', $html);
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+        $this->assertEqualsWithDelta(490.00, (float) $cuenta->cobrado, 0.001);
+        $this->assertEqualsWithDelta(500.00, (float) $cuenta->consumo, 0.001);
+        $this->assertEqualsWithDelta(450.00, (float) $cuenta->base, 0.001);
+    }
+
+    public function test_varias_cuentas_misma_mesa_no_duplican_importes(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+        $mesaId = $this->mesa('21');
+
+        ['venta_id' => $v1, 'cuenta_id' => $c1] = $this->crearCuentaCobro($mesaId, 'Principal', 100, 'EFECTIVO_CORDOBA', 0, 'PAGADA', false, $aperturaId);
+        ['venta_id' => $v2, 'cuenta_id' => $c2] = $this->crearCuentaCobro($mesaId, 'Familia Pérez', 150, 'TARJETA_DEBITO', 0, 'PAGADA', true, $aperturaId);
+
+        DB::table('cuentas')->where('id', $c1)->update(['propina' => 10]);
+        DB::table('cuentas')->where('id', $c2)->update(['propina' => 15]);
+
+        $this->crearPago($v1, $c1, [['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 110]]);
+        $this->crearPago($v2, $c2, [['metodo' => 'TARJETA_DEBITO', 'monto' => 165, 'banco' => 'BAC']]);
+
+        $this->crearFactura($v1, $c1, 110.00, [
+            'consumo' => 100.00, 'descuento' => 0.00, 'base' => 100.00, 'propina' => 10.00,
+            'iva' => 0.00, 'total_factura' => 110.00, 'neto' => 110.00,
+        ], 'EMITIDA', 'FAC-1001');
+        $this->crearFactura($v2, $c2, 165.00, [
+            'consumo' => 150.00, 'descuento' => 0.00, 'base' => 150.00, 'propina' => 15.00,
+            'iva' => 0.00, 'total_factura' => 165.00, 'neto' => 165.00,
+        ], 'EMITIDA', 'FAC-1002');
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        $html = $this->actingAs($admin)->get(route('caja.cierre.ticket'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('FAC-1001', $html);
+        $this->assertStringContainsString('FAC-1002', $html);
+        $this->assertStringContainsString('Principal', $html);
+        $this->assertStringContainsString('Familia Pérez', $html);
+        $this->assertStringContainsString('110.00', $html);
+        $this->assertStringContainsString('165.00', $html);
+        $this->assertSame(2, substr_count($html, 'Mesa 21'));
+    }
+
+    public function test_varias_facturas_misma_mesa_solo_la_vigente_cuenta(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('31'), 'Cuenta Principal', 200, 'EFECTIVO_CORDOBA', 0, 'PAGADA', false, $aperturaId);
+        $this->crearPago($v, $cId, [['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 230]]);
+        DB::table('cuentas')->where('id', $cId)->update(['propina' => 30]);
+
+        $this->crearFactura($v, $cId, 230.00, [
+            'consumo' => 200.00, 'descuento' => 0.00, 'base' => 200.00, 'propina' => 30.00,
+            'iva' => 0.00, 'total_factura' => 230.00, 'neto' => 230.00,
+        ], 'ANULADA', 'FAC-9998'); // primera emisión, anulada
+        $this->crearFactura($v, $cId, 230.00, [
+            'consumo' => 200.00, 'descuento' => 0.00, 'base' => 200.00, 'propina' => 30.00,
+            'iva' => 0.00, 'total_factura' => 230.00, 'neto' => 230.00,
+        ], 'EMITIDA', 'FAC-9999'); // recobro vigente
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        $html = $this->actingAs($admin)->get(route('caja.cierre.ticket'))->assertStatus(200)->getContent();
+
+        $this->assertStringContainsString('FAC-9999', $html);
+        $this->assertStringNotContainsString('FAC-9998', $html);
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+        $this->assertEqualsWithDelta(230.00, (float) $cuenta->cobrado, 0.001);
+    }
+
+    public function test_factura_anulada_sin_emitida_vigente_usa_columnas_de_la_cuenta(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('37'), 'Cuenta Principal', 150, 'EFECTIVO_CORDOBA', 0, 'PAGADA', false, $aperturaId);
+        DB::table('cuentas')->where('id', $cId)->update(['propina' => 10]);
+        $this->crearPago($v, $cId, [['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 160]]);
+
+        $this->crearFactura($v, $cId, 160.00, [
+            'consumo' => 150.00, 'descuento' => 0.00, 'base' => 150.00, 'propina' => 10.00,
+            'iva' => 0.00, 'total_factura' => 160.00, 'neto' => 160.00,
+        ], 'ANULADA', 'FAC-7777');
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        $html = $this->actingAs($admin)->get(route('caja.cierre.ticket'))->assertStatus(200)->getContent();
+
+        $this->assertStringNotContainsString('FAC-7777', $html);
+        $this->assertStringContainsString('160.00', $html);
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+        $this->assertEqualsWithDelta(160.00, (float) $cuenta->cobrado, 0.001);
+    }
+
+    public function test_el_efectivo_esperado_no_cambia_con_propina_e_impuestos(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('41'), 'Combo', 1200, 'MIXTO', 0, 'PAGADA', false, $aperturaId);
+        DB::table('cuentas')->where('id', $cId)->update(['propina' => 300]);
+        $this->crearPago($v, $cId, [
+            ['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 1000],
+            ['metodo' => 'TARJETA_DEBITO', 'monto' => 500, 'banco' => 'BAC'],
+        ]);
+        $this->crearFactura($v, $cId, 1500.00, [
+            'consumo' => 1200.00, 'descuento' => 0.00, 'base' => 1200.00,
+            'propina' => 300.00, 'iva' => 0.00, 'total_factura' => 1500.00, 'neto' => 1500.00,
+        ], 'EMITIDA', 'FAC-0300');
+
+        $this->actingAs($admin)
+            ->postJson(route('caja.cierre.registrar'), ['tasa_cambio' => 36.5, 'conteo_local' => $this->conteoLocalCero()])
+            ->assertStatus(200);
+
+        // Efectivo esperado = fondo + ventas efectivo = 1000 + 1000 = 2000.
+        $cierre = CajaCierre::latest('id')->first();
+        $this->assertEqualsWithDelta(1000.0, (float) $cierre->ventas_efectivo, 0.001);
+        $this->assertEqualsWithDelta(2000.0, (float) $cierre->total_esperado, 0.001);
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+        $this->assertEqualsWithDelta(1500.00, (float) $cuenta->cobrado, 0.001);
+
+        $pagosTotal = DB::table('pagos_cuenta')->where('cuenta_id', $cId)->sum('monto_cordobas');
+        $this->assertEqualsWithDelta(1500.00, (float) $pagosTotal, 0.001);
+    }
+
+    public function test_concordancia_cobrado_vs_desglose_de_pagos(): void
+    {
+        $admin = $this->usuario('ADMIN');
+        $aperturaId = $this->apertura(1000);
+
+        ['venta_id' => $v, 'cuenta_id' => $cId] = $this->crearCuentaCobro($this->mesa('43'), 'Mesa 4', 700, 'MIXTO', 50, 'PAGADA', false, $aperturaId);
+        DB::table('cuentas')->where('id', $cId)->update(['propina' => 100]);
+        $this->crearPago($v, $cId, [
+            ['metodo' => 'EFECTIVO_CORDOBA', 'monto' => 300],
+            ['metodo' => 'TARJETA_DEBITO', 'monto' => 500, 'banco' => 'BANPRO'],
+        ]);
+        $this->crearFactura($v, $cId, 800.00, [
+            'consumo' => 700.00, 'descuento' => 0.00, 'base' => 700.00,
+            'propina' => 100.00, 'iva' => 0.00, 'total_factura' => 800.00, 'neto' => 800.00,
+        ], 'EMITIDA', 'FAC-2001');
+
+        $resumen = app(CajaCierreService::class)->resumenVentas(CajaApertura::find($aperturaId));
+        $cuenta = $resumen['cuentas']->firstWhere('id', $cId);
+
+        $pagosTotal = collect($cuenta->pagos)->sum('monto_cordobas');
+        $this->assertEqualsWithDelta((float) $pagosTotal, (float) $cuenta->cobrado, 0.001);
     }
 }

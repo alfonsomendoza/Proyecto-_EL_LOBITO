@@ -123,9 +123,33 @@
                         @endif
                         <br>
                         <small>{{ $cuenta->nombre }}</small><br>
-                        <small>{{ $detallePagosDe($cuenta) }}</small>
+                        <small>Consumo C$ {{ number_format((float) ($cuenta->consumo ?? $cuenta->total), 2) }}
+                            @if ((float) ($cuenta->descuento ?? 0) > 0)
+                                · Desc. C$ {{ number_format((float) $cuenta->descuento, 2) }}
+                                · Base C$ {{ number_format((float) ($cuenta->base ?? 0), 2) }}
+                            @endif
+                            @if ((float) ($cuenta->propina ?? 0) > 0)
+                                · Propina C$ {{ number_format((float) $cuenta->propina, 2) }}
+                            @endif
+                            @if ((float) ($cuenta->iva ?? 0) > 0)
+                                · IVA C$ {{ number_format((float) $cuenta->iva, 2) }}
+                            @endif
+                            @if ((float) ($cuenta->retencion_dgi ?? 0) > 0)
+                                · Ret. DGI C$ {{ number_format((float) $cuenta->retencion_dgi, 2) }}
+                            @endif
+                            @if ((float) ($cuenta->retencion_alcaldia ?? 0) > 0)
+                                · Ret. Alc. C$ {{ number_format((float) $cuenta->retencion_alcaldia, 2) }}
+                            @endif
+                        </small><br>
+                        <small>Pagos: {{ $detallePagosDe($cuenta) }}</small>
+                        @if (!empty($cuenta->numero_factura))
+                            <br><small>{{ $cuenta->numero_factura }}</small>
+                        @endif
                     </td>
-                    <td class="derecha" style="vertical-align:bottom;">C$ {{ number_format((float) $cuenta->total, 2) }}</td>
+                    <td class="derecha" style="vertical-align:bottom; font-weight:bold; font-size:13px;">
+                        <div style="font-size:10px; color:#555; font-weight:400;">TOTAL<br>COBRADO</div>
+                        C$ {{ number_format((float) ($cuenta->cobrado ?? $cuenta->total), 2) }}
+                    </td>
                 </tr>
             @endforeach
         </table>
