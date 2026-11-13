@@ -197,6 +197,32 @@ class ResumenDiarioModuleTest extends TestCase
         ]);
     }
 
+    private function cierre(int $aperturaId, string $estado = 'CUADRA', ?float $diferencia = 0.0): int
+    {
+        return DB::table('caja_cierre')->insertGetId([
+            'apertura_id' => $aperturaId,
+            'fecha' => now(),
+            'cajero' => DB::table('caja_apertura')->where('id', $aperturaId)->value('cajero'),
+            'turno' => 'Tarde',
+            'caja_id' => 1,
+            'monto_apertura' => DB::table('caja_apertura')->where('id', $aperturaId)->value('monto_inicial'),
+            'ventas_efectivo' => 0,
+            'otros_ingresos' => 0,
+            'egresos' => 0,
+            'retiros' => 0,
+            'total_esperado' => 0,
+            'tasa_cambio' => 1,
+            'monto_extranjero' => 0,
+            'total_contado' => 0,
+            'diferencia' => $diferencia,
+            'estado' => $estado,
+            'conteo_json' => null,
+            'observaciones' => null,
+            'creado_en' => now(),
+            'usuario_id' => null,
+        ]);
+    }
+
     private function gasto(int $aperturaId, float $monto, string $estado = 'ACTIVO'): int
     {
         return DB::table('caja_gastos')->insertGetId([
@@ -222,6 +248,8 @@ class ResumenDiarioModuleTest extends TestCase
 
         $a = $this->apertura($hoy.' 08:00:00', now()->subHours(6)->format('Y-m-d H:i:s'), 1000, 'Ana');
         $b = $this->apertura($hoy.' 12:00:00', now()->subHours(2)->format('Y-m-d H:i:s'), 500, 'Beto');
+        $this->cierre($a);
+        $this->cierre($b);
         // Frontera: no pertenece al día consultado.
         $this->apertura($manana.' 08:00:00', now()->addDay()->format('Y-m-d H:i:s'), 0, 'Ana');
 
@@ -367,27 +395,12 @@ class ResumenDiarioModuleTest extends TestCase
         $ids = $this->dosTurnosHoy();
         $this->cuenta(400, 'EFECTIVO', null, now()->subHours(4)->format('Y-m-d H:i:s'));
 
-        DB::table('caja_cierre')->insert([
-            'apertura_id' => $ids['a'],
-            'fecha' => now(),
-            'cajero' => 'Ana',
-            'turno' => 'Tarde',
-            'caja_id' => 1,
-            'monto_apertura' => 1000,
-            'ventas_efectivo' => 400,
+        DB::table('caja_cierre')->where('apertura_id', $ids['a'])->update([
             'otros_ingresos' => 200,
-            'egresos' => 0,
             'retiros' => 100,
+            'ventas_efectivo' => 400,
             'total_esperado' => 1500,
-            'tasa_cambio' => 36.5,
-            'monto_extranjero' => 0,
             'total_contado' => 1500,
-            'diferencia' => 0,
-            'estado' => 'CUADRA',
-            'conteo_json' => null,
-            'observaciones' => null,
-            'creado_en' => now(),
-            'usuario_id' => null,
         ]);
 
         $r = app(ResumenDiarioService::class)->resumenDelDia($this->fechaHoy());
@@ -494,8 +507,7 @@ class ResumenDiarioModuleTest extends TestCase
             ->assertStatus(200)
             ->assertSee('ADMIN Test')
             ->assertSee('CAJERO Test')
-            ->assertSee('Diferencia de caja acumulada')
-            ->assertSee('Total ventas');
+            ->assertSee('TOTAL VENTAS');
     }
 
     /* ------------------------------------------------------------------
@@ -511,7 +523,8 @@ class ResumenDiarioModuleTest extends TestCase
             ->get(route('reportes.resumen.ticket', ['fecha' => $this->fechaHoy(), 'cajero' => 'TODOS']))
             ->assertStatus(200)
             ->assertSee('RESUMEN DEL DÍA')
-            ->assertSee('C$ 1,900.00'); // Fondo 1500 + efectivo 400 = 1900.
+            ->assertSee('C$ 1,400.00') // Fondo 1000 + efectivo 400 = 1400 (cierre de Ana).
+            ->assertSee('C$ 500.00');  // Fondo 500 (cierre de Beto).
     }
 
     public function test_el_ticket_sin_datos_devuelve_404(): void

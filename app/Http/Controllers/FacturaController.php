@@ -211,6 +211,36 @@ class FacturaController extends Controller
         $clienteNombre = $f->cliente ?? null;
         $clienteIdentificacion = $f->cliente_identificacion ?? null;
 
+        // Mesero encargado de la cuenta que originó la factura (snapshot en
+        // `cuentas.mesero_responsable_id`). Se muestra aunque la cuenta no se
+        // pueda reasignar desde aquí.
+        $meseroEncargado = null;
+        $meseroIdCuenta = null;
+        $meserosSelect = collect();
+        $puedeEditarMesero = in_array($this->rolActual(), ['ADMIN', 'GERENTE', 'CAJERO'], true);
+
+        if (! empty($f->cuenta_id) && Schema::hasTable('cuentas')) {
+            $meseroIdCuenta = DB::table('cuentas')->where('id', (int) $f->cuenta_id)->value('mesero_responsable_id');
+
+            if ($meseroIdCuenta) {
+                $meseroEncargado = DB::table('usuarios')->where('id', (int) $meseroIdCuenta)->value('nombre');
+            }
+        }
+
+        if ($puedeEditarMesero && Schema::hasColumn('roles', 'nombre')) {
+            $meserosSelect = DB::table('usuarios')
+                ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+                ->where('roles.nombre', 'MESERO')
+                ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+                ->orderBy('usuarios.nombre')
+                ->get(['usuarios.id as id', 'usuarios.nombre as nombre']);
+        }
+
+        $abrioPor = $f->venta_id
+            ? DB::table('ventas')->where('id', (int) $f->venta_id)->value('usuario_id')
+            : null;
+        $abrioPor = $abrioPor ? DB::table('usuarios')->where('id', (int) $abrioPor)->value('nombre') : null;
+
         $pagos = $this->pagosDeFactura($f);
 
         return view('facturas.factura', [
@@ -224,6 +254,12 @@ class FacturaController extends Controller
             'clienteSnapshot' => $clienteSnapshot,
             'clienteNombre' => $clienteNombre,
             'clienteIdentificacion' => $clienteIdentificacion,
+            'meseroEncargado' => $meseroEncargado,
+            'meseroIdCuenta' => $meseroIdCuenta,
+            'abrioPor' => $abrioPor,
+            'puedeEditarMesero' => $puedeEditarMesero,
+            'meserosSelect' => $meserosSelect,
+            'cuentaId' => $f->cuenta_id,
         ]);
 
     }

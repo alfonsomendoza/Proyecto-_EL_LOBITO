@@ -219,10 +219,24 @@ Route::middleware(['auth', 'caja.abierta'])->group(function () {
     Route::post('/mesas/api', [MesaController::class, 'api'])
         ->name('mesas.api');
 
+    // Lista de meseros activos (para el selector del encargado de mesa).
+    Route::get('/mesas/meseros-disponibles', [MesaController::class, 'meserosDisponibles'])
+        ->name('mesas.meseros');
+
+    // Cambiar el encargado de una mesa/venta (solo ADMIN, GERENTE y CAJERO).
+    Route::post('/mesas/{mesaId}/asignar-mesero', [MesaController::class, 'asignarMesero'])
+        ->name('mesas.asignar-mesero');
+
     // Panel de subcuentas de una mesa: muestra SOLO las cuentas de su venta
     // activa (no crea nada, es de lectura).
     Route::get('/mesas/{mesaId}/cuentas', [VentaController::class, 'panelCuentas'])
         ->name('mesas.cuentas');
+
+    // Asignar/cambiar el mesero encargado de una cuenta (ADMIN, GERENTE y
+    // CAJERO). La asignación se guarda en `cuentas.mesero_responsable_id` y
+    // queda registrada en `mesa_asignaciones` y `auditoria_seguridad`.
+    Route::post('/cuentas/{cuentaId}/mesero', [VentaController::class, 'asignarMeseroCuenta'])
+        ->name('cuentas.mesero.asignar');
 
     // Crear una subcuenta vacía en la venta activa de la mesa.
     // Autorizan ADMIN, GERENTE, CAJERO y MESERO (solo CREAR).

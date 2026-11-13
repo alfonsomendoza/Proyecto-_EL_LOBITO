@@ -452,14 +452,14 @@ class VentaController extends Controller
 
                 // Toda venta necesita una cuenta inicial. Los pedidos nuevos
                 // permanecen en esta cuenta hasta que se haga una división.
-                DB::table('cuentas')->insert([
+                DB::table('cuentas')->insert(array_merge([
                     'venta_id' => $ventaId,
                     'nombre' => 'Cuenta Principal',
                     'total' => 0,
                     'estado' => 'ABIERTA',
                     'created_at' => now(),
                     'updated_at' => now(),
-                ]);
+                ], $this->snapMeseroVenta($ventaId)));
 
 
                 // ------------------------------------------------
@@ -2302,7 +2302,42 @@ class VentaController extends Controller
         $clientesMap = DB::table('clientes')->pluck('nombre', 'id')->toArray();
         $clientes = DB::table('clientes')->where('activo', 1)->orderBy('nombre')->get();
 
+        // La lista de meseros ACTIVOS debe alimentarse SIEMPRE que el panel
+        // se muestre; no depende de que la migración de mesero_responsable_id
+        // esté aplicada (de lo contrario el selector aparecería vacío).
+        $meserosActivos = DB::table('usuarios')
+            ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+            ->where('roles.nombre', 'MESERO')
+            ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+            ->orderBy('usuarios.nombre')
+            ->get(['usuarios.id', 'usuarios.nombre']);
+
+        $meseroEncargado = null;
+        $meseroId = null;
+        $abrioPor = null;
+
+        if (Schema::hasColumn('cuentas', 'mesero_responsable_id')
+            && Schema::hasTable('roles')) {
+            $meseroDeVenta = $venta->mesero_responsable_id ?? null;
+            $cuentaPrincipal = $cuentas->first();
+            $meseroActual = $cuentaPrincipal && $cuentaPrincipal->mesero_responsable_id ? $cuentaPrincipal->mesero_responsable_id : null;
+            $meseroId = $meseroActual ?? $meseroDeVenta;
+
+            if ($meseroId) {
+                $meseroEncargado = DB::table('usuarios')->where('id', (int) $meseroId)->value('nombre');
+            }
+        }
+
+        if (! empty($venta->usuario_id)) {
+            $abrioPor = DB::table('usuarios')->where('id', (int) $venta->usuario_id)->value('nombre');
+        }
+
         return view('mesas.cuentas', [
+            'puedeEditarMesero' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            'meseroEncargado' => $meseroEncargado,
+            'meseroIdActual' => $meseroId ?? null,
+            'meserosActivos' => $meserosActivos,
+            'abrioPor' => $abrioPor,
             'mesa' => $mesa,
             'venta' => $venta,
             'cuentas' => $cuentas,
@@ -2770,14 +2805,14 @@ class VentaController extends Controller
                         'apertura_id' => null,
                     ]);
 
-                    DB::table('cuentas')->insert([
+                    DB::table('cuentas')->insert(array_merge([
                         'venta_id' => $ventaDestinoId,
                         'nombre' => 'Cuenta Principal',
                         'total' => 0,
                         'estado' => 'ABIERTA',
                         'created_at' => now(),
                         'updated_at' => now(),
-                    ]);
+                    ], $this->snapMeseroVenta($ventaDestinoId)));
                 } else {
                     $ventaDestinoId = (int) $ventaDestino->id;
                 }
@@ -2802,14 +2837,14 @@ class VentaController extends Controller
                     $nombreDestino = $nombreBase . ' (traslado' . ($intento > 1 ? ' ' . $intento : '') . ')';
                 }
 
-                $cuentaDestinoId = DB::table('cuentas')->insertGetId([
+                $cuentaDestinoId = DB::table('cuentas')->insertGetId(array_merge([
                     'venta_id' => $ventaDestinoId,
                     'nombre' => $nombreDestino,
                     'total' => 0,
                     'estado' => 'ABIERTA',
                     'created_at' => now(),
                     'updated_at' => now(),
-                ]);
+                ], $this->snapMeseroVenta($ventaDestinoId)));
 
                 // -------------------------------------------------------
                 // MOVER CADA LÍNEA
@@ -3311,7 +3346,7 @@ class VentaController extends Controller
                             throw new \RuntimeException('Ya existe una cuenta con el nombre "' . $nombre . '".');
                         }
 
-                        $idsNuevas[] = DB::table('cuentas')->insertGetId(['venta_id' => $venta->id, 'nombre' => $nombre, 'total' => 0, 'estado' => 'ABIERTA', 'created_at' => now(), 'updated_at' => now()]);
+                        $idsNuevas[] = DB::table('cuentas')->insertGetId(array_merge(['venta_id' => $venta->id, 'nombre' => $nombre, 'total' => 0, 'estado' => 'ABIERTA', 'created_at' => now(), 'updated_at' => now()], $this->snapMeseroVenta((int) $venta->id)));
                         $nombresNuevos[] = $claveNombre;
                     }
                 }
@@ -3497,7 +3532,7 @@ class VentaController extends Controller
                 throw new \RuntimeException('Ya existe una cuenta con el nombre "' . $nombre . '".');
             }
 
-            $idsNuevas[] = DB::table('cuentas')->insertGetId([
+            $idsNuevas[] = DB::table('cuentas')->insertGetId(array_merge([
                 'venta_id' => $venta->id,
                 'cuenta_origen_id' => $origen->id,
                 'nombre' => $nombre,
@@ -3505,7 +3540,7 @@ class VentaController extends Controller
                 'estado' => 'ABIERTA',
                 'created_at' => now(),
                 'updated_at' => now(),
-            ]);
+            ], $this->snapMeseroVenta((int) $venta->id)));
             $nombresNuevos[] = $claveNombre;
         }
 
@@ -4285,6 +4320,142 @@ class VentaController extends Controller
      *
      * @return array<int, array{clave_operacion: string, metodo_pago: string, banco: ?string, moneda: string, monto: float, tasa_cambio: ?float, monto_cordobas: float}>
      */
+    /**
+     * Asigna o corrige el mesero responsable de la cuenta. ADMIN, GERENTE y
+     * CAJERO únicamente. Opera sobre `cuentas.mesero_responsable_id` (fuente
+     * prioritaria de atribución de propinas) y congela la asignación en el
+     * mismo registro de la cuenta, sin alterar importes ni el contenido
+     * fiscal de la factura asociada.
+     *
+     * Si el mesero enviado coincide con el ya asignado, responde sin cambios
+     * y sin registrar historial ni auditoría (idempotente).
+     */
+    public function asignarMeseroCuenta(Request $request, int $cuentaId)
+    {
+        $usuario = Auth::user();
+        $rol = strtoupper((string) ($usuario?->rol?->nombre ?? ''));
+
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para asignar el mesero encargado de la cuenta.'], 403);
+        }
+
+        // Prechequeo de esquema: si las columnas/tabla aún no existen (la
+        // migración está pendiente) el endpoint NO debe decir que se guardó
+        // algo; devuelve un error claro sin efecto parcial.
+        if (! Schema::hasColumn('cuentas', 'mesero_responsable_id')
+            || ! Schema::hasColumn('ventas', 'mesero_responsable_id')
+            || ! Schema::hasTable('mesa_asignaciones')) {
+            return response()->json([
+                'exito' => false,
+                'error' => 'La asignación de meseros no está disponible: la migración pendiente 2026_11_12_000001_mesero_responsable_propinas no se ha ejecutado todavía.',
+            ], 500);
+        }
+
+        $meseroId = $request->input('mesero_id');
+        $meseroId = (is_numeric($meseroId) && (int) $meseroId > 0) ? (int) $meseroId : null;
+
+        if (! $meseroId) {
+            return response()->json(['exito' => false, 'error' => 'Debes indicar un mesero válido.'], 422);
+        }
+
+        $mesero = DB::table('usuarios')
+            ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+            ->where('usuarios.id', $meseroId)
+            ->where('roles.nombre', 'MESERO')
+            ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+            ->first();
+
+        if (! $mesero) {
+            return response()->json(['exito' => false, 'error' => 'El mesero no existe, está inactivo o no tiene rol MESERO.'], 422);
+        }
+
+        $cuenta = DB::table('cuentas')->where('id', $cuentaId)->first();
+
+        if (! $cuenta) {
+            return response()->json(['exito' => false, 'error' => 'La cuenta no existe.'], 404);
+        }
+
+        $actual = $cuenta->mesero_responsable_id ?? null;
+
+        if ($actual !== null && (int) $actual === $meseroId) {
+            return response()->json(['exito' => true, 'mensaje' => 'El mesero ya estaba asignado; no se registró ningún cambio.', 'sin_cambios' => true]);
+        }
+
+        try {
+            DB::transaction(function () use ($cuenta, $meseroId, $actual) {
+                if (Schema::hasColumn('cuentas', 'mesero_responsable_id')) {
+                    DB::table('cuentas')->where('id', $cuenta->id)->update([
+                        'mesero_responsable_id' => $meseroId,
+                    ]);
+                }
+
+                if (Schema::hasColumn('ventas', 'mesero_responsable_id')) {
+                    DB::table('ventas')->where('id', $cuenta->venta_id)->update([
+                        'mesero_responsable_id' => $meseroId,
+                    ]);
+                }
+
+                $motivo = $actual !== null ? 'REASIGNACION_DESDE_CUENTA' : 'ASIGNACION_DESDE_CUENTA';
+
+                if (Schema::hasTable('mesa_asignaciones')) {
+                    DB::table('mesa_asignaciones')->insert([
+                        'venta_id' => (int) $cuenta->venta_id,
+                        'mesa_id' => (int) DB::table('ventas')->where('id', $cuenta->venta_id)->value('mesa_id'),
+                        'mesero_id' => $meseroId,
+                        'asignado_por' => Auth::id(),
+                        'motivo' => $motivo,
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                if (Schema::hasTable('auditoria_seguridad')) {
+                    DB::table('auditoria_seguridad')->insert([
+                        'usuario_id' => Auth::id(),
+                        'evento' => $actual !== null ? 'mesero_reasignado' : 'mesero_asignado',
+                        'ip' => request()->ip(),
+                        'user_agent' => mb_substr((string) request()->userAgent(), 0, 255),
+                        'motivo' => $actual !== null ? 'Corrección de mesero encargado de la cuenta' : 'Asignación de mesero encargado de la cuenta',
+                        'detalles' => json_encode([
+                            'cuenta_id' => (int) $cuenta->id,
+                            'venta_id' => (int) $cuenta->venta_id,
+                            'mesero_anterior_id' => $actual !== null ? (int) $actual : null,
+                            'mesero_nuevo_id' => $meseroId,
+                        ], JSON_UNESCAPED_UNICODE),
+                        'creado_en' => now(),
+                    ]);
+                }
+            });
+        } catch (\Throwable $e) {
+            report($e);
+            return response()->json(['exito' => false, 'error' => 'No fue posible guardar el mesero encargado.'], 500);
+        }
+
+        return response()->json(['exito' => true, 'mensaje' => 'Mesero encargado actualizado.', 'mesero_id' => $meseroId]);
+    }
+
+    /**
+     * Snapshot del mesero responsable para una cuenta recién creada.
+     * Devuelve array vacío si el esquema aún no tiene la columna o el
+     * venta/identificador es desconocido (historial previo -> NULL).
+     *
+     * @return array{mesero_responsable_id?: int}
+     */
+    private function snapMeseroVenta(?int $ventaId): array
+    {
+        if (! $ventaId) {
+            return [];
+        }
+
+        if (! Schema::hasColumn('ventas', 'mesero_responsable_id')
+            || ! Schema::hasColumn('cuentas', 'mesero_responsable_id')) {
+            return [];
+        }
+
+        $valor = DB::table('ventas')->where('id', $ventaId)->value('mesero_responsable_id');
+
+        return $valor !== null ? ['mesero_responsable_id' => (int) $valor] : ['mesero_responsable_id' => null];
+    }
+
     private function lineasDePago(Request $request): array
     {
         $pagos = $request->input('pagos');
@@ -4786,7 +4957,34 @@ class VentaController extends Controller
             ? round(($propina / $base) * 100, 2)
             : null;
 
+        // Mesero responsable de la cuenta (si el esquema tiene el snapshot o
+        // el de la venta): se muestra en la prefactura por trazabilidad.
+        $meseroCuenta = null;
+        if (Schema::hasColumn('cuentas', 'mesero_responsable_id') && !empty($cuenta->mesero_responsable_id)) {
+            $meseroCuenta = DB::table('usuarios')->where('id', (int) $cuenta->mesero_responsable_id)->value('nombre');
+        } elseif (Schema::hasColumn('ventas', 'mesero_responsable_id') && !empty($venta->mesero_responsable_id)) {
+            $meseroCuenta = DB::table('usuarios')->where('id', (int) $venta->mesero_responsable_id)->value('nombre');
+        }
+
+        $meserosSelect = Schema::hasColumn('roles', 'nombre')
+            ? DB::table('usuarios')
+                ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+                ->where('roles.nombre', 'MESERO')
+                ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+                ->orderBy('usuarios.nombre')
+                ->get(['usuarios.id as id', 'usuarios.nombre as nombre'])
+            : collect();
+
+        // Nombre de quien abrió la venta/mesa (dato histórico).
+        $abrioPor = $venta->usuario_id
+            ? DB::table('usuarios')->where('id', (int) $venta->usuario_id)->value('nombre')
+            : null;
+
         return view('ventas.prefactura', [
+            'abrioPor' => $abrioPor,
+            'puedeEditarMesero' => in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true),
+            'meserosSelect' => $meserosSelect,
+            'meseroEncargado' => $meseroCuenta,
             'usuario' => $usuario,
             'descuentoHabilitado' => $configFiscal->descuentoFiscalHabilitado(),
             'propinaHabilitada' => $configFiscal->propinaFiscalHabilitada(),

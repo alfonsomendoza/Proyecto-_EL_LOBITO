@@ -42,6 +42,9 @@
                 // Evita consulta N+1 usando la colección que ya envía el MesaController
                 $ventaActiva = isset($ventasActivas) ? ($ventasActivas[$mesa->id] ?? null) : null;
                 $ventaId = $ventaActiva ? $ventaActiva->id : 0;
+                $abrioPor = $ventaActiva?->abrio_nombre;
+                $encargadoId = $ventaActiva ? ($ventaActiva->mesero_responsable_id ?? null) : null;
+                $meseroNombre = $encargadoId ? ($nombresMeseros[$encargadoId] ?? 'No registrado') : null;
 
                 if ($mesa->estado === 'OCUPADA') {
                     $claseEstado = 'mesa-ocupada';$icono = 'fa-user-clock';
@@ -58,6 +61,12 @@
                 <i class="fas {{ $icono }} mesa-icon"></i>
                 <h3>{{ $mesa->numero }}</h3>
                 <p>{{ str_replace('_', ' ', $mesa->estado) }}</p>
+                @if ($ventaActiva && $ventaId > 0)
+                    <div style="margin-top:8px; font-size:11px; opacity:0.95; line-height:1.4; border-top:1px solid rgba(255,255,255,0.3); padding-top:6px;">
+                        <div><strong>Abierta por:</strong> {{ $abrioPor ?? 'No registrado' }}</div>
+                        <div><strong>Mesero encargado:</strong> {{ $meseroNombre ?? 'Pendiente de asignación' }}</div>
+                    </div>
+                @endif
             </div>
         @endforeach
     </div>
@@ -185,6 +194,15 @@
                         </button>
                     </div>
                     <div id="cliente-aviso" style="margin-top:6px; color:#dc3545; font-size:12px;"></div>
+                    <div style="border-top:1px solid #e3e6f0; margin-top:10px; padding-top:10px;">
+                        <label style="display:block; margin-bottom:5px; font-weight:bold; color:#34395e;">
+                            Mesero encargado (opcional)
+                        </label>
+                        <select id="mesero-asignado" class="swal2-input" style="height:38px; box-sizing:border-box;">
+                            <option value="">— Sin asignar —</option>
+                        </select>
+                        <input type="hidden" id="mesero-asignado-id" value="">
+                    </div>
                 </div>
             `,
             focusConfirm: false,
@@ -205,6 +223,25 @@
                 const infoDiv = contenedor.querySelector('#cliente-info');
                 const avisoDiv = contenedor.querySelector('#cliente-aviso');
                 const nuevoForm = contenedor.querySelector('#cliente-nuevo-form');
+                const meseroSelect = contenedor.querySelector('#mesero-asignado');
+
+                // Cargar lista de meseros disponibles (para asignación
+                // explícita de encargado de mesa).
+                fetch('{{ route("mesas.meseros") }}', {
+                    headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data && data.exito && Array.isArray(data.meseros)) {
+                        data.meseros.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = String(m.id);
+                            opt.textContent = m.nombre;
+                            meseroSelect.appendChild(opt);
+                        });
+                    }
+                })
+                .catch(() => { /* Sin meseros no bloquea la apertura. */ });
 
         // Evita inyectar HTML si un cliente tiene caracteres especiales en
         // su nombre, identificación o teléfono.
@@ -412,19 +449,23 @@
             preConfirm: () => {
                 const inputOculto = document.getElementById('cliente-seleccionado');
                 const clienteId = inputOculto ? Number(inputOculto.value) : 0;
+                const meseroInput = document.getElementById('mesero-asignado');
+                const meseroId = meseroInput ? Number(meseroInput.value) : 0;
 
-                // Sin cliente seleccionado se abre la mesa igualmente: el
-                // backend conserva/omite la asociación (no fuerza Cliente General).
-                return clienteId > 0 ? clienteId : null;
+                return {
+                    clienteId: clienteId > 0 ? clienteId : null,
+                    meseroId: meseroId > 0 ? meseroId : null,
+                };
             }
         }).then((result) => {
             if (result.isConfirmed) {
-                abrirMesa(mesaId, result.value || null);
+                const datos = result.value || {};
+                abrirMesa(mesaId, datos.clienteId || null, datos.meseroId || null);
             }
         });
     }
 
-    function abrirMesa(mesaId, clienteId) {
+    function abrirMesa(mesaId, clienteId, meseroId) {
         Swal.fire({
             title: 'Abriendo mesa...',
             text: 'Espere un momento.',
@@ -438,6 +479,7 @@
         formData.append('accion', 'abrir_mesa');
         formData.append('mesa_id', mesaId);
         if (clienteId) formData.append('cliente_id', clienteId);
+        if (meseroId) formData.append('mesero_id', meseroId);
 
         fetch('{{ route("mesas.api") }}', { method: 'POST', body: formData })
         // Eliminamos la barrera de response.ok para obligarlo a leer siempre el JSON del servidor

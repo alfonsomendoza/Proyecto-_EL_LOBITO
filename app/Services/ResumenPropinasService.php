@@ -196,6 +196,11 @@ class ResumenPropinasService
             $consulta->leftJoin('mesas as m', 'm.id', '=', 'v.mesa_id');
         }
 
+        // Asignación explícita de responsable (snapshot en la cuenta). Si el
+        // esquema aún no tiene la columna, se ignora y se conserva la
+        // atribución histórica basada en comandas.
+        $tieneMeseroResp = Schema::hasColumn('cuentas', 'mesero_responsable_id');
+
         $columnas = [
             'c.id as cuenta_id',
             'c.nombre as cuenta_nombre',
@@ -216,6 +221,10 @@ class ResumenPropinasService
             'v.fecha as venta_fecha',
             'v.mesa_id',
         ];
+
+        if ($tieneMeseroResp) {
+            $columnas[] = 'c.mesero_responsable_id';
+        }
 
         $columnas[] = $tieneMesas
             ? 'm.numero as mesa_numero'
@@ -298,6 +307,7 @@ class ResumenPropinasService
         $usuarioIds = $cuentas->pluck('venta_usuario_id')
             ->merge($cuentas->pluck('usuario_cobro'))
             ->merge($cuentas->pluck('factura_usuario_id'))
+            ->merge($cuentas->pluck('mesero_responsable_id'))
             ->filter()
             ->unique()
             ->values()
@@ -310,6 +320,7 @@ class ResumenPropinasService
 
         $nombres = [];
         $roles = [];
+        $activos = [];
         if ($this->tieneTablaYColumnas('usuarios', ['id', 'nombre']) && $usuarioIds !== []) {
             $usuarios = DB::table('usuarios')->whereIn('usuarios.id', array_values(array_unique($usuarioIds)));
             $columnasUsuarios = ['usuarios.id as id', 'usuarios.nombre as nombre'];
@@ -319,13 +330,31 @@ class ResumenPropinasService
                 $usuarios->leftJoin('roles as r', 'r.id', '=', 'usuarios.rol_id');
                 $columnasUsuarios[] = 'r.nombre as rol';
             }
+            if (Schema::hasColumn('usuarios', 'activo')) {
+                $columnasUsuarios[] = 'usuarios.activo as activo';
+            }
             foreach ($usuarios->get($columnasUsuarios) as $usuario) {
                 $nombres[(int) $usuario->id] = $usuario->nombre;
                 $roles[(int) $usuario->id] = strtoupper((string) ($usuario->rol ?? ''));
+                $activos[(int) $usuario->id] = isset($usuario->activo) ? (int) $usuario->activo : 1;
             }
         }
 
         $detalle = $cuentas->map(function ($cuenta) use ($comandasPorVenta, $nombres, $roles, $turnos) {
+            // Asignación histórica de responsable (snapshot). Prioridad 1 sobre
+            // la atribución por comandas: se reconoce aunque el mesero haya sido
+            // desactivado posteriormente (la atribución histórica no depende del
+            // estado actual del usuario).
+            $meseroRespId = isset($cuenta->mesero_responsable_id) ? (int) $cuenta->mesero_responsable_id : null;
+
+            if ($meseroRespId !== null
+                && ($meseroRespId <= 0
+                    || ($roles[$meseroRespId] ?? '') !== self::ROL_MESERO)) {
+                // No es un usuario MESERO válido: la atribución histórica se
+                // descarta y queda pendiente.
+                $meseroRespId = null;
+            }
+
             // Quién atendió = usuarios MESERO que enviaron comandas de la
             // venta. Los demás roles se descartan por completo: abrir la mesa
             // o cobrar la factura NO atribuye la propina.
@@ -344,10 +373,12 @@ class ResumenPropinasService
             }
             $nombresAtendieron = array_values(array_unique(array_values($nombresPorMesero)));
 
-            // REGLA: solo se atribuye cuando el mesero es ÚNICO y verificable.
-            // Con cero o varios meseros la propina queda PENDIENTE (no se
-            // reparte, no se duplica y no se inventa un responsable).
-            $meseroAtribuidoId = count($meseros) === 1 ? $meseros[0] : null;
+            // PRIORIDAD 1: responsable asignado explícitamente (snapshot en la
+            // cuenta, de un único MESERO activo). En su ausencia, se atribuye
+            // solo si la venta tiene EXACTAMENTE UN mesero en comandas.
+            $meseroAtribuidoId = $meseroRespId
+                ?? (count($meseros) === 1 ? $meseros[0] : null);
+
             $motivoPendiente = null;
             if ($meseroAtribuidoId === null) {
                 $motivoPendiente = $meseros === [] ? 'sin_mesero' : 'varios_meseros';
@@ -397,7 +428,9 @@ class ResumenPropinasService
                 'mesero_atendio' => $nombresAtendieron === [] ? null : implode(', ', $nombresAtendieron),
                 'mesero_atendio_id' => $meseroAtribuidoId,
                 'meseros_atendieron' => $nombresAtendieron,
-                'meseros_ids' => $meseros,
+                // Participantes (para filtros): meseros que enviaron comandas
+                // más el responsable asignado explícitamente.
+                'meseros_ids' => \array_values(\array_unique(\array_merge($meseros, $meseroRespId !== null ? [$meseroRespId] : []))),
                 'meseros_nombres' => $nombresPorMesero,
                 // Atribución de la propina (una sola vez por cuenta).
                 'atribucion' => $meseroAtribuidoId === null ? 'PENDIENTE' : 'ATRIBUIDA',

@@ -27,14 +27,61 @@ class ResumenDiarioController extends Controller
             abort(403, 'No tienes permiso para ver el resumen del día.');
         }
 
-        $fecha = $this->fechaSolicitada($request);
+        $fechaInicio = trim((string) $request->query('desde', ''));
+        $fechaFin = trim((string) $request->query('hasta', ''));
+
+        // Compatibilidad con el parámetro histórico `fecha`.
+        $fechaLegacy = trim((string) $request->query('fecha', ''));
+        if ($fechaInicio === '' && $fechaLegacy !== '') {
+            $fechaInicio = $fechaLegacy;
+        }
+        if ($fechaFin === '' && $fechaLegacy !== '') {
+            $fechaFin = $fechaLegacy;
+        }
+
+        if ($fechaInicio === '' && $fechaFin !== '') {
+            $fechaInicio = $fechaFin;
+        }
+        if ($fechaFin === '' && $fechaInicio !== '') {
+            $fechaFin = $fechaInicio;
+        }
+        if ($fechaInicio === '') {
+            $fechaInicio = now()->format('Y-m-d');
+        }
+        if ($fechaFin === '') {
+            $fechaFin = now()->format('Y-m-d');
+        }
+
+        // Validar fechas; si inválidas, usar hoy.
+        foreach ([$fechaInicio, $fechaFin] as $f) {
+            // validación se hace abajo
+        }
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaInicio)) {
+            $fechaInicio = now()->format('Y-m-d');
+        } else {
+            [$y,$m,$d] = explode('-', $fechaInicio);
+            if (! checkdate((int)$m,(int)$d,(int)$y)) $fechaInicio = now()->format('Y-m-d');
+        }
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaFin)) {
+            $fechaFin = now()->format('Y-m-d');
+        } else {
+            [$y,$m,$d] = explode('-', $fechaFin);
+            if (! checkdate((int)$m,(int)$d,(int)$y)) $fechaFin = now()->format('Y-m-d');
+        }
+
+        if ($fechaInicio > $fechaFin) {
+            [$fechaInicio, $fechaFin] = [$fechaFin, $fechaInicio];
+        }
+
         $cajero = $this->cajeroSolicitado($request);
 
-        $resumen = $this->service->resumenDelDia($fecha, $cajero);
-        $cajeros = $this->service->cajerosDisponibles($fecha);
+        $resumen = $this->service->resumenPorRango($fechaInicio, $fechaFin, $cajero);
+        $cajeros = $this->service->cajerosDisponiblesRango($fechaInicio, $fechaFin);
 
         return view('resumen_dia.index', [
-            'fecha' => $fecha,
+            'fecha' => $fechaInicio,
+            'fechaInicio' => $fechaInicio,
+            'fechaFin' => $fechaFin,
             'cajero' => $cajero,
             'cajeros' => $cajeros,
             'resumen' => $resumen,
@@ -47,17 +94,60 @@ class ResumenDiarioController extends Controller
             abort(403, 'No tienes permiso para imprimir el resumen del día.');
         }
 
-        $fecha = $this->fechaSolicitada($request);
+        $fechaInicio = trim((string) $request->query('desde', ''));
+        $fechaFin = trim((string) $request->query('hasta', ''));
+
+        // Compatibilidad con el parámetro histórico `fecha`.
+        $fechaLegacy = trim((string) $request->query('fecha', ''));
+        if ($fechaInicio === '' && $fechaLegacy !== '') {
+            $fechaInicio = $fechaLegacy;
+        }
+        if ($fechaFin === '' && $fechaLegacy !== '') {
+            $fechaFin = $fechaLegacy;
+        }
+
+        if ($fechaInicio === '' && $fechaFin !== '') {
+            $fechaInicio = $fechaFin;
+        }
+        if ($fechaFin === '' && $fechaInicio !== '') {
+            $fechaFin = $fechaInicio;
+        }
+        if ($fechaInicio === '') {
+            $fechaInicio = now()->format('Y-m-d');
+        }
+        if ($fechaFin === '') {
+            $fechaFin = now()->format('Y-m-d');
+        }
+
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaInicio)) {
+            $fechaInicio = now()->format('Y-m-d');
+        } else {
+            [$y,$m,$d] = explode('-', $fechaInicio);
+            if (! checkdate((int)$m,(int)$d,(int)$y)) $fechaInicio = now()->format('Y-m-d');
+        }
+        if (! preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaFin)) {
+            $fechaFin = now()->format('Y-m-d');
+        } else {
+            [$y,$m,$d] = explode('-', $fechaFin);
+            if (! checkdate((int)$m,(int)$d,(int)$y)) $fechaFin = now()->format('Y-m-d');
+        }
+
+        if ($fechaInicio > $fechaFin) {
+            [$fechaInicio, $fechaFin] = [$fechaFin, $fechaInicio];
+        }
+
         $cajero = $this->cajeroSolicitado($request);
 
-        $resumen = $this->service->resumenDelDia($fecha, $cajero);
+        $resumen = $this->service->resumenPorRango($fechaInicio, $fechaFin, $cajero);
 
         if (! ($resumen['exito'] ?? false)) {
             abort(404, (string) ($resumen['error'] ?? 'No hay resumen para imprimir.'));
         }
 
         return view('resumen_dia.ticket', [
-            'fecha' => $fecha,
+            'fecha' => $fechaInicio,
+            'fechaInicio' => $fechaInicio,
+            'fechaFin' => $fechaFin,
             'cajero' => $resumen['cajero'],
             'resumen' => $resumen,
         ]);
@@ -71,9 +161,13 @@ class ResumenDiarioController extends Controller
      * Fecha consultada (Y-m-d). Si el parámetro no es válido se usa la fecha
      * actual del servidor.
      */
-    private function fechaSolicitada(Request $request): string
+    private function fechaSolicitada(Request $request, string $param = 'desde'): string
     {
-        $fecha = trim((string) $request->query('fecha', ''));
+        $fecha = trim((string) $request->query($param, ''));
+
+        if ($fecha === '') {
+            $fecha = trim((string) $request->query('desde', now()->format('Y-m-d')));
+        }
 
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
             [$anio, $mes, $dia] = array_map('intval', explode('-', $fecha));

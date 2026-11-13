@@ -120,6 +120,31 @@
             </div>
         </div>
 
+        {{-- Quién abrió la venta --}}
+        <div class="factura-cliente" style="border-left-color:#17a2b8; margin-bottom:14px;">
+            <div class="label"><i class="fas fa-user-edit"></i> Abierta por</div>
+            <div class="value">{{ $abrioPor ?? 'No registrado' }}</div>
+        </div>
+
+        {{-- Mesero encargado de la cuenta --}}
+        <div class="factura-cliente" style="border-left-color:#28a745; margin-bottom:14px;">
+            <div class="label"><i class="fas fa-user-tag"></i> Mesero encargado</div>
+            <div class="value">
+                @if ($puedeEditarMesero && $cuentaId)
+                    <select id="fa-mesero" style="padding:3px 8px; border:1px solid #ddd; border-radius:3px; max-width:260px;">
+                        <option value="">Pendiente de asignación</option>
+                        @foreach ($meserosSelect as $m)
+                            <option value="{{ $m->id }}" @selected((int) $meseroIdCuenta === (int) $m->id)>{{ $m->nombre }}</option>
+                        @endforeach
+                    </select>
+                    <button id="fa-mesero-guardar" type="button" style="margin-left:6px; padding:4px 10px;">Asignar</button>
+                    <div id="fa-mesero-msg" style="font-size:11px; margin-top:4px;"></div>
+                @else
+                    {{ $meseroEncargado ?? 'Pendiente de asignación' }}
+                @endif
+            </div>
+        </div>
+
         @if(isset($factura->cliente_snapshot) && $factura->cliente_snapshot)
             <div class="factura-cliente">
                 <div class="label"><i class="fas fa-user"></i> Cliente (snapshot al emitir)</div>
@@ -201,5 +226,38 @@
         </div>
     </div>
 </div>
+
+@if($puedeEditarMesero && $cuentaId)
+<script>
+    (function () {
+        const btn = document.getElementById('fa-mesero-guardar');
+        const select = document.getElementById('fa-mesero');
+        if (!btn || !select) return;
+        const msg = document.getElementById('fa-mesero-msg');
+        btn.addEventListener('click', async function () {
+            const meseroId = Number(select.value) || 0;
+            if (meseroId <= 0) {
+                if (msg) { msg.style.color = '#dc3545'; msg.textContent = 'Seleccione un mesero o deje «Pendiente de asignación».'; }
+                return;
+            }
+            const formData = new FormData();
+            formData.append('_token', '{{ csrf_token() }}');
+            formData.append('mesero_id', String(meseroId));
+            const respuesta = await fetch('{{ route('cuentas.mesero.asignar', ['cuentaId' => (int) $cuentaId]) }}', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                body: formData,
+            });
+            const cuerpo = await respuesta.json().catch(() => null);
+            if (respuesta.ok && cuerpo && cuerpo.exito) {
+                if (msg) { msg.style.color = '#28a745'; msg.textContent = cuerpo.mensaje || 'Asignado.'; }
+                btn.textContent = 'Guardado';
+            } else {
+                if (msg) { msg.style.color = '#dc3545'; msg.textContent = (cuerpo && cuerpo.error) ? cuerpo.error : 'No se pudo asignar.'; }
+            }
+        });
+    })();
+</script>
+@endif
 
 @endsection

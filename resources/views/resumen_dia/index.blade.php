@@ -5,7 +5,7 @@
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
         <span><i class="fas fa-box"></i> Operaciones — Resumen del Día</span>
         @if ($resumen['exito'] ?? false)
-            <a href="{{ route('reportes.resumen.ticket', ['fecha' => $fecha, 'cajero' => $resumen['cajero']]) }}" target="_blank"
+            <a href="{{ route('reportes.resumen.ticket', ['desde' => $fechaInicio, 'hasta' => $fechaFin, 'cajero' => $resumen['cajero']]) }}" target="_blank"
                style="background-color:#495057; color:#fff; padding:6px 12px; border-radius:4px; font-weight:bold; font-size:12px; text-decoration:none;">
                 <i class="fas fa-print"></i> Imprimir resumen
             </a>
@@ -14,12 +14,17 @@
 
     <div style="padding: 25px;">
 
-        {{-- Filtros: fecha y cajero (varios turnos del mismo día). --}}
+        {{-- Filtros: fechaDesde / fechaHasta / cajero. --}}
         <form method="GET" action="{{ route('reportes.resumen') }}"
               style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; border:1px solid #e3e6f0; border-radius:8px; padding:14px 16px; margin-bottom:22px; background:#fbfbfd;">
             <div style="display:flex; flex-direction:column; gap:5px;">
-                <label for="fecha" style="font-size:0.85rem; font-weight:bold; color:#555;">Fecha:</label>
-                <input type="date" id="fecha" name="fecha" value="{{ $fecha }}"
+                <label for="desde" style="font-size:0.85rem; font-weight:bold; color:#555;">Desde:</label>
+                <input type="date" id="desde" name="desde" value="{{ $fechaInicio }}"
+                       style="padding:8px 12px; border:1px solid #ced4da; border-radius:5px;">
+            </div>
+            <div style="display:flex; flex-direction:column; gap:5px;">
+                <label for="hasta" style="font-size:0.85rem; font-weight:bold; color:#555;">Hasta:</label>
+                <input type="date" id="hasta" name="hasta" value="{{ $fechaFin }}"
                        style="padding:8px 12px; border:1px solid #ced4da; border-radius:5px;">
             </div>
             <div style="display:flex; flex-direction:column; gap:5px; min-width:220px;">
@@ -42,149 +47,95 @@
         @if (! ($resumen['exito'] ?? false))
             <div style="background:#fff7e6; border:1px solid #f5d9a8; border-radius:6px; padding:14px 16px; font-size:13px; color:#7a5a1a; line-height:1.5;">
                 <i class="fas fa-exclamation-triangle"></i>
-                {{ $resumen['error'] ?? 'No hay información para esta fecha.' }}
+                {{ $resumen['error'] ?? 'No hay cierres registrados para el período seleccionado.' }}
             </div>
         @else
 
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:18px;">
+        <p style="font-size:12px; color:#6c757d; margin-bottom:14px;">
+            Cada sección corresponde a un <strong>cierre de caja registrado</strong> dentro del período.
+            Los importes no se combinan entre cierres.
+        </p>
 
-            {{-- Ventas clasificadas por forma de cobro. --}}
-            <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
-                <div style="padding:10px 16px; background:#3498db; color:#fff; font-weight:600; font-size:14px;">
-                    <i class="fas fa-cash-register"></i> Ventas por Forma de Cobro
+        @foreach ($resumen['turnos'] as $detalle)
+            @php
+                $turno = $detalle['apertura'];
+                $cierre = $detalle['cierre'];
+                $ventas = $detalle['ventas'];
+                $anuladas = $detalle['ventas_anuladas'];
+            @endphp
+            <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden; margin-bottom:18px;">
+                <div style="padding:10px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                    <span>
+                        <i class="fas fa-cash-register"></i>
+                        Cierre #{{ $cierre->id }} — {{ $turno->turno ?? 'Turno' }} —
+                        {{ $turno->cajero ?: 'Sin cajero' }}
+                    </span>
+                    <span style="font-weight:400; font-size:12px; opacity:0.9;">
+                        Abrió: {{ $detalle['abrio'] ?? '—' }} ·
+                        Cerró: {{ $detalle['cerro'] ?? '—' }} ·
+                        Apertura: {{ $turno->fecha ? \Carbon\Carbon::parse($turno->fecha)->format('d/m/Y H:i') : '—' }}
+                        · Cierre: {{ $cierre->fecha ? \Carbon\Carbon::parse($cierre->fecha)->format('d/m/Y H:i') : '—' }}
+                    </span>
                 </div>
-                <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Fondo de apertura:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['total_monto_apertura'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Efectivo C$:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['efectivo'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Tarjeta:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['tarjeta'], 2) }}</td></tr>
-                    @foreach ($resumen['tarjetas_por_banco'] as $banco => $montoBanco)
-                        <tr style="border-bottom:1px solid #f8f9fa;"><td style="padding:6px 14px 6px 28px; color:#6c757d;">— {{ $banco }}:</td><td style="padding:6px 14px; text-align:right; color:#6c757d;">C$ {{ number_format($montoBanco, 2) }}</td></tr>
-                    @endforeach
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Transferencia:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['transferencia'], 2) }}</td></tr>
-                    @if ($resumen['otro'] > 0)
-                        <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Otros:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['otro'], 2) }}</td></tr>
-                    @endif
-                    <tr style="background:#f8f9fa; font-weight:bold;"><td style="padding:10px 14px;">TOTAL VENTAS DEL DÍA:</td><td style="padding:10px 14px; text-align:right;">C$ {{ number_format($resumen['total_ventas'], 2) }}</td></tr>
-                    <tr style="border-top:1px solid #f1f1f1; color:#721c24;"><td style="padding:8px 14px;">Ventas anuladas:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['ventas_anuladas'], 2) }} ({{ $resumen['cantidad_ventas_anuladas'] }})</td></tr>
-                    <tr style="color:#6c757d;"><td style="padding:8px 14px;">Cuentas cobradas:</td><td style="padding:8px 14px; text-align:right;">{{ $resumen['cantidad_cuentas'] }}</td></tr>
-                </table>
-            </div>
 
-            {{-- Gastos y efectivo esperado. --}}
-            <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
-                <div style="padding:10px 16px; background:#e67e22; color:#fff; font-weight:600; font-size:14px;">
-                    <i class="fas fa-file-invoice-dollar"></i> Gastos y Efectivo Esperado
+                <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:14px; padding:14px;">
+
+                    {{-- Ventas por forma de cobro --}}
+                    <div style="border:1px solid #e9ecef; border-radius:6px; overflow:hidden;">
+                        <div style="padding:8px 12px; background:#3498db; color:#fff; font-weight:600; font-size:12px;">
+                            <i class="fas fa-cash-register"></i> Ventas por Forma de Cobro
+                        </div>
+                        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Fondo de apertura:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $turno->monto_inicial, 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Efectivo C$:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $ventas['efectivo'], 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Tarjeta:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $ventas['tarjeta'], 2) }}</td></tr>
+                            @foreach ($ventas['tarjetas_por_banco'] as $banco => $montoBanco)
+                                <tr style="border-bottom:1px solid #f8f9fa;"><td style="padding:6px 12px 6px 26px; color:#6c757d;">— {{ $banco }}:</td><td style="padding:6px 12px; text-align:right; color:#6c757d;">C$ {{ number_format((float) $montoBanco, 2) }}</td></tr>
+                            @endforeach
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Transferencia:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $ventas['transferencia'], 2) }}</td></tr>
+                            @if ((float) $ventas['otro'] > 0)
+                                <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Otros:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $ventas['otro'], 2) }}</td></tr>
+                            @endif
+                            <tr style="background:#f8f9fa; font-weight:bold;"><td style="padding:8px 12px;">TOTAL VENTAS:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $ventas['total'], 2) }}</td></tr>
+                            <tr style="color:#721c24; border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Ventas anuladas:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $anuladas['monto'], 2) }} ({{ (int) $anuladas['cantidad'] }})</td></tr>
+                            <tr style="color:#6c757d;"><td style="padding:8px 12px;">Cuentas cobradas:</td><td style="padding:8px 12px; text-align:right;">{{ (int) $ventas['cantidad'] }}</td></tr>
+                        </table>
+                    </div>
+
+                    {{-- Gastos y efectivo esperado --}}
+                    <div style="border:1px solid #e9ecef; border-radius:6px; overflow:hidden;">
+                        <div style="padding:8px 12px; background:#e67e22; color:#fff; font-weight:600; font-size:12px;">
+                            <i class="fas fa-file-invoice-dollar"></i> Gastos y Efectivo Esperado
+                        </div>
+                        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Gastos activos:</td><td style="padding:8px 12px; text-align:right; color:#c0392b;">C$ {{ number_format((float) $detalle['gastos_activos'], 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Otros ingresos:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['otros_ingresos'], 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Retiros:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['retiros'], 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 12px;">Gastos anulados (informativo):</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['gastos_anulados'], 2) }} ({{ (int) $detalle['cantidad_gastos_anulados'] }})</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 12px;">Cambios entregados (informativo):</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $detalle['cambios'], 2) }}</td></tr>
+                            <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 12px;">Diferencia de caja:</td><td style="padding:8px 12px; text-align:right; font-weight:bold; color:{{ ($detalle['diferencia'] ?? 0) < 0 ? '#c0392b' : '#1e7e34' }}">C$ {{ number_format((float) $detalle['diferencia'], 2) }}</td></tr>
+                            <tr style="background:#fff8e1; font-weight:bold;"><td style="padding:8px 12px;">EFECTIVO ESPERADO:</td><td style="padding:8px 12px; text-align:right;">C$ {{ number_format((float) $turno->monto_inicial + (float) $ventas['efectivo'] + (float) $detalle['otros_ingresos'] - (float) $detalle['gastos_activos'] - (float) $detalle['retiros'], 2) }}</td></tr>
+                        </table>
+                    </div>
+
+                    {{-- Propinas del cierre: cobradas vs atribuidas. --}}
+                    <div style="padding:10px 14px; border-top:1px solid #eee; font-size:12px; background:#f8f9fa;">
+                        <strong>Propinas</strong> — cobradas: C$ {{ number_format((float) ($detalle['propinas']['total'] ?? 0), 2) }}
+                        ({{ (int) ($detalle['propinas']['cantidad'] ?? 0) }} cuentas) ·
+                        atribuidas a meseros: C$ {{ number_format((float) ($detalle['propinas']['atribuidas'] ?? 0), 2) }} ·
+                        pendientes de atribución: C$ {{ number_format((float) ($detalle['propinas']['pendientes'] ?? 0), 2) }}
+                        · Personal: <em>no registrado</em>
+                        @if (!empty($detalle['propinas']['meseros'] ?? null))
+                            <br><small>Atribuidas a:
+                            @foreach (($detalle['propinas']['meseros'] ?? collect()) as $rm)
+                                {{ $rm['mesero'] }}: C$ {{ number_format((float) $rm['propinas'], 2) }}@if (!$loop->last), @endif
+                            @endforeach
+                            </small>
+                        @endif
+                    </div>
                 </div>
-                <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Gastos activos:</td><td style="padding:8px 14px; text-align:right; color:#c0392b;">C$ {{ number_format($resumen['gastos_activos'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Otros ingresos:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['otros_ingresos'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Retiros:</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['retiros'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Gastos anulados (informativo):</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['gastos_anulados'], 2) }} ({{ $resumen['cantidad_gastos_anulados'] }})</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Cambios entregados (informativo):</td><td style="padding:8px 14px; text-align:right;">C$ {{ number_format($resumen['cambios_entregados'], 2) }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Cierres registrados:</td><td style="padding:8px 14px; text-align:right;">{{ (int) $resumen['cantidad_cierres'] }}</td></tr>
-                    <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Diferencia de caja acumulada:</td><td style="padding:8px 14px; text-align:right; font-weight:bold; color:{{ $resumen['diferencia_caja'] < 0 ? '#c0392b' : '#1e7e34' }}">C$ {{ number_format($resumen['diferencia_caja'], 2) }}</td></tr>
-                    <tr style="background:#fff8e1; font-weight:bold; font-size:15px;"><td style="padding:12px 14px;">EFECTIVO ESPERADO:</td><td style="padding:12px 14px; text-align:right;">C$ {{ number_format($resumen['efectivo_esperado'], 2) }}</td></tr>
-                </table>
-                <p style="font-size:11px; color:#6c757d; padding:10px 14px; line-height:1.4;">
-                    Fondo de apertura + efectivo C$ + otros ingresos − gastos activos − retiros.
-                    Las tarjetas y transferencias no entran a la gaveta y los cambios no se
-                    descuentan (el POS ya retiene el neto). La diferencia de caja es la suma de
-                    las diferencias de los cierres vigentes (contado − esperado).
-                </p>
             </div>
-
-            {{-- Propinas: cobrado al cliente vs pagado al personal. --}}
-            <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
-                <div style="padding:10px 16px; background:#16a085; color:#fff; font-weight:600; font-size:14px;">
-                    <i class="fas fa-hand-holding-dollar"></i> Resumen de Propinas
-                </div>
-                @if ($resumen['propinas']['disponible'] ?? false)
-                    <table style="width:100%; border-collapse:collapse; font-size:13px;">
-                        <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Propinas cobradas al cliente:</td><td style="padding:8px 14px; text-align:right; font-weight:bold;">C$ {{ number_format($resumen['propinas']['cobradas'], 2) }}</td></tr>
-                        <tr style="border-bottom:1px solid #f1f1f1;"><td style="padding:8px 14px;">Cuentas cobradas con propina:</td><td style="padding:8px 14px; text-align:right;">{{ (int) $resumen['propinas']['cantidad'] }}</td></tr>
-                        <tr style="border-bottom:1px solid #f1f1f1; color:#6c757d;"><td style="padding:8px 14px;">Propinas pagadas al personal:</td><td style="padding:8px 14px; text-align:right;">No registrado</td></tr>
-                    </table>
-                    <p style="font-size:11px; color:#6c757d; padding:10px 14px; line-height:1.4;">
-                        La propina se cobra al cliente en el mismo cobro de la factura y se
-                        consulta por fecha de emisión. El sistema NO registra su entrega al
-                        personal, por eso no se muestra como «pagada».
-                    </p>
-                @else
-                    <p style="font-size:12px; color:#7a5a1a; padding:12px 16px;">
-                        No disponible: el esquema no tiene las columnas/tablas de propinas.
-                    </p>
-                @endif
-            </div>
-        </div>
-
-        {{-- Detalle por turno. --}}
-        <div style="border:1px solid #e3e6f0; border-radius:8px; overflow-x:auto; margin-top:22px;">
-            <div style="padding:12px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px;">
-                <i class="fas fa-list-alt"></i> Cajas / Turnos del Día ({{ $resumen['cantidad_turnos'] }})
-                <span style="font-weight:400; font-size:12px;">
-                    — {{ (int) $resumen['turnos_abiertos'] }} abierta(s),
-                    {{ (int) $resumen['cantidad_cierres'] }} con cierre registrado
-                </span>
-            </div>
-            <table style="width:100%; border-collapse:collapse; font-size:13px; min-width:1000px;">
-                <thead>
-                    <tr style="background:#f4f6f9; color:#495057; text-align:left;">
-                        <th style="padding:10px 12px;">Turno</th>
-                        <th style="padding:10px 12px;">Abrió la caja</th>
-                        <th style="padding:10px 12px;">Cerró la caja</th>
-                        <th style="padding:10px 12px;">Apertura</th>
-                        <th style="padding:10px 12px;">Cierre</th>
-                        <th style="padding:10px 12px; text-align:center;">Estado</th>
-                        <th style="padding:10px 12px; text-align:right;">Fondo inicial</th>
-                        <th style="padding:10px 12px; text-align:right;">Total ventas</th>
-                        <th style="padding:10px 12px; text-align:right;">Total gastos</th>
-                        <th style="padding:10px 12px; text-align:right;">Diferencia</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach ($resumen['turnos'] as $detalle)
-                        @php
-                            $turno = $detalle['apertura'];
-                            $fechaApertura = $detalle['fecha_apertura'] ?? $detalle['inicio'];
-                            $fechaCierre = $detalle['fecha_cierre'] ?? null;
-                            $diferencia = $detalle['diferencia'] ?? null;
-                        @endphp
-                        <tr style="border-bottom:1px solid #f1f1f1;">
-                            <td style="padding:10px 12px;">
-                                <strong>{{ $turno->turno ?? 'Turno' }}</strong>
-                                <div style="font-size:11px; color:#6c757d;">
-                                    {{ $detalle['inicio'] ? $detalle['inicio']->format('d/m H:i') : '--' }}
-                                    @if ($turno->estado === 'CERRADA')
-                                        → {{ $detalle['cierre'] && $detalle['cierre']->fecha ? $detalle['cierre']->fecha->format('H:i') : 'fin' }}
-                                    @endif
-                                </div>
-                            </td>
-                            <td style="padding:10px 12px;">{{ $detalle['abrio'] ?? 'No registrado' }}</td>
-                            <td style="padding:10px 12px;">{{ $detalle['cerro'] ?? ($turno->estado === 'CERRADA' ? 'No registrado' : '—') }}</td>
-                            <td style="padding:10px 12px;">
-                                {{ $fechaApertura ? \Illuminate\Support\Carbon::parse($fechaApertura)->format('d/m/Y H:i') : '—' }}
-                            </td>
-                            <td style="padding:10px 12px;">
-                                {{ $fechaCierre ? \Illuminate\Support\Carbon::parse($fechaCierre)->format('d/m/Y H:i') : '—' }}
-                            </td>
-                            <td style="padding:10px 12px; text-align:center;">
-                                @if ($turno->estado === 'ABIERTA')
-                                    <span style="background:#d1ecf1; color:#0c5460; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">ABIERTO</span>
-                                @else
-                                    <span style="background:#e2e3e5; color:#383d41; padding:3px 8px; border-radius:12px; font-size:11px; font-weight:bold;">CERRADO</span>
-                                @endif
-                            </td>
-                            <td style="padding:10px 12px; text-align:right;">C$ {{ number_format((float) $turno->monto_inicial, 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right; font-weight:bold;">C$ {{ number_format($detalle['total_ventas'], 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right; color:#c0392b;">C$ {{ number_format($detalle['egresos'], 2) }}</td>
-                            <td style="padding:10px 12px; text-align:right; font-weight:bold; color:{{ $diferencia !== null && $diferencia < 0 ? '#c0392b' : '#1e7e34' }}">
-                                {{ $diferencia === null ? '—' : 'C$ '.number_format($diferencia, 2) }}
-                            </td>
-                        </tr>
-                    @endforeach
-                </tbody>
-            </table>
-        </div>
+        @endforeach
 
         @endif
     </div>

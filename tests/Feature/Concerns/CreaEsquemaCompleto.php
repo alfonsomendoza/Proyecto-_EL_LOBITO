@@ -113,6 +113,7 @@ trait CreaEsquemaCompleto
             $t->unsignedBigInteger('mesa_id')->nullable();
             $t->unsignedBigInteger('cliente_id')->nullable();
             $t->integer('apertura_id')->nullable();
+            $t->integer('mesero_responsable_id')->nullable();
             $t->string('descripcion')->nullable();
             $t->decimal('monto', 12, 2)->default(0);
             $t->string('metodo_pago', 30)->nullable();
@@ -181,6 +182,7 @@ trait CreaEsquemaCompleto
             $t->bigIncrements('id');
             $t->integer('venta_id');
             $t->integer('cliente_id')->nullable();
+            $t->integer('mesero_responsable_id')->nullable();
             $t->string('nombre', 255);
             $t->decimal('total', 10, 2)->default(0);
             $t->string('estado', 255)->default('ABIERTA');
@@ -312,5 +314,19 @@ trait CreaEsquemaCompleto
         // Este trait crea las tablas de traslados/pagos y garantiza el
         // Cliente General (ID 1) una sola vez.
         $this->crearEsquemaTrasladosPagos();
+
+        // Asignación de mesero responsable (Fase propinas): snapshot en venta/cuenta
+        // + historial de cambios. Replado solo para pruebas SQLite :memory:.
+        if (!Schema::hasTable('mesa_asignaciones')) {
+            Schema::create('mesa_asignaciones', function (Blueprint $t) {
+                $t->id();
+                $t->integer('venta_id');
+                $t->integer('mesa_id');
+                $t->integer('mesero_id')->nullable();
+                $t->integer('asignado_por')->nullable();
+                $t->string('motivo', 255)->nullable();
+                $t->timestamp('creado_en')->nullable();
+            });
+        }
     }
 }

@@ -24,14 +24,27 @@ class MesaController extends Controller
             ->orderBy('nombre')
             ->get();
 
-        $ventasActivas = DB::table('ventas')
-            ->select('id', 'mesa_id', 'estado')
-            ->whereNotNull('mesa_id')
-            ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
-            ->get()
+        $select = ['v.id as id', 'v.mesa_id as mesa_id', 'v.estado as estado', 'ua.nombre as abrio_nombre'];
+
+        if (Schema::hasColumn('ventas', 'mesero_responsable_id')) {
+            $select[] = 'v.mesero_responsable_id as mesero_responsable_id';
+        }
+
+        $ventasActivas = DB::table('ventas as v')
+            ->leftJoin('usuarios as ua', 'ua.id', '=', 'v.usuario_id')
+            ->whereIn('v.estado', ['ACTIVA', 'ABIERTA'])
+            ->whereNotNull('v.mesa_id')
+            ->get($select)
             ->keyBy('mesa_id');
 
-        return view('mesas.index', compact('mesas', 'clientes', 'ventasActivas'));
+        $idsMeseros = Schema::hasColumn('ventas', 'mesero_responsable_id')
+            ? $ventasActivas->pluck('mesero_responsable_id')->filter()->unique()->values()->all()
+            : [];
+        $nombresMeseros = $idsMeseros === []
+            ? []
+            : DB::table('usuarios')->whereIn('id', $idsMeseros)->pluck('nombre', 'id')->toArray();
+
+        return view('mesas.index', compact('mesas', 'clientes', 'ventasActivas', 'nombresMeseros'));
     }
 
     public function api(Request $request)
@@ -112,6 +125,109 @@ class MesaController extends Controller
      * peticiones no-JSON (el Monitor hace fetch sin cabecera Accept). Aquí se
      * responde siempre en JSON con el código correcto.
      */
+    /**
+     * Lista de usuarios activos con rol MESERO (para elegir al encargado de
+     * una mesa). Solo ADMIN, GERENTE y CAJERO.
+     */
+    public function meserosDisponibles()
+    {
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para ver los meseros.'], 403);
+        }
+
+        $meseros = DB::table('usuarios')
+            ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+            ->where('roles.nombre', 'MESERO')
+            ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+            ->orderBy('usuarios.nombre')
+            ->get(['usuarios.id', 'usuarios.nombre']);
+
+        return response()->json(['exito' => true, 'meseros' => $meseros]);
+    }
+
+    /**
+     * Cambia el mesero responsable de una mesa/venta. Las cuentas YA
+     * creadas conservan su snapshot; solo las nuevas tomarán el nuevo
+     * responsable. Historial en `mesa_asignaciones` + auditoría.
+     */
+    public function asignarMesero(Request $request, int $mesaId)
+    {
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para cambiar el encargado de la mesa.'], 403);
+        }
+
+        $meseroId = $request->input('mesero_id');
+
+        if (! is_numeric($meseroId) || (int) $meseroId <= 0) {
+            return response()->json(['exito' => false, 'error' => 'Debes indicar un mesero válido.'], 422);
+        }
+
+        $meseroId = (int) $meseroId;
+
+        $mesero = DB::table('usuarios')
+            ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+            ->where('usuarios.id', $meseroId)
+            ->where('roles.nombre', 'MESERO')
+            ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+            ->first();
+
+        if (! $mesero) {
+            return response()->json(['exito' => false, 'error' => 'El mesero no existe, está inactivo o no tiene rol MESERO.'], 422);
+        }
+
+        try {
+            DB::transaction(function () use ($mesaId, $meseroId) {
+                $venta = DB::table('ventas')
+                    ->where('mesa_id', $mesaId)
+                    ->whereIn('estado', ['ACTIVA', 'ABIERTA'])
+                    ->orderByDesc('id')
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $venta) {
+                    throw new \RuntimeException('La mesa no tiene una venta activa para reasignar.');
+                }
+
+                if (Schema::hasColumn('ventas', 'mesero_responsable_id')) {
+                    DB::table('ventas')->where('id', $venta->id)->update([
+                        'mesero_responsable_id' => $meseroId,
+                    ]);
+                }
+
+                if (Schema::hasTable('mesa_asignaciones')) {
+                    DB::table('mesa_asignaciones')->insert([
+                        'venta_id' => $venta->id,
+                        'mesa_id' => $mesaId,
+                        'mesero_id' => $meseroId,
+                        'asignado_por' => Auth::id(),
+                        'motivo' => 'REASIGNACION',
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                if (Schema::hasTable('auditoria_seguridad')) {
+                    DB::table('auditoria_seguridad')->insert([
+                        'usuario_id' => Auth::id(),
+                        'evento' => 'mesero_reasignado',
+                        'ip' => request()->ip(),
+                        'user_agent' => mb_substr((string) request()->userAgent(), 0, 255),
+                        'motivo' => 'Cambio de encargado de mesa',
+                        'detalles' => json_encode(['mesa_id' => $mesaId, 'venta_id' => $venta->id, 'mesero_id' => $meseroId]),
+                        'creado_en' => now(),
+                    ]);
+                }
+            });
+        } catch (\Throwable $e) {
+            return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
+        }
+
+        return response()->json(['exito' => true, 'mensaje' => 'Encargado actualizado. Las cuentas ya creadas conservan su responsable; las nuevas tomarán el nuevo encargado.']);
+    }
+
     private function abrirMesa(Request $request)
     {
         // 1. Validación de entrada con respuesta JSON controlada.
@@ -126,6 +242,36 @@ class MesaController extends Controller
         $clienteId = $request->input('cliente_id');
         $clienteId = (is_numeric($clienteId) && (int) $clienteId > 0) ? (int) $clienteId : null;
 
+        // Mesero responsable elegido al abrir la mesa (opcional). Solo ADMIN,
+        // GERENTE y CAJERO pueden elegir al encargado; el MESERO responsable
+        // se asigna automáticamente a sí mismo y no puede elegir otro.
+        $meseroId = $request->input('mesero_id');
+        $meseroId = (is_numeric($meseroId) && (int) $meseroId > 0) ? (int) $meseroId : null;
+        $rolActual = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if ($rolActual === 'MESERO') {
+            if ($meseroId !== null && $meseroId !== (int) Auth::id()) {
+                return response()->json(['exito' => false, 'error' => 'El mesero no puede elegir otro encargado para la mesa.'], 403);
+            }
+            // Al abrir, el mesero que atiende es el responsable de la propina.
+            $meseroId = Auth::id();
+        } elseif ($meseroId !== null && ! in_array($rolActual, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'Solo ADMIN, GERENTE o CAJERO pueden asignar al mesero encargado de la mesa.'], 403);
+        }
+
+        if ($meseroId !== null) {
+            $meseroValido = DB::table('usuarios')
+                ->leftJoin('roles', 'roles.id', '=', 'usuarios.rol_id')
+                ->where('usuarios.id', $meseroId)
+                ->where('roles.nombre', 'MESERO')
+                ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+                ->exists();
+
+            if (! $meseroValido) {
+                return response()->json(['exito' => false, 'error' => 'El mesero indicado no existe, está inactivo o no tiene rol MESERO.'], 422);
+            }
+        }
+
         // 2. Cliente explícito: debe existir para poder asociarse a la venta.
         //    (No se exige "activo" para no romper referencias históricas.)
         if ($clienteId !== null) {
@@ -137,7 +283,7 @@ class MesaController extends Controller
         }
 
         try {
-            $resultado = DB::transaction(function () use ($mesaId, $clienteId) {
+            $resultado = DB::transaction(function () use ($mesaId, $clienteId, $meseroId) {
                 // 3. Bloqueo de la mesa: serializa aperturas simultáneas y evita
                 //    ventas duplicadas ante solicitudes concurrentes.
                 $mesa = DB::table('mesas')->where('id', $mesaId)->lockForUpdate()->first();
@@ -225,14 +371,21 @@ class MesaController extends Controller
                         // Venta realmente vacía y sin historial: se crea la
                         // cuenta principal. No se altera ningún cobro previo
                         // porque no existe.
-                        DB::table('cuentas')->insert([
+                        $meseroActual = $venta->mesero_responsable_id ?? null;
+                        $nuevaCuenta = [
                             'venta_id' => $venta->id,
                             'nombre' => 'Cuenta Principal',
                             'total' => 0,
                             'estado' => 'ABIERTA',
                             'created_at' => now(),
                             'updated_at' => now(),
-                        ]);
+                        ];
+
+                        if (Schema::hasColumn('cuentas', 'mesero_responsable_id')) {
+                            $nuevaCuenta['mesero_responsable_id'] = $meseroActual;
+                        }
+
+                        DB::table('cuentas')->insert($nuevaCuenta);
                     }
 
                     // 7. La selección de cliente se conserva salvo que llegue
@@ -241,12 +394,45 @@ class MesaController extends Controller
                         DB::table('ventas')->where('id', $venta->id)->update(['cliente_id' => $clienteId]);
                     }
 
+                    // Reapertura con nuevo encargado: igual que la acción de
+                    // reasignación (la cuenta actual conserva su snapshot).
+                    if ($meseroId !== null
+                        && Schema::hasColumn('ventas', 'mesero_responsable_id')
+                        && (int) ($venta->mesero_responsable_id ?? 0) !== $meseroId) {
+                        DB::table('ventas')->where('id', $venta->id)->update([
+                            'mesero_responsable_id' => $meseroId,
+                        ]);
+
+                        if (Schema::hasTable('mesa_asignaciones')) {
+                            DB::table('mesa_asignaciones')->insert([
+                                'venta_id' => $venta->id,
+                                'mesa_id' => $mesaId,
+                                'mesero_id' => $meseroId,
+                                'asignado_por' => Auth::id(),
+                                'motivo' => 'REASIGNACION',
+                                'creado_en' => now(),
+                            ]);
+                        }
+
+                        if (Schema::hasTable('auditoria_seguridad')) {
+                            DB::table('auditoria_seguridad')->insert([
+                                'usuario_id' => Auth::id(),
+                                'evento' => 'mesero_reasignado',
+                                'ip' => request()->ip(),
+                                'user_agent' => mb_substr((string) request()->userAgent(), 0, 255),
+                                'motivo' => 'Cambio de encargado desde reapertura de mesa',
+                                'detalles' => json_encode(['mesa_id' => $mesaId, 'venta_id' => $venta->id, 'mesero_id' => $meseroId]),
+                                'creado_en' => now(),
+                            ]);
+                        }
+                    }
+
                     return ['estado' => 'ok', 'venta_id' => $venta->id];
                 }
 
                 // 8. No hay venta activa: se crea una venta vacía con su cuenta
                 //    principal. La mesa permanece LIBRE hasta el primer producto.
-                $ventaId = DB::table('ventas')->insertGetId([
+                $ventaInsert = [
                     'mesa_id' => $mesaId,
                     'cliente_id' => $clienteId,
                     'apertura_id' => null,
@@ -261,16 +447,52 @@ class MesaController extends Controller
                     'estado' => 'ACTIVA',
                     'usuario_id' => Auth::id(),
                     'descuento_porcentaje' => 0,
-                ]);
+                ];
 
-                DB::table('cuentas')->insert([
+                if (Schema::hasColumn('ventas', 'mesero_responsable_id')) {
+                    $ventaInsert['mesero_responsable_id'] = $meseroId;
+                }
+
+                $ventaId = DB::table('ventas')->insertGetId($ventaInsert);
+
+                $nuevaCuenta = [
                     'venta_id' => $ventaId,
                     'nombre' => 'Cuenta Principal',
                     'total' => 0,
                     'estado' => 'ABIERTA',
                     'created_at' => now(),
                     'updated_at' => now(),
-                ]);
+                ];
+
+                if (Schema::hasColumn('cuentas', 'mesero_responsable_id')) {
+                    $nuevaCuenta['mesero_responsable_id'] = $meseroId;
+                }
+
+                DB::table('cuentas')->insert($nuevaCuenta);
+
+                // Historial de asignación: quién asignó al mesero responsable.
+                if (Schema::hasTable('mesa_asignaciones')) {
+                    DB::table('mesa_asignaciones')->insert([
+                        'venta_id' => $ventaId,
+                        'mesa_id' => $mesaId,
+                        'mesero_id' => $meseroId,
+                        'asignado_por' => Auth::id(),
+                        'motivo' => 'APERTURA',
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                if (Schema::hasTable('auditoria_seguridad')) {
+                    DB::table('auditoria_seguridad')->insert([
+                        'usuario_id' => Auth::id(),
+                        'evento' => 'mesero_asignado',
+                        'ip' => request()->ip(),
+                        'user_agent' => mb_substr((string) request()->userAgent(), 0, 255),
+                        'motivo' => 'Apertura de mesa',
+                        'detalles' => json_encode(['mesa_id' => $mesaId, 'venta_id' => $ventaId, 'mesero_id' => $meseroId]),
+                        'creado_en' => now(),
+                    ]);
+                }
 
                 return ['estado' => 'ok', 'venta_id' => $ventaId];
             });

@@ -122,6 +122,8 @@
 <div id="panel-cuentas" class="monitor-card"
      style="max-width: 1200px; margin: 0 auto;"
      data-venta-id="{{ (int) $venta->id }}"
+     data-mesero-actual="{{ (int) ($meseroIdActual ?? 0) }}"
+     data-cuenta-id="{{ (int) ($cuentas->first()?->id ?? 0) }}"
      data-mesas-destino="{{ $mesasDestino->map(fn ($m) => ['id' => $m->id, 'numero' => $m->numero])->values()->toJson() }}"
      data-mesas-individual="{{ $mesasDestinoIndividual->map(fn ($m) => ['id' => $m->id, 'numero' => $m->numero, 'estado' => $m->estado])->values()->toJson() }}">
 
@@ -135,13 +137,26 @@
 
     {{-- Encabezado del panel --}}
     <div class="monitor-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; background: #fff; padding: 18px 20px;">
-        <div style="display: flex; align-items: center; gap: 15px;">
-            <span style="font-size: 18px; font-weight: bold; color: #34395e;">
-                <i class="fas fa-layer-group"></i> Cuentas de Mesa {{ $mesa->numero }}
-            </span>
-            <span style="font-size: 12px; color: #98a6ad; font-weight: bold;">
-                Venta #{{ $venta->id }} · {{ $venta->estado }}
-            </span>
+        <div style="display: flex; flex-direction: column; gap: 6px; min-width: 260px;">
+            <div style="font-size: 12px; color: #5a5f7d;">
+                <strong>Abierta por:</strong> {{ $abrioPor ?? 'No registrado' }}
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: #5a5f7d;">
+                <strong>Mesero encargado:</strong>
+                <span id="lbl-mesero-encargado">{{ $meseroEncargado ?? 'Sin mesero asignado' }}</span>
+
+                @if($puedeEditarMesero)
+                    <select id="sel-mesero-encargado" style="padding: 3px 8px; border: 1px solid #ddd; border-radius: 4px; max-width: 220px;">
+                        <option value="">Sin asignar</option>
+                        @foreach($meserosActivos as $m)
+                            <option value="{{ (int) $m->id }}" @selected((int) ($meseroIdActual ?? 0) === (int) $m->id)>{{ $m->nombre }}</option>
+                        @endforeach
+                    </select>
+                    <button type="button" id="btn-asignar-mesero" class="btn-accion" style="background:#28a745; color:#fff; border:none; padding:4px 10px; border-radius:4px; font-weight:bold; cursor:pointer;">
+                        Asignar
+                    </button>
+                @endif
+            </div>
         </div>
 
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
@@ -942,4 +957,61 @@
         });
     });
 </script>
+
+{{-- Asignación/reasignación de mesero encargado desde el panel de la mesa abierta. --}}
+@if($puedeEditarMesero)
+<script>
+    (function () {
+        const btn = document.getElementById('btn-asignar-mesero');
+        const sel = document.getElementById('sel-mesero-encargado');
+        const lbl = document.getElementById('lbl-mesero-encargado');
+        const panel = document.getElementById('panel-cuentas');
+        const cuentaId = panel ? Number(panel.dataset.cuentaId) : 0;
+
+        if (!btn || !sel || cuentaId <= 0) {
+            return;
+        }
+
+        btn.addEventListener('click', async function () {
+            const meseroId = Number(sel.value);
+
+            if (meseroId <= 0) {
+                lbl.textContent = 'Sin mesero asignado';
+                btn.textContent = 'Asignar';
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('_token', '{{ csrf_token() }}');
+            fd.append('mesero_id', String(meseroId));
+
+            btn.disabled = true;
+            btn.textContent = 'Guardando…';
+
+            try {
+                const resp = await fetch('{{ route('cuentas.mesero.asignar', ['cuentaId' => 0]) }}'.replace('/0', '/' + cuentaId), {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: fd,
+                });
+                const data = await resp.json().catch(() => null);
+
+                if (resp.ok && data && data.exito) {
+                    lbl.textContent = sel.options[sel.selectedIndex].textContent;
+                    btn.textContent = 'Guardado';
+                    Swal.fire('Mesero asignado', data.mensaje || 'El encargado se actualizó.', 'success').then(() => location.reload());
+                } else {
+                    Swal.fire('Error', (data && data.error) ? data.error : 'No se pudo asignar el mesero encargado.', 'error');
+                    btn.textContent = 'Asignar';
+                }
+            } catch (e) {
+                Swal.fire('Error', 'Fallo de comunicación con el servidor.', 'error');
+                btn.textContent = 'Asignar';
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    })();
+</script>
+@endif
 @endsection

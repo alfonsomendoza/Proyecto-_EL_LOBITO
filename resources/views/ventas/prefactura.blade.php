@@ -31,7 +31,25 @@
         <tr><td><strong>Mesa:</strong></td><td class="derecha">{{ $mesa->numero ?? 'Mesa' }}</td></tr>
         <tr><td><strong>Cuenta:</strong></td><td class="derecha">{{ $cuenta->nombre }} (#{{ $cuenta->id }})</td></tr>
         <tr><td><strong>Estado:</strong></td><td class="derecha">{{ $cuenta->estado }}</td></tr>
-        <tr><td><strong>Atendido por:</strong></td><td class="derecha">{{ $usuario->nombre ?? '—' }}</td></tr>
+        <tr>
+            <td><strong>Mesero encargado:</strong></td>
+            <td class="derecha">
+                @if ($puedeEditarMesero ?? false)
+                    <select id="pf-mesero" style="padding:3px; border:1px solid #ddd; border-radius:3px;">
+                        <option value="">Pendiente de asignación</option>
+                        @foreach ($meserosSelect ?? [] as $m)
+                            <option value="{{ $m->id }}" @selected(isset($cuenta->mesero_responsable_id) && (int) $cuenta->mesero_responsable_id === (int) $m->id)>
+                                {{ $m->nombre }}
+                            </option>
+                        @endforeach
+                    </select>
+                    <button id="pf-mesero-guardar" type="button" style="margin-left:5px; padding:2px 8px;">Guardar</button>
+                @else
+                    {{ $meseroEncargado ?? 'Pendiente de asignación' }}
+                @endif
+            </td>
+        </tr>
+        <tr><td><strong>Abierta por:</strong></td><td class="derecha">{{ $abrioPor ?? 'No registrado' }}</td></tr>
     </table>
 
     <div class="linea"></div>
@@ -138,5 +156,29 @@
     </div>
 
     <button type="button" class="btn-imprimir" onclick="window.print()">Imprimir</button>
+    <script>
+        (function () {
+            const btn = document.getElementById('pf-mesero-guardar');
+            const select = document.getElementById('pf-mesero');
+            if (!btn || !select) return;
+            btn.addEventListener('click', async function () {
+                const meseroId = Number(select.value) || 0;
+                const formData = new FormData();
+                formData.append('_token', '{{ csrf_token() }}');
+                formData.append('mesero_id', meseroId > 0 ? String(meseroId) : '');
+                const respuesta = await fetch('{{ route('cuentas.mesero.asignar', ['cuentaId' => $cuenta->id]) }}', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: formData,
+                });
+                const cuerpo = await respuesta.json().catch(() => null);
+                if (respuesta.ok && cuerpo && cuerpo.exito) {
+                    window.location.reload();
+                } else {
+                    alert((cuerpo && cuerpo.error) ? cuerpo.error : 'No se pudo guardar el mesero.');
+                }
+            });
+        })();
+    </script>
 </body>
 </html>
