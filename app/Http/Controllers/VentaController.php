@@ -4649,6 +4649,173 @@ class VentaController extends Controller
     }
 
     /**
+     * Atribuye (o corrige) la propina de UNA cuenta cobrada a un MESERO
+     * real. Es el único mecanismo de atribución manual: NUNCA se atribuye
+     * automáticamente (ni al cajero, ni a quien abrió la mesa, ni a quien
+     * emitió la factura).
+     *
+     * REGLAS
+     * ------
+     *  - Solo cuentas PAGADAS con propina > 0. La mesa puede estar cerrada y
+     *    la factura emitida: la propina sigue pendiente hasta que alguien la
+     *    atribuya explícitamente.
+     *  - El mesero destino debe existir, estar activo y tener rol MESERO.
+     *  - Motivo OBLIGATORIO (auditoría).
+     *  - Auditoría SIEMPRE: usuario, fecha/hora, atribución anterior, nueva
+     *    atribución y motivo (tabla `auditoria_seguridad`).
+     *  - La propina se atribuye vía `cuentas.mesero_responsable_id`, la MISMA
+     *    fuente prioritaria que usa el resto del sistema (fracción de cobro,
+     *    resumen diario por mesero y Operaciones). No se toca
+     *    `ventas.mesero_responsable_id` (re-atribuiría silenciosamente TODAS
+     *    las cuentas de la venta) ni NADA fiscal: factura, consumo, pagos y
+     *    el importe de la propina quedan intactos.
+     *  - Antes del cierre de caja: ADMIN, GERENTE y CAJERO.
+     *  - Después del cierre de la apertura real (`cuentas.apertura_id`):
+     *    SOLO ADMIN/GERENTE pueden corregir (autorización), con motivo y
+     *    auditoría distinguida (`propina_correccion_postcierre`).
+     *  - Si ya estaba atribuida al mismo mesero: sin cambios y sin auditoría.
+     *  - La propina atribuida sale de «pendientes» y entra en el mesero: lo
+     *    leen tanto el reporte individual como Operaciones (recalculan del
+     *    mismo origen).
+     */
+    public function atribuirPropina(Request $request, int $cuentaId)
+    {
+        $usuario = Auth::user();
+
+        if (! $usuario) {
+            return response()->json(['exito' => false, 'error' => 'No autenticado.'], 401);
+        }
+
+        $rol = strtoupper((string) ($usuario->rol->nombre ?? ''));
+
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            return response()->json(['exito' => false, 'error' => 'No tienes permiso para atribuir propinas.'], 403);
+        }
+
+        $datos = $request->validate([
+            'mesero_id' => ['required', 'integer', 'min:1'],
+            'motivo' => ['required', 'string', 'min:3', 'max:500'],
+        ], [
+            'mesero_id.required' => 'Debes seleccionar el mesero que atendió la cuenta.',
+            'mesero_id.integer' => 'El mesero indicado no es válido.',
+            'motivo.required' => 'El motivo es obligatorio: indica por qué se atribuye la propina.',
+            'motivo.min' => 'El motivo debe tener al menos 3 caracteres.',
+            'motivo.max' => 'El motivo no puede superar 500 caracteres.',
+        ]);
+
+        $meseroId = (int) $datos['mesero_id'];
+        $motivo = trim((string) $datos['motivo']);
+
+        try {
+            $resultado = DB::transaction(function () use ($request, $cuentaId, $usuario, $rol, $meseroId, $motivo) {
+                // Bloqueo de la cuenta: dos atribuciones simultáneas no deben
+                // pisarse ni registrar una atribución anterior incorrecta.
+                $cuenta = DB::table('cuentas')->where('id', $cuentaId)->lockForUpdate()->first();
+
+                if (! $cuenta) {
+                    return ['status' => 404, 'payload' => ['exito' => false, 'error' => 'La cuenta no existe.']];
+                }
+
+                if (strtoupper((string) $cuenta->estado) !== 'PAGADA') {
+                    return ['status' => 422, 'payload' => ['exito' => false, 'error' => 'La cuenta no está cobrada: solo se atribuye la propina de cuentas PAGADAS.']];
+                }
+
+                $propina = round((float) ($cuenta->propina ?? 0), 2);
+
+                if ($propina <= 0.0) {
+                    return ['status' => 422, 'payload' => ['exito' => false, 'error' => 'La cuenta no tiene propina por atribuir.']];
+                }
+
+                // ¿La caja de la cuenta ya está cerrada? Se decide por la
+                // apertura REAL de la cuenta (`cuentas.apertura_id`), nunca
+                // por fechas. Si existe un cierre para esa apertura o la
+                // apertura ya no está ABIERTA, es post-cierre.
+                $aperturaId = $cuenta->apertura_id !== null ? (int) $cuenta->apertura_id : null;
+                $cerrada = false;
+
+                if ($aperturaId !== null) {
+                    if (Schema::hasTable('caja_cierre')) {
+                        $cerrada = DB::table('caja_cierre')->where('apertura_id', $aperturaId)->exists();
+                    }
+                    if (! $cerrada && Schema::hasTable('caja_apertura')) {
+                        $estadoApertura = (string) (DB::table('caja_apertura')->where('id', $aperturaId)->value('estado') ?? '');
+                        $cerrada = strtoupper($estadoApertura) !== 'ABIERTA';
+                    }
+                }
+
+                // POST-CIERRE: corrección histórica. Requiere autorización
+                // (ADMIN/GERENTE), motivo y auditoría. CAJERO ya no.
+                if ($cerrada && ! in_array($rol, ['ADMIN', 'GERENTE'], true)) {
+                    return ['status' => 403, 'payload' => ['exito' => false, 'error' => 'La caja de esta cuenta ya está cerrada: la corrección de propinas requiere autorización de ADMIN o GERENTE (con motivo obligatorio y auditoría).']];
+                }
+
+                $mesero = DB::table('usuarios')
+                    ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+                    ->where('usuarios.id', $meseroId)
+                    ->where('roles.nombre', 'MESERO')
+                    ->when(Schema::hasColumn('usuarios', 'activo'), fn ($q) => $q->where('usuarios.activo', 1))
+                    ->first();
+
+                if (! $mesero) {
+                    return ['status' => 422, 'payload' => ['exito' => false, 'error' => 'El mesero no existe, está inactivo o no tiene rol MESERO.']];
+                }
+
+                $actual = $cuenta->mesero_responsable_id !== null ? (int) $cuenta->mesero_responsable_id : null;
+
+                if ($actual === $meseroId) {
+                    return ['status' => 200, 'payload' => [
+                        'exito' => true,
+                        'mensaje' => 'La propina ya estaba atribuida a este mesero; no se registró ningún cambio.',
+                        'sin_cambios' => true,
+                        'mesero_id' => $meseroId,
+                    ]];
+                }
+
+                // Atribución: SOLO el responsable de la cuenta. Nada más.
+                DB::table('cuentas')->where('id', $cuenta->id)->update([
+                    'mesero_responsable_id' => $meseroId,
+                ]);
+
+                if (Schema::hasTable('auditoria_seguridad')) {
+                    DB::table('auditoria_seguridad')->insert([
+                        'usuario_id' => (int) $usuario->id,
+                        'evento' => $cerrada ? 'propina_correccion_postcierre' : 'propina_atribuida',
+                        'ip' => $request->ip(),
+                        'user_agent' => mb_substr((string) $request->userAgent(), 0, 255),
+                        'motivo' => $motivo,
+                        'detalles' => json_encode([
+                            'cuenta_id' => (int) $cuenta->id,
+                            'venta_id' => (int) $cuenta->venta_id,
+                            'apertura_id' => $aperturaId,
+                            'propina' => $propina,
+                            'mesero_anterior_id' => $actual,
+                            'mesero_nuevo_id' => $meseroId,
+                            'cierre_previo' => $cerrada,
+                        ], JSON_UNESCAPED_UNICODE),
+                        'creado_en' => now(),
+                    ]);
+                }
+
+                return ['status' => 200, 'payload' => [
+                    'exito' => true,
+                    'mensaje' => $cerrada
+                        ? 'Corrección post-cierre registrada con autorización y auditoría.'
+                        : 'Propina atribuida al mesero.',
+                    'mesero_id' => $meseroId,
+                    'mesero_nombre' => (string) $mesero->nombre,
+                    'correccion_postcierre' => $cerrada,
+                ]];
+            });
+        } catch (\Throwable $e) {
+            report($e);
+
+            return response()->json(['exito' => false, 'error' => 'No fue posible atribuir la propina.'], 500);
+        }
+
+        return response()->json($resultado['payload'], $resultado['status']);
+    }
+
+    /**
      * Snapshot del mesero responsable para una cuenta recién creada.
      * Devuelve array vacío si el esquema aún no tiene la columna o el
      * venta/identificador es desconocido (historial previo -> NULL).

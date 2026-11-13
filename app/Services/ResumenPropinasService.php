@@ -334,7 +334,11 @@ class ResumenPropinasService
                 $columnasUsuarios[] = 'usuarios.activo as activo';
             }
             foreach ($usuarios->get($columnasUsuarios) as $usuario) {
-                $nombres[(int) $usuario->id] = $usuario->nombre;
+                // Un nombre NULL o vacío NUNCA se muestra: se usa un texto
+                // honesto («Usuario no identificado»). El nombre se guarda
+                // saneado: sin espacios extremos y sin valor en blanco.
+                $nombreLimpio = trim((string) ($usuario->nombre ?? ''));
+                $nombres[(int) $usuario->id] = $nombreLimpio !== '' ? $nombreLimpio : 'Usuario no identificado';
                 $roles[(int) $usuario->id] = strtoupper((string) ($usuario->rol ?? ''));
                 $activos[(int) $usuario->id] = isset($usuario->activo) ? (int) $usuario->activo : 1;
             }
@@ -367,9 +371,20 @@ class ResumenPropinasService
             }
             $meseros = array_values(array_unique($meseros));
 
+            // Nombres de TODOS los meseros implicados (los que enviaron
+            // comandas Y el responsable explícito de la cuenta). El
+            // responsable puede no estar en comandas: sin este mapa completo,
+            // los desplegables/chips mostraban «Usuario #N» aunque el nombre
+            // existía. Si el usuario no tiene nombre (o ya no existe), se
+            // muestra «Usuario no identificado», nunca un ID inventado.
+            $meserosNombresCompletos = [];
+            foreach (\array_values(\array_unique(\array_merge($meseros, $meseroRespId !== null ? [$meseroRespId] : []))) as $idMeseroCompleto) {
+                $meserosNombresCompletos[$idMeseroCompleto] = $nombres[$idMeseroCompleto] ?? 'Usuario no identificado';
+            }
+
             $nombresPorMesero = [];
             foreach ($meseros as $idMesero) {
-                $nombresPorMesero[$idMesero] = $nombres[$idMesero] ?? ('Usuario #'.$idMesero);
+                $nombresPorMesero[$idMesero] = $meserosNombresCompletos[$idMesero];
             }
             $nombresAtendieron = array_values(array_unique(array_values($nombresPorMesero)));
 
@@ -404,9 +419,9 @@ class ResumenPropinasService
 
             $nombreAbre = $usuarioAbreId === null
                 ? null
-                : ($nombres[$usuarioAbreId] ?? (string) $usuarioAbreId);
+                : ($nombres[$usuarioAbreId] ?? 'Usuario no identificado');
             $nombreCobro = $cuenta->usuario_cobro
-                ? ($nombres[(int) $cuenta->usuario_cobro] ?? (string) $cuenta->usuario_cobro)
+                ? ($nombres[(int) $cuenta->usuario_cobro] ?? 'Usuario no identificado')
                 : null;
 
             return [
@@ -431,13 +446,13 @@ class ResumenPropinasService
                 // Participantes (para filtros): meseros que enviaron comandas
                 // más el responsable asignado explícitamente.
                 'meseros_ids' => \array_values(\array_unique(\array_merge($meseros, $meseroRespId !== null ? [$meseroRespId] : []))),
-                'meseros_nombres' => $nombresPorMesero,
+                'meseros_nombres' => $meserosNombresCompletos,
                 // Atribución de la propina (una sola vez por cuenta).
                 'atribucion' => $meseroAtribuidoId === null ? 'PENDIENTE' : 'ATRIBUIDA',
                 'mesero_atribuido_id' => $meseroAtribuidoId,
                 'mesero_atribuido' => $meseroAtribuidoId === null
                     ? null
-                    : ($nombres[$meseroAtribuidoId] ?? ('Usuario #'.$meseroAtribuidoId)),
+                    : ($nombres[$meseroAtribuidoId] ?? 'Usuario no identificado'),
                 'motivo_pendiente' => $motivoPendiente,
                 'usuario_abrio_mesa' => $nombreAbre,
                 'usuario_abrio_mesa_id' => $usuarioAbreId,
@@ -638,7 +653,7 @@ class ResumenPropinasService
 
         foreach ($detalle as $linea) {
             foreach ($linea['meseros_ids'] as $idMesero) {
-                $meseros[$idMesero] = $linea['meseros_nombres'][$idMesero] ?? ('Usuario #'.$idMesero);
+                $meseros[$idMesero] = $linea['meseros_nombres'][$idMesero] ?? 'Usuario no identificado';
             }
 
             if ($linea['usuario_abrio_mesa_id'] !== null) {
@@ -655,7 +670,7 @@ class ResumenPropinasService
 
             if ($linea['usuario_cobro_id'] !== null) {
                 $cobradores[$linea['usuario_cobro_id']] = $linea['usuario_cobro']
-                    ?? ('Usuario #'.$linea['usuario_cobro_id']);
+                    ?? 'Usuario no identificado';
             }
         }
 

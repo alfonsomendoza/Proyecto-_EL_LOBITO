@@ -136,6 +136,11 @@ document.addEventListener('DOMContentLoaded', function () {
                     </a>
                 </li>
                 <li>
+                    <a href="{{ route('reportes.propinas.pendientes') }}" class="{{ request()->routeIs('reportes.propinas.pendientes*') ? 'active' : '' }}">
+                        <i class="fas fa-hand-holding-dollar"></i> Atribuir propinas
+                    </a>
+                </li>
+                <li>
                     <a href="{{ route('caja.cierre') }}" class="{{ request()->routeIs('caja.cierre*') ? 'active' : '' }}">
                         <i class="fas fa-cash-register"></i> Cierre
                     </a>

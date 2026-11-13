@@ -171,7 +171,13 @@
                         <td>{{ $linea['numero_factura'] ?? '—' }}</td>
                         <td>{{ $linea['mesa_nombre'] ?: '—' }}</td>
                         <td>{{ $linea['cuenta_nombre'] }} #{{ $linea['cuenta_id'] }}</td>
-                        <td>{{ $linea['mesero_atendio'] ?? 'No disponible' }}</td>
+                        <td>
+                            @if ($linea['atribucion'] === 'ATRIBUIDA')
+                                {{ $linea['mesero_atribuido'] ?? 'Usuario no identificado' }}
+                            @else
+                                {{ $linea['mesero_atendio'] ?? 'Sin mesero inequívoco' }}
+                            @endif
+                        </td>
                         <td>{{ $linea['usuario_abre_mesa'] ?? 'No disponible' }}</td>
                         <td>{{ $linea['usuario_cobro'] ?? 'No disponible' }}</td>
                         <td>{{ $linea['turno'] ?? '—' }}</td>

@@ -147,6 +147,13 @@ Route::middleware(['auth', 'caja.abierta'])->group(function () {
     Route::get('/reportes/propinas/imprimir', [ResumenPropinasController::class, 'imprimir'])
         ->name('reportes.propinas.imprimir');
 
+    // Pendientes de atribución: vista mínima para atribuir UNA propina a su
+    // MESERO real. Acceso ADMIN, GERENTE y CAJERO (CAJERO no ve los totales
+    // ni el reporte financiero). El POST de atribución vive en
+    // `cuentas.propina.atribuir` y valida la caja/apertura en el backend.
+    Route::get('/reportes/propinas/pendientes', [ResumenPropinasController::class, 'pendientes'])
+        ->name('reportes.propinas.pendientes');
+
     // ------------------------------------------------------------------
     // HISTORIAL DE FACTURAS.
     // ADMIN y GERENTE listan, imprimen y anulan; CAJERO solo imprime.
@@ -237,6 +244,12 @@ Route::middleware(['auth', 'caja.abierta'])->group(function () {
     // queda registrada en `mesa_asignaciones` y `auditoria_seguridad`.
     Route::post('/cuentas/{cuentaId}/mesero', [VentaController::class, 'asignarMeseroCuenta'])
         ->name('cuentas.mesero.asignar');
+
+    // Atribuir la propina de una cuenta COBRADA a un MESERO real (nunca
+    // automático). Motivo obligatorio + auditoría. ADMIN, GERENTE y CAJERO
+    // antes del cierre de la caja; después del cierre, solo ADMIN/GERENTE.
+    Route::post('/cuentas/{cuentaId}/propina/atribuir', [VentaController::class, 'atribuirPropina'])
+        ->name('cuentas.propina.atribuir');
 
     // Crear una subcuenta vacía en la venta activa de la mesa.
     // Autorizan ADMIN, GERENTE, CAJERO y MESERO (solo CREAR).

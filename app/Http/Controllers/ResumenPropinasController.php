@@ -6,6 +6,8 @@ use App\Services\ResumenPropinasService;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Módulo "Administración" → Resumen de Propinas.
@@ -35,8 +37,11 @@ use Illuminate\Support\Facades\Auth;
  * los indicadores y los totales se calculan sobre el conjunto completo.
  *
  * Permisos (validados SIEMPRE en backend, no solo en Blade/JS):
- *  - ADMIN y GERENTE: consultar, exportar e imprimir.
- *  - CAJERO, MESERO y COCINERO: sin acceso (403 en las tres rutas).
+ *  - ADMIN y GERENTE: consultar, exportar, imprimir y atribuir propinas.
+ *  - CAJERO: solo la pantalla mínima «Pendientes de atribución»
+ *    (`reportes.propinas.pendientes`) y el POST de atribución
+ *    (`cuentas.propina.atribuir`); NO ve totales ni reporte financiero.
+ *  - MESERO y COCINERO: sin acceso (403).
  */
 class ResumenPropinasController extends Controller
 {
@@ -56,14 +61,31 @@ class ResumenPropinasController extends Controller
         $calculado = $this->calcular($request);
         $resumen = $calculado['resumen'];
 
-        return view('resumen_propinas.index', [
+        return view('resumen_propinas.index', array_merge([
             'desde' => $calculado['rango']['desde'],
             'hasta' => $calculado['rango']['hasta'],
             'filtros' => $calculado['filtros'],
             'resumen' => $resumen,
             'paginaDetalle' => $this->paginarDetalle($resumen, $request),
             'chips' => $this->chips($request, $calculado['rango'], $calculado['filtros'], $resumen['opciones'] ?? []),
-        ]);
+        ], $this->construirPanelPendientes($calculado['rango']['desde'], $calculado['rango']['hasta'], $calculado['filtros'])));
+    }
+
+    /* ------------------------------------------------------------------
+     | Pendientes de atribución (vista mínima)
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Apartado «Pendientes de atribución» en versión autónoma, pensado
+     * también para CAJERO (que NO ve el reporte financiero completo).
+     * Muestra las propinas cobradas sin mesero inequívoco y permite atribuir
+     * cada una al MESERO real, con motivo obligatorio y auditoría.
+     */
+    public function pendientes(Request $request)
+    {
+        $this->exigirAccesoPanelPendientes();
+
+        return view('resumen_propinas.pendientes', $this->construirPanelPendientes());
     }
 
     /* ------------------------------------------------------------------
@@ -295,11 +317,11 @@ class ResumenPropinasController extends Controller
         if ($filtros['mesero'] === ResumenPropinasService::SIN_ATRIBUIR) {
             $agregar('mesero', 'Mesero: pendiente de atribución');
         } elseif ($filtros['mesero'] !== null) {
-            $agregar('mesero', 'Mesero: '.($opciones['meseros'][$filtros['mesero']] ?? ('Usuario #'.$filtros['mesero'])));
+            $agregar('mesero', 'Mesero: '.($opciones['meseros'][$filtros['mesero']] ?? 'Usuario no identificado'));
         }
 
         if ($filtros['abrio'] !== null) {
-            $agregar('abrio', 'Abrió: '.($opciones['usuarios'][$filtros['abrio']] ?? ('Usuario #'.$filtros['abrio'])));
+            $agregar('abrio', 'Abrió: '.($opciones['usuarios'][$filtros['abrio']] ?? 'Usuario no identificado'));
         }
 
         if ($filtros['mesa'] !== null) {
@@ -311,7 +333,7 @@ class ResumenPropinasController extends Controller
         }
 
         if ($filtros['cobro'] !== null) {
-            $agregar('cobro', 'Cobró: '.($opciones['cobradores'][$filtros['cobro']] ?? ('Usuario #'.$filtros['cobro'])));
+            $agregar('cobro', 'Cobró: '.($opciones['cobradores'][$filtros['cobro']] ?? 'Usuario no identificado'));
         }
 
         return $chips;
@@ -438,5 +460,120 @@ class ResumenPropinasController extends Controller
         $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
 
         return in_array($rol, ['ADMIN', 'GERENTE'], true);
+    }
+
+    /* ------------------------------------------------------------------
+     | Pendientes de atribución (datos compartidos por pantalla e reporte)
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Autorización del panel de pendientes: ADMIN, GERENTE y CAJERO.
+     * CAJERO solo accede aquí (sin totales ni reporte financiero).
+     */
+    private function exigirAccesoPanelPendientes(): void
+    {
+        $rol = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        if (! in_array($rol, ['ADMIN', 'GERENTE', 'CAJERO'], true)) {
+            abort(403, 'No tienes permiso para atribuir propinas.');
+        }
+    }
+
+    /**
+     * Construye los datos del apartado «Pendientes de atribución».
+     *
+     * Fuentes:
+     *  - Pendientes = propinas de cuentas PAGADAS con factura EMITIDA que el
+     *    motor de atribución considera PENDIENTE (ni responsable asignado ni
+     *    UN ÚNICO mesero en comandas). Dentro del reporte se usa EL MISMO
+     *    período y los mismos filtros de la página (un solo cálculo). En la
+     *    pantalla autónoma (`reportes.propinas.pendientes`) se listan
+     *    TODOS los pendientes, sin importar fecha ni filtros.
+     *  - La caja de cada propina es `cuentas.apertura_id`; se marca
+     *    `cierre_previo` cuando la apertura YA tiene cierre registrado o no
+     *    está ABIERTA. Eso decide si basta CAJERO (antes del cierre) o si se
+     *    exige ADMIN/GERENTE (corrección post-cierre).
+     *  - Los meseros seleccionables son usuarios activos con rol MESERO.
+     *
+     * @param  array{mesero?: int|string|null, abrio?: int|null, mesa?: int|null, apertura?: int|null, cobro?: int|null}  $filtros
+     */
+    private function construirPanelPendientes(?string $desde = null, ?string $hasta = null, array $filtros = []): array
+    {
+        $this->exigirAccesoPanelPendientes();
+
+        if ($desde !== null && $hasta !== null) {
+            $resumen = $this->service->resumenDelRango($desde, $hasta, $filtros);
+            $todas = collect($resumen['detalle'] ?? [])
+                ->where('atribucion', 'PENDIENTE');
+        } else {
+            $resumen = $this->service->resumenDelRango('2000-01-01', '2100-12-31', [
+                'mesero' => ResumenPropinasService::SIN_ATRIBUIR,
+            ]);
+            $todas = collect($resumen['detalle'] ?? []);
+        }
+
+        $pendientes = $todas
+            ->sortByDesc('fecha')
+            ->values()
+            ->all();
+
+        // Estado de cierre por apertura (solo informativo para la UI; el
+        // backend vuelve a validarlo al atribuir).
+        $aperturaIds = collect($pendientes)
+            ->pluck('apertura_id')
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        $cierres = [];
+        if (Schema::hasTable('caja_cierre') && $aperturaIds !== []) {
+            $cierres = DB::table('caja_cierre')
+                ->whereIn('apertura_id', $aperturaIds)
+                ->pluck('apertura_id')
+                ->all();
+        }
+
+        $estadosApertura = [];
+        if (Schema::hasTable('caja_apertura') && $aperturaIds !== []) {
+            $estadosApertura = DB::table('caja_apertura')
+                ->whereIn('id', $aperturaIds)
+                ->pluck('estado', 'id')
+                ->all();
+        }
+
+        $pendientes = array_map(function (array $linea) use ($cierres, $estadosApertura) {
+            $aperturaId = $linea['apertura_id'] ?? null;
+            $linea['cierre_previo'] = $aperturaId !== null && (
+                in_array((int) $aperturaId, array_map('intval', $cierres), true)
+                || strtoupper((string) ($estadosApertura[$aperturaId] ?? '')) !== 'ABIERTA'
+            );
+
+            return $linea;
+        }, $pendientes);
+
+        $meseros = collect();
+        if (Schema::hasTable('usuarios') && Schema::hasTable('roles')) {
+            $query = DB::table('usuarios')
+                ->join('roles', 'roles.id', '=', 'usuarios.rol_id')
+                ->where('roles.nombre', 'MESERO');
+
+            if (Schema::hasColumn('usuarios', 'activo')) {
+                $query->where('usuarios.activo', 1);
+            }
+
+            $meseros = $query
+                ->orderBy('usuarios.nombre')
+                ->get(['usuarios.id', 'usuarios.nombre']);
+        }
+
+        $rolPanel = strtoupper((string) (Auth::user()?->rol?->nombre ?? ''));
+
+        return [
+            'pendientes' => $pendientes,
+            'meserosAtribucion' => $meseros,
+            'rolPanel' => $rolPanel,
+            'puedeCorregir' => in_array($rolPanel, ['ADMIN', 'GERENTE'], true),
+        ];
     }
 }

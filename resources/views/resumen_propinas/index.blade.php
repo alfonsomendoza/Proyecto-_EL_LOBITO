@@ -252,6 +252,14 @@
                 @endif
             </div>
 
+            {{-- Pendientes de atribución: atribuir una propina cobrada al mesero real. --}}
+            @include('resumen_propinas._pendientes', [
+                'pendientes' => $pendientes ?? [],
+                'meserosAtribucion' => $meserosAtribucion ?? collect(),
+                'rolPanel' => $rolPanel ?? (strtoupper((string) (auth()->user()?->rol?->nombre ?? ''))),
+                'puedeCorregir' => $puedeCorregir ?? in_array(strtoupper((string) (auth()->user()?->rol?->nombre ?? '')), ['ADMIN', 'GERENTE'], true),
+            ])
+
             {{-- Detalle por cuenta/factura (paginado: no afecta los totales). --}}
             <div style="border:1px solid #e3e6f0; border-radius:8px; overflow:hidden;">
                 <div style="padding:12px 16px; background:#34495e; color:#fff; font-weight:600; font-size:14px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;">
@@ -303,7 +311,16 @@
                                         {{ $linea['cuenta_nombre'] }}
                                         <span style="color:#8a94a6; font-size:11px;">#{{ $linea['cuenta_id'] }}</span>
                                     </td>
-                                    <td style="padding:10px 12px;">{{ $linea['mesero_atendio'] ?? 'No disponible' }}</td>
+                                    <td style="padding:10px 12px;">
+                                        @if ($linea['atribucion'] === 'ATRIBUIDA')
+                                            {{ $linea['mesero_atribuido'] ?? 'Usuario no identificado' }}
+                                            @if (! empty($linea['mesero_atendio']) && $linea['mesero_atendio'] !== ($linea['mesero_atribuido'] ?? null))
+                                                <div style="font-size:10px; color:#8a94a6;">atendió (comandas): {{ $linea['mesero_atendio'] }}</div>
+                                            @endif
+                                        @else
+                                            {{ $linea['mesero_atendio'] ?? 'Sin mesero inequívoco' }}
+                                        @endif
+                                    </td>
                                     <td style="padding:10px 12px;">{{ $linea['usuario_abre_mesa'] ?? 'No disponible' }}</td>
                                     <td style="padding:10px 12px;">{{ $linea['usuario_cobro'] ?? 'No disponible' }}</td>
                                     <td style="padding:10px 12px;">{{ $linea['turno'] ?? '—' }}</td>
