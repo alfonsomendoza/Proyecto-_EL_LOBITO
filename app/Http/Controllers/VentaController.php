@@ -46,6 +46,79 @@ class VentaController extends Controller
     }
 
     /**
+     * Etiqueta legible del estado de preparación (solo para mostrar; el
+     * valor real se guarda en inglés: PENDIENTE/EN_PREPARACION/LISTO).
+     */
+    private function etiquetaPreparacion(?string $estado): string
+    {
+        return match (strtoupper((string) $estado)) {
+            'PENDIENTE' => 'Pendiente',
+            'EN_PREPARACION' => 'En preparación',
+            'LISTO' => 'Terminado',
+            default => (string) $estado,
+        };
+    }
+
+    /**
+     * Líneas de cocina que AÚN NO están TERMINADAS para una cuenta.
+     *
+     * REGLA DE COBRO: no se puede cobrar una cuenta mientras exista un
+     * producto válido de sus comandas que Cocina no haya marcado como
+     * TERMINADO. Se considera producto válido de cocina la línea que:
+     *   - pertenece a la cuenta (`cuenta_detalles`, no eliminada, cantidad > 0);
+     *   - su línea de consumo está activa (`venta_detalles.estado = ACTIVO`);
+     *   - el producto requiere cocina (`productos.requiere_cocina = 1`);
+     *   - tiene seguimiento de cocina (`estado_preparacion` NOT NULL: barra,
+     *     históricos y productos sin preparación no bloquean);
+     *   - la preparación no está completa (`estado_preparacion != LISTO`);
+     *   - su comanda sigue vigente (ANULADA/CANCELADA no bloquean; una línea
+     *     trasladada entero a otra cuenta tampoco cuenta para la cuenta origen).
+     *
+     * No cuenta como "cocina terminada" ningún otro estado que no sea LISTO:
+     * pendiente o en preparación bloquea. Los productos anulados (línea ya no
+     * ACTIVA) o eliminados (`cuenta_detalles.eliminado = 1`) no bloquean.
+     *
+     * Con $bloquear = true se hace lockForUpdate() sobre las filas: es el
+     * uso dentro de la transacción del cobro, para evitar que una
+     * modificación concurrente de Cocina permita cobrar indebidamente.
+     *
+     * @return \Illuminate\Support\Collection<int, object>
+     */
+    private function lineasCocinaPendientes(int $cuentaId, bool $bloquear = false): \Illuminate\Support\Collection
+    {
+        $consulta = DB::table('cuenta_detalles as cd')
+            ->join('venta_detalles as vd', 'vd.id', '=', 'cd.venta_detalle_id')
+            ->join('productos as p', 'p.id', '=', 'vd.producto_id')
+            ->leftJoin('comandas as c', 'c.id', '=', 'vd.comanda_id')
+            ->where('cd.cuenta_id', $cuentaId)
+            ->where('cd.eliminado', false)
+            ->where('cd.cantidad', '>', 0)
+            ->where('vd.estado', 'ACTIVO')
+            ->where('vd.cantidad', '>', 0)
+            ->where('p.requiere_cocina', 1)
+            ->whereNotNull('vd.estado_preparacion')
+            ->where('vd.estado_preparacion', '<>', 'LISTO')
+            ->where(function ($q) {
+                $q->whereNull('vd.comanda_id')
+                    ->orWhereNotIn('c.estado', ['ANULADA', 'CANCELADA']);
+            })
+            ->select(
+                'vd.id as venta_detalle_id',
+                DB::raw('cd.cantidad as cantidad'),
+                'vd.estado_preparacion',
+                'p.nombre as producto',
+                'c.numero_ticket as comanda'
+            )
+            ->orderBy('vd.id');
+
+        if ($bloquear) {
+            $consulta->lockForUpdate();
+        }
+
+        return $consulta->get();
+    }
+
+    /**
      * Métodos de pago del cobro (formato de líneas múltiples `pagos[]`).
      * El banco NO es un método: es un dato extra de las líneas con tarjeta.
      */
@@ -931,6 +1004,33 @@ class VentaController extends Controller
 
 
             // ----------------------------------------------------
+            // 12b. AVISO DE COCINA POR CUENTA (solo lectura)
+            // ----------------------------------------------------
+            // El cobro se bloquea en el backend dentro de pagarCuenta; aquí
+            // se arma el mapa cuenta_id => líneas de cocina pendientes (para
+            // que el POS deshabilite y avise en el modal de cobro). Las
+            // cuentas PAGADAS no se listan: ya no se cobran.
+            $cocinaPendientesPorCuenta = [];
+            foreach ($cuentas as $cuentaAbierta) {
+                if ((string) $cuentaAbierta->estado !== 'ABIERTA') {
+                    continue;
+                }
+                $lineasPend = $this->lineasCocinaPendientes((int) $cuentaAbierta->id);
+                if ($lineasPend->isNotEmpty()) {
+                    $cocinaPendientesPorCuenta[(int) $cuentaAbierta->id] = $lineasPend
+                        ->map(fn ($linea) => [
+                            'producto' => (string) $linea->producto,
+                            'cantidad' => (int) $linea->cantidad,
+                            'estado' => (string) $linea->estado_preparacion,
+                            'etiqueta' => $this->etiquetaPreparacion($linea->estado_preparacion),
+                            'comanda' => $linea->comanda !== null ? (int) $linea->comanda : null,
+                        ])
+                        ->values()
+                        ->all();
+                }
+            }
+
+            // ----------------------------------------------------
             // 13. ENVIAR INFORMACIÓN AL BLADE
             // ----------------------------------------------------
 
@@ -981,6 +1081,11 @@ class VentaController extends Controller
 
                 // Total.
                 'total' => $total,
+
+                // Productos de cocina que bloquean el cobro, por cuenta ABIERTA
+                // (mapa cuenta_id => lista). El POS deshabilita el botón y lo
+                // avisa; el backend vuelve a validar en pagarCuenta.
+                'cocinaPendientesPorCuenta' => $cocinaPendientesPorCuenta,
 
                 // Fiscal.
                 'ivaHabilitado' => $configFiscal->ivaHabilitado(),
@@ -3976,6 +4081,40 @@ class VentaController extends Controller
                 if (!$cuenta || $cuenta->estado !== 'ABIERTA') throw new \RuntimeException('La cuenta no está disponible para cobro (ya fue pagada o cancelada).');
 
                 // ----------------------------------------------------
+                // COCINA: no se puede cobrar hasta que todo esté
+                // TERMINADO. SIN excepción para ADMIN/GERENTE.
+                // ----------------------------------------------------
+                // Se repite AQUÍ, dentro de la transacción y con bloqueo
+                // de filas, para que una modificación simultánea de Cocina
+                // no permita cobrar indebidamente (p. ej. cocina marcando
+                // LISTO en el instante del cobro). Si Cocina confirma LISTO
+                // antes de tomar el lock, el cobro procede; si el cobro
+                // llega primero, ve el estado real y bloquea. No hay forma
+                // de "saltarse" esta validación desde el navegador, ni con
+                // roles altos: la regla no admite excepciones por defecto
+                // (cualquier excepción operativa requiere autorización del
+                // negocio, no se implementa por iniciativa propia).
+                $pendientesCocina = $this->lineasCocinaPendientes($cuentaId, true);
+                if ($pendientesCocina->isNotEmpty()) {
+                    $productosPendientes = $pendientesCocina->map(fn ($linea) => [
+                        'producto' => (string) $linea->producto,
+                        'cantidad' => (int) $linea->cantidad,
+                        'estado' => (string) $linea->estado_preparacion,
+                        'etiqueta' => $this->etiquetaPreparacion($linea->estado_preparacion),
+                        'comanda' => $linea->comanda !== null ? (int) $linea->comanda : null,
+                    ])->all();
+                    $detallePendiente = collect($productosPendientes)
+                        ->map(fn (array $p) => $p['cantidad'].'× '.$p['producto'].' ('.$p['etiqueta'].')')
+                        ->implode(', ');
+                    throw new \App\Exceptions\CocinaPendienteException(
+                        'No se puede cobrar: Cocina aún no ha marcado como TERMINADO — '
+                            .$detallePendiente
+                            .'. El cobro se habilita cuando todos los productos de cocina estén TERMINADOS.',
+                        $productosPendientes
+                    );
+                }
+
+                // ----------------------------------------------------
                 // TOTALES: consumo -> descuento -> base -> propina -> total
                 // ----------------------------------------------------
                 $consumo = (float) DB::table('cuenta_detalles')->where('cuenta_id', $cuentaId)->where('eliminado', false)->sum('subtotal');
@@ -4365,6 +4504,13 @@ class VentaController extends Controller
                 ];
             });
             return response()->json(['exito' => true, 'mensaje' => $resultado['mesa_liberada'] ? 'Todas las cuentas fueron pagadas. Mesa liberada.' : 'Cuenta pagada. La mesa sigue abierta.', ...$resultado]);
+        } catch (\App\Exceptions\CocinaPendienteException $e) {
+            // Cocina pendiente: 422 + detalle de productos para el cajero.
+            return response()->json([
+                'exito' => false,
+                'error' => $e->getMessage(),
+                'productos_pendientes' => $e->productosPendientes,
+            ], 422);
         } catch (\Throwable $e) {
             return response()->json(['exito' => false, 'error' => $e->getMessage()], 422);
         }

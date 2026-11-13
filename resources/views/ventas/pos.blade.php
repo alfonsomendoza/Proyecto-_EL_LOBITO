@@ -1317,6 +1317,44 @@
     const ROL_USUARIO = '{{ $rolPos }}';
     const PUEDE_EXCEPCION_FISCAL = ROL_USUARIO === 'ADMIN' || ROL_USUARIO === 'GERENTE';
 
+    // Productos de cocina que bloquean el cobro, por cuenta ABIERTA
+    // (mapa cuenta_id => [{producto, cantidad, estado, etiqueta, comanda}]).
+    // El backend vuelve a validarlo dentro de la transacción del cobro.
+    const COCINA_PENDIENTES = @json($cocinaPendientesPorCuenta ?? []);
+
+    // ¿La cuenta indicada aún tiene productos de cocina sin TERMINAR?
+    function cocinaPendienteDe(cuentaId) {
+        const clave = String(cuentaId);
+        const lista = (COCINA_PENDIENTES || {})[clave];
+        return Array.isArray(lista) ? lista : [];
+    }
+
+    // Texto corto y legible de la lista de pendientes (para avisos y mensajes).
+    function cocinaPendienteTexto(pendientes) {
+        return pendientes.map(p => `${p.cantidad}× ${p.producto} (${p.etiqueta || p.estado})`).join(', ');
+    }
+
+    // Aviso en el modal "Cobrar cuenta": pinta la lista de productos de cocina
+    // que bloquean el cobro de la cuenta seleccionada. Devuelve true si se
+    // puede cobrar. La autorización real la hace el servidor en pagarCuenta.
+    function renderAvisoCocina() {
+        const caja = document.getElementById('aviso-cocina');
+        const sel = document.getElementById('cuenta-cobro');
+        if (!caja || !sel) { return true; }
+        const pendientes = cocinaPendienteDe(sel.value);
+        if (pendientes.length === 0) {
+            caja.style.display = 'none';
+            caja.innerHTML = '';
+            return true;
+        }
+        const items = pendientes.map(p => '<li>' + escaparHtml(p.cantidad) + '× ' + escaparHtml(p.producto) + ' — <strong>' + escaparHtml(p.etiqueta || p.estado) + '</strong></li>').join('');
+        caja.innerHTML = '<strong><i class="fas fa-kitchen-set"></i> Cocina aún no ha marcado como TERMINADO:</strong>'
+            + '<ul style="margin:6px 0 0 18px; padding:0;">' + items + '</ul>'
+            + '<div style="margin-top:4px;">El cobro se habilita cuando todos los productos de cocina estén TERMINADOS (LISTO).</div>';
+        caja.style.display = 'block';
+        return false;
+    }
+
     // Estado activo por concepto (inicia desde la configuración global;
     // ADMIN/GERENTE puede cambiarlo por excepción por factura).
     let descuentoActivo = DESCUENTO_FISCAL_HABILITADO;
@@ -3216,6 +3254,7 @@
                     width: 560,
                     html: `
                         <select id="cuenta-cobro" class="swal2-select">${opciones}</select>
+                        <div id="aviso-cocina" role="alert" style="display:none; border:1px solid #f0b4bd; background:#fdf0ef; color:#a8232d; border-radius:6px; padding:8px 10px; font-size:12px; margin:6px 0 0; text-align:left;"></div>
                         <div id="resumen-cobro" style="font-size:13px;color:#333;margin:6px 0;"></div>
                         ${htmlAjustes}
                         ${htmlFiscales}
@@ -3536,9 +3575,13 @@
                         ['cuenta-cobro', 'motivo-cobro'].forEach(function (id) {
                             const campo = document.getElementById(id);
                             if (!campo) { return; }
+                            const avisar = (id === 'cuenta-cobro') ? renderAvisoCocina : function () {};
                             campo.addEventListener('input', pintarCobro);
+                            campo.addEventListener('input', avisar);
                             campo.addEventListener('change', pintarCobro);
+                            campo.addEventListener('change', avisar);
                         });
+                        renderAvisoCocina();
 
                         if (PUEDE_AJUSTAR_COBRO) {
                             const btnSugerir = document.getElementById('propina-sugerir');
@@ -3646,6 +3689,17 @@
                         pintarCobro();
                     },
                     preConfirm: () => {
+                        // Regla de negocio (backend la repite dentro de la transacción):
+                        // no se puede cobrar mientras cocina no marque TERMINADO.
+                        const cuentaSel = document.getElementById('cuenta-cobro');
+                        if (cuentaSel) {
+                            const pendientes = cocinaPendienteDe(cuentaSel.value);
+                            if (pendientes.length > 0) {
+                                renderAvisoCocina();
+                                return Swal.showValidationMessage('Cocina aún no ha marcado como TERMINADO: ' + cocinaPendienteTexto(pendientes) + '. El cobro se habilita cuando todos los productos de cocina estén TERMINADOS.');
+                            }
+                        }
+
                         const t = leerTotales();
 
                         if (lineasPago.length === 0) {
@@ -3785,7 +3839,22 @@
                     fetch('/pos/cuentas/' + cobro.cuentaId + '/pagar', { method: 'POST', body: form })
                         .then(response => response.json())
                         .then(respuesta => {
-                            if (!respuesta.exito) throw new Error(respuesta.error || 'No se pudo cobrar.');
+                            if (!respuesta.exito) {
+                                // El servidor bloqueó por cocina: se muestran los
+                                // productos y sus estados para el cajero.
+                                if (Array.isArray(respuesta.productos_pendientes) && respuesta.productos_pendientes.length > 0) {
+                                    const lista = respuesta.productos_pendientes
+                                        .map(p => '<li>' + escaparHtml(p.cantidad) + '× ' + escaparHtml(p.producto) + ' — <strong>' + escaparHtml(p.etiqueta || p.estado) + '</strong></li>')
+                                        .join('');
+                                    Swal.fire({
+                                        title: 'No se puede cobrar',
+                                        icon: 'warning',
+                                        html: '<div style="text-align:left; font-size:13px;">Cocina aún no ha marcado como TERMINADO:<ul style="margin:8px 0 0 18px; padding:0;">' + lista + '</ul></div>',
+                                    });
+                                    return;
+                                }
+                                throw new Error(respuesta.error || 'No se pudo cobrar.');
+                            }
 
                             const totales = respuesta.totales || {};
                             let texto = respuesta.mensaje;
