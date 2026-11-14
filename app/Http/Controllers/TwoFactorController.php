@@ -4,10 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Helpers\QrCode;
 use App\Services\AuditService;
+use App\Services\IntentoAccesoService;
 use App\Services\TwoFactorPolicyService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 
 class TwoFactorController extends Controller
@@ -18,11 +20,26 @@ class TwoFactorController extends Controller
 
     protected TwoFactorPolicyService $twoFactorPolicy;
 
-    public function __construct(TwoFactorService $twoFactorService, AuditService $auditService, TwoFactorPolicyService $twoFactorPolicy)
+    protected IntentoAccesoService $intentoAcceso;
+
+    public function __construct(TwoFactorService $twoFactorService, AuditService $auditService, TwoFactorPolicyService $twoFactorPolicy, ?IntentoAccesoService $intentoAcceso = null)
     {
         $this->twoFactorService = $twoFactorService;
         $this->auditService = $auditService;
         $this->twoFactorPolicy = $twoFactorPolicy;
+        $this->intentoAcceso = $intentoAcceso ?? app(IntentoAccesoService::class);
+    }
+
+    /**
+     * Cierra la sesión mediante el logout oficial (libera sesión única,
+     * audita, Auth::logout, invalida y regenera CSRF) y redirige al login
+     * con el mensaje correspondiente al motivo.
+     */
+    private function cerrarSesionConLogoutOficial(Request $request, string $motivo)
+    {
+        $request->merge(['motivo' => $motivo]);
+
+        return app(AuthController::class)->logout($request);
     }
 
     public function setup()
@@ -90,6 +107,22 @@ class TwoFactorController extends Controller
         ]);
 
         $user = Auth::user();
+
+        // La expiración manda sobre cualquier código, incluso uno válido.
+        if ($this->twoFactorService->desafioExpirado($request->session())) {
+            return $this->cerrarSesionConLogoutOficial($request, '2fa_tiempo_expirado');
+        }
+
+        // Bloqueo por agotar los intentos 2FA.
+        if ($this->intentoAcceso->segundosBloqueoDosFactores((int) $user->id, $request->ip()) > 0) {
+            return $this->cerrarSesionConLogoutOficial($request, '2fa_limite_intentos');
+        }
+
+        // Un usuario ya enrolado debe pasar por el desafío, no por el setup.
+        if (method_exists($user, 'hasTwoFactorEnabled') && $user->hasTwoFactorEnabled()) {
+            return redirect()->route('2fa.challenge');
+        }
+
         $claveIntentos = $this->twoFactorService->claveIntentos($user->id, $request->ip());
 
         if ($this->twoFactorService->bloqueado($claveIntentos)) {
@@ -173,6 +206,21 @@ class TwoFactorController extends Controller
             if ($this->twoFactorService->sesionVerificada($request->session(), $user)) {
                 return redirect()->route('inicio');
             }
+
+            // Bloqueo por agotar los intentos 2FA: no se permite seguir el
+            // desafío ni siquiera abrirlo hasta que termine el plazo.
+            if ($this->intentoAcceso->segundosBloqueoDosFactores((int) $user->id, $request->ip()) > 0) {
+                return $this->cerrarSesionConLogoutOficial($request, '2fa_limite_intentos');
+            }
+
+            // Marca de inicio del servidor. Recargar la página NO reinicia el
+            // temporizador; la expiración se comprueba en cada petición.
+            $this->twoFactorService->iniciarDesafio($request->session());
+
+            if ($this->twoFactorService->desafioExpirado($request->session())) {
+                return $this->cerrarSesionConLogoutOficial($request, '2fa_tiempo_expirado');
+            }
+
             if (view()->exists('auth.2fa.challenge')) {
                 return view('auth.2fa.challenge');
             }
@@ -195,15 +243,24 @@ class TwoFactorController extends Controller
         ]);
 
         $user = Auth::user();
-        $claveIntentos = $this->twoFactorService->claveIntentos($user->id, $request->ip());
         $claveRecuperacion = '2fa-recuperacion:'.$user->id.':'.($request->ip() ?: 'sin-ip');
+
+        // La expiración manda sobre cualquier código, incluso uno correcto.
+        if ($this->twoFactorService->desafioExpirado($request->session())) {
+            return $this->cerrarSesionConLogoutOficial($request, '2fa_tiempo_expirado');
+        }
+
+        // Bloqueo por agotar los intentos 2FA: no se acepta ningún código.
+        if ($this->intentoAcceso->segundosBloqueoDosFactores((int) $user->id, $request->ip()) > 0) {
+            return $this->cerrarSesionConLogoutOficial($request, '2fa_limite_intentos');
+        }
 
         // Los códigos de recuperación son de un solo uso y NO deben quedar
         // bloqueados por los intentos fallidos del TOTP (ni viceversa).
         // Se intentan PRIMERO, con su propio limitador.
         try {
-            if (\Illuminate\Support\Facades\RateLimiter::tooManyAttempts($claveRecuperacion, 5)) {
-                $segundos = \Illuminate\Support\Facades\RateLimiter::availableIn($claveRecuperacion);
+            if (RateLimiter::tooManyAttempts($claveRecuperacion, 5)) {
+                $segundos = RateLimiter::availableIn($claveRecuperacion);
 
                 return back()->withErrors([
                     'code' => "Demasiados intentos fallidos. Intenta de nuevo en {$segundos} segundos.",
@@ -214,11 +271,12 @@ class TwoFactorController extends Controller
         }
 
         if ($this->twoFactorService->consumirCodigoRecuperacion($user, $request->code)) {
-            $this->twoFactorService->limpiarIntentos($claveIntentos);
+            $this->intentoAcceso->limpiarDosFactores((int) $user->id, $request->ip());
             try {
-                \Illuminate\Support\Facades\RateLimiter::clear($claveRecuperacion);
+                RateLimiter::clear($claveRecuperacion);
             } catch (\Throwable $e) {
             }
+            $this->twoFactorService->limpiarDesafio($request->session());
             $this->twoFactorService->marcarSesionVerificada($request->session(), $user);
             try {
                 $this->auditService->log('2fa_codigo_recuperacion_usado', $user->id);
@@ -226,15 +284,6 @@ class TwoFactorController extends Controller
             }
 
             return redirect()->intended(route('inicio'));
-        }
-
-        // Bloqueo propio del TOTP (no afecta a los códigos de recuperación).
-        if ($this->twoFactorService->bloqueado($claveIntentos)) {
-            $segundos = $this->twoFactorService->segundosBloqueo($claveIntentos);
-
-            return back()->withErrors([
-                'code' => "Demasiados intentos fallidos. Intenta de nuevo en {$segundos} segundos.",
-            ]);
         }
 
         // TOTP: además de verificar la ventana ±1, se impide reutilizar un
@@ -245,7 +294,8 @@ class TwoFactorController extends Controller
             && ctype_digit($request->code)
         ) {
             if ($this->twoFactorService->verifyCodeParaUsuario($user, $request->code)) {
-                $this->twoFactorService->limpiarIntentos($claveIntentos);
+                $this->intentoAcceso->limpiarDosFactores((int) $user->id, $request->ip());
+                $this->twoFactorService->limpiarDesafio($request->session());
                 $this->twoFactorService->marcarSesionVerificada($request->session(), $user);
                 try {
                     $this->auditService->log('2fa_validacion_exitosa', $user->id);
@@ -256,11 +306,26 @@ class TwoFactorController extends Controller
             }
         }
 
-        $this->twoFactorService->registrarIntentoFallido($claveIntentos);
+        // Cualquier código incorrecto (TOTP o recuperación) suma para el
+        // bloqueo del desafío. Al tercer error se cierra la sesión con el
+        // logout oficial y se bloquean 30 segundos.
+        $resultado = $this->intentoAcceso->registrarFalloDosFactores((int) $user->id, $request->ip());
 
         try {
-            \Illuminate\Support\Facades\RateLimiter::hit($claveRecuperacion, 300);
+            RateLimiter::hit($claveRecuperacion, 300);
         } catch (\Throwable $e) {
+        }
+
+        if ($resultado['bloqueado']) {
+            // Bloqueo de nuevos intentos de autenticación durante 30 segundos.
+            $this->intentoAcceso->bloquearLogin((string) $user->username, $request->ip(), 30);
+
+            try {
+                $this->auditService->log('2fa_limite_alcanzado', $user->id, 'Tercer intento de verificación 2FA incorrecto');
+            } catch (\Throwable $e) {
+            }
+
+            return $this->cerrarSesionConLogoutOficial($request, '2fa_limite_intentos');
         }
 
         try {

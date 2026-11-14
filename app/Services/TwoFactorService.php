@@ -23,6 +23,15 @@ class TwoFactorService
     public const CLAVE_SESION = 'two_factor_verificado';
 
     /**
+     * Marca temporal (timestamp de servidor) de inicio del desafío 2FA.
+     * No depende de JavaScript ni del cliente.
+     */
+    public const CLAVE_DESAFIO_INICIO = 'two_factor_desafio_inicio';
+
+    /** Segundos máximos para completar el desafío 2FA. */
+    public const SEGUNDOS_DESAFIO = 60;
+
+    /**
      * Huella que liga la verificación a la política vigente y al estado 2FA
      * del usuario. Sin ella, una sesión abierta antes de activar OBLIGATORIO
      * (o antes de un restablecimiento) seguiría contando como verificada.
@@ -219,6 +228,53 @@ class TwoFactorService
     public function limpiarSesionVerificada(Session $session): void
     {
         $session->forget([self::CLAVE_SESION, self::CLAVE_SELLO]);
+    }
+
+    /* ------------------------------------------------------------------
+     | Inicio y expiración del desafío 2FA (60 segundos)
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Registra la marca de inicio del desafío. El temporizador es del
+     * servidor: recargar la pantalla o enviar códigos no lo reinicia.
+     *
+     * @param  bool  $reiniciar  True solo al llegar desde el login.
+     */
+    public function iniciarDesafio(Session $session, bool $reiniciar = false): void
+    {
+        $inicio = $session->get(self::CLAVE_DESAFIO_INICIO);
+
+        if ($reiniciar || ! is_numeric($inicio) || (int) $inicio <= 0) {
+            $session->put(self::CLAVE_DESAFIO_INICIO, now()->getTimestamp());
+        }
+    }
+
+    public function limpiarDesafio(Session $session): void
+    {
+        $session->forget(self::CLAVE_DESAFIO_INICIO);
+    }
+
+    public function desafioExpirado(Session $session): bool
+    {
+        $inicio = $session->get(self::CLAVE_DESAFIO_INICIO);
+
+        // Sin marca no se crea un bucle de cierre: el challenge la escribe.
+        if (! is_numeric($inicio) || (int) $inicio <= 0) {
+            return false;
+        }
+
+        return now()->getTimestamp() - (int) $inicio >= self::SEGUNDOS_DESAFIO;
+    }
+
+    public function segundosRestantesDesafio(Session $session): int
+    {
+        $inicio = $session->get(self::CLAVE_DESAFIO_INICIO);
+
+        if (! is_numeric($inicio) || (int) $inicio <= 0) {
+            return self::SEGUNDOS_DESAFIO;
+        }
+
+        return max(0, self::SEGUNDOS_DESAFIO - (now()->getTimestamp() - (int) $inicio));
     }
 
     /**

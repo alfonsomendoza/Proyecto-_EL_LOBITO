@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Codigo2FAAdministrado;
 use App\Services\AuditService;
+use App\Services\IntentoAccesoService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -13,19 +14,39 @@ use Illuminate\Support\Facades\RateLimiter;
 class VerificarCodigo2FAController extends Controller
 {
     protected AuditService $auditService;
+
     protected TwoFactorService $twoFactorService;
 
-    public function __construct(AuditService $auditService, TwoFactorService $twoFactorService)
+    protected IntentoAccesoService $intentoAcceso;
+
+    public function __construct(AuditService $auditService, TwoFactorService $twoFactorService, ?IntentoAccesoService $intentoAcceso = null)
     {
         $this->auditService = $auditService;
         $this->twoFactorService = $twoFactorService;
+        $this->intentoAcceso = $intentoAcceso ?? app(IntentoAccesoService::class);
+    }
+
+    private function cerrarSesionPorBloqueo(Request $request, string $motivo)
+    {
+        $request->merge(['motivo' => $motivo]);
+
+        return app(AuthController::class)->logout($request);
     }
 
     public function mostrar(Request $request)
     {
+        if ($this->twoFactorService->desafioExpirado($request->session())) {
+            return $this->cerrarSesionPorBloqueo($request, '2fa_tiempo_expirado');
+        }
+
+        if ($this->intentoAcceso->segundosBloqueoDosFactores((int) Auth::id(), $request->ip()) > 0) {
+            return $this->cerrarSesionPorBloqueo($request, '2fa_limite_intentos');
+        }
+
         if ($this->twoFactorService->sesionVerificada($request->session(), Auth::user())) {
             return redirect()->route('inicio');
         }
+
         return view('auth.2fa.codigo-admin');
     }
 
@@ -36,6 +57,16 @@ class VerificarCodigo2FAController extends Controller
         ]);
 
         $usuario = Auth::user();
+
+        // La expiración manda sobre cualquier código, incluso uno válido.
+        if ($this->twoFactorService->desafioExpirado($request->session())) {
+            return $this->cerrarSesionPorBloqueo($request, '2fa_tiempo_expirado');
+        }
+
+        // Bloqueo por agotar los intentos 2FA.
+        if ($this->intentoAcceso->segundosBloqueoDosFactores((int) $usuario->id, $request->ip()) > 0) {
+            return $this->cerrarSesionPorBloqueo($request, '2fa_limite_intentos');
+        }
 
         // Protección contra fuerza bruta a nivel de endpoint (no por código):
         // un código válido se acepta aunque haya intentos fallidos previos.
@@ -56,9 +87,9 @@ class VerificarCodigo2FAController extends Controller
         // Buscar código válido pendiente
         $codigos = Codigo2FAAdministrado::where('usuario_id', $usuario->id)
             ->where('usado', false)
-            ->where(function($q) {
+            ->where(function ($q) {
                 $q->whereNull('expira_en')
-                  ->orWhere('expira_en', '>', now());
+                    ->orWhere('expira_en', '>', now());
             })
             ->get();
 
@@ -80,6 +111,7 @@ class VerificarCodigo2FAController extends Controller
                 // Ignorar si el almacén no responde.
             }
             $this->auditService->log('2fa_codigo_invalido', $usuario->id, 'Código 2FA inválido');
+
             return back()->withErrors(['codigo' => 'Código inválido.']);
         }
 

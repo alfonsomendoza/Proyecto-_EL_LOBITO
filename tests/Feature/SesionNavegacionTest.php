@@ -206,15 +206,26 @@ class SesionNavegacionTest extends TestCase
     {
         $this->usuario('cajero_nav_limite');
 
-        // Cinco fallos permitidos.
-        for ($intento = 1; $intento <= 5; $intento++) {
+        // Los dos primeros fallos no bloquean.
+        for ($intento = 1; $intento <= 2; $intento++) {
             $this->post(route('login.post'), [
                 'usuario' => 'cajero_nav_limite',
                 'password' => 'incorrecta',
             ])->assertRedirect(route('login'));
         }
 
-        // El sexto intento se corta aunque la contraseña sea correcta.
+        // El tercer fallo activa el bloqueo de 30 segundos.
+        $bloqueado = $this->post(route('login.post'), [
+            'usuario' => 'cajero_nav_limite',
+            'password' => 'incorrecta',
+        ]);
+
+        $this->assertStringContainsString(
+            '30 segundos',
+            (string) session('errors')->first('usuario')
+        );
+
+        // El cuarto intento se corta aunque la contraseña sea correcta.
         $bloqueado = $this->post(route('login.post'), [
             'usuario' => 'cajero_nav_limite',
             'password' => 'secret123',

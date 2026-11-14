@@ -3,32 +3,38 @@
 namespace App\Http\Controllers;
 
 use App\Services\AuditService;
+use App\Services\IntentoAccesoService;
 use App\Services\TwoFactorPolicyService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
     protected AuditService $auditService;
+
     protected TwoFactorPolicyService $twoFactorPolicy;
+
     protected TwoFactorService $twoFactorService;
+
+    protected IntentoAccesoService $intentoAcceso;
 
     public function __construct(
         ?AuditService $auditService = null,
         ?TwoFactorPolicyService $twoFactorPolicy = null,
-        ?TwoFactorService $twoFactorService = null
+        ?TwoFactorService $twoFactorService = null,
+        ?IntentoAccesoService $intentoAcceso = null
     ) {
         $this->auditService = $auditService ?? app(AuditService::class);
         $this->twoFactorPolicy = $twoFactorPolicy ?? app(TwoFactorPolicyService::class);
         $this->twoFactorService = $twoFactorService ?? app(TwoFactorService::class);
+        $this->intentoAcceso = $intentoAcceso ?? app(IntentoAccesoService::class);
     }
+
     /*
      * Minutos sin actividad tras los cuales otro equipo puede reclamar la
      * sesión. Sirve para liberar sesiones abandonadas (equipo apagado, navegador
@@ -40,16 +46,15 @@ class AuthController extends Controller
      */
     private const MINUTOS_INACTIVIDAD = 10;
 
-    /*
-     * Límite de intentos de acceso por usuario + IP.
+    /**
+     * Límites por cuenta normalizada + IP.
      *
-     * Sin este límite, un atacante podía probar contraseñas sin freno. Se
-     * cuentan solo los fallos de credenciales: un login correcto limpia el
-     * contador y los rechazos por rol/sesión única no lo incrementan.
+     * Se almacenan en caché persistente (tabla `cache` en producción): el
+     * bloqueo sobrevive a cambios de sesión/navegador y es el mismo criterio
+     * para cualquier persona que intente acceder desde el mismo origen.
+     * Un inicio de sesión correcto reinicia el contador y la escalada.
+     * Los límites viven en IntentoAccesoService.
      */
-    private const MAX_INTENTOS_LOGIN = 5;
-    private const SEGUNDOS_BLOQUEO_LOGIN = 60;
-
     public function showLoginForm(Request $request): Response
     {
         $user = Auth::user();
@@ -93,27 +98,21 @@ class AuthController extends Controller
             'password' => 'required',
         ]);
 
-        $claveLimitador = $this->claveLimitadorLogin($request);
+        $segundosBloqueo = $this->intentoAcceso
+            ->segundosBloqueoLogin((string) $request->input('usuario'), $request->ip());
 
         // Demasiados fallos seguidos: se corta el intento ANTES de consultar
         // la base de datos, para no permitir fuerza bruta ni enumeración.
-        // Si el almacén de caché no estuviera disponible, el login NO se
-        // bloquea: se registra el aviso y se sigue con la autenticación.
-        try {
-            if (RateLimiter::tooManyAttempts($claveLimitador, self::MAX_INTENTOS_LOGIN)) {
-                $segundos = RateLimiter::availableIn($claveLimitador);
+        // El mensaje es el mismo para cuentas existentes y no existentes.
+        if ($segundosBloqueo > 0) {
+            $this->auditService->log('login_bloqueado', null, 'Demasiados intentos fallidos', [
+                'username' => $request->usuario,
+                'segundos_restantes' => $segundosBloqueo,
+            ], $request);
 
-                $this->auditService->log('login_bloqueado', null, 'Demasiados intentos fallidos', [
-                    'username' => $request->usuario,
-                    'segundos_restantes' => $segundos,
-                ], $request);
-
-                return redirect()->route('login')->withErrors([
-                    'usuario' => "Demasiados intentos fallidos. Espera {$segundos} segundos e inténtalo de nuevo.",
-                ]);
-            }
-        } catch (\Throwable $e) {
-            Log::warning('No se pudo consultar el limitador de login: '.$e->getMessage());
+            return redirect()->route('login')->withErrors([
+                'usuario' => "Demasiados intentos fallidos. Espera {$segundosBloqueo} segundos e inténtalo de nuevo.",
+            ]);
         }
 
         /*
@@ -134,13 +133,6 @@ class AuthController extends Controller
             'password' => $request->password,
             'activo' => 1,
         ])) {
-            // Credenciales correctas: se reinicia el contador de fallos.
-            try {
-                RateLimiter::clear($claveLimitador);
-            } catch (\Throwable $e) {
-                Log::warning('No se pudo reiniciar el limitador de login: '.$e->getMessage());
-            }
-
             /*
              * El ROL también debe estar ACTIVO: un rol desactivado no concede
              * acceso aunque el usuario siga activo. Se cierra la sesión recién
@@ -192,9 +184,12 @@ class AuthController extends Controller
 
                 return redirect()->route('login')->withErrors([
                     'usuario' => 'Este usuario ya tiene una sesión activa en otro equipo. '
-                        . 'Primero cierra esa sesión para poder entrar.',
+                        .'Primero cierra esa sesión para poder entrar.',
                 ]);
             }
+            // El acceso quedó completo (credenciales, rol y sesión): reinicia
+            // el contador de fallos y la escalada de bloqueos.
+            $this->intentoAcceso->limpiarLogin((string) $request->input('usuario'), $request->ip());
             $request->session()->save();
 
             // Guardamos desde ya el hash de la contraseña vigente en la
@@ -208,6 +203,7 @@ class AuthController extends Controller
                 // Único punto de escritura de la verificación: la marca
                 // temporal + sello que valida TwoFactorService.
                 $this->twoFactorService->marcarSesionVerificada($request->session(), Auth::user());
+
                 return redirect()->route('inicio');
             }
 
@@ -223,26 +219,34 @@ class AuthController extends Controller
                     return redirect()->route('2fa.setup');
                 }
                 // Si ya lo tiene configurado, debe hacer el challenge
+                $this->twoFactorService->iniciarDesafio($request->session(), true);
+
                 return redirect()->route('2fa.challenge');
             }
 
             // Si no se exige 2FA según política, marcar como verificado con
             // la marca temporal y el sello de la política vigente.
             $this->twoFactorService->marcarSesionVerificada($request->session(), $user);
+
             return redirect()->route('inicio');
         }
 
         // Credenciales incorrectas: cuenta el fallo y redirige al login con un
-        // mensaje genérico (no revela si el usuario existe o no).
-        try {
-            RateLimiter::hit($claveLimitador, self::SEGUNDOS_BLOQUEO_LOGIN);
-        } catch (\Throwable $e) {
-            Log::warning('No se pudo registrar el intento fallido de login: '.$e->getMessage());
-        }
+        // mensaje genérico (no revela si el usuario existe o no). Al tercer
+        // fallo se activa el bloqueo progresivo y se informa el tiempo.
+        $resultado = $this->intentoAcceso
+            ->registrarFalloLogin((string) $request->input('usuario'), $request->ip());
 
         $this->auditService->log('login_rechazado', null, 'Credenciales incorrectas', ['username' => $request->usuario], $request);
+
+        $mensaje = 'Las credenciales proporcionadas no son correctas.';
+
+        if ($resultado['bloqueado']) {
+            $mensaje = "Demasiados intentos fallidos. Espera {$resultado['segundos']} segundos e inténtalo de nuevo.";
+        }
+
         return redirect()->route('login')->withErrors([
-            'usuario' => 'Las credenciales proporcionadas no son correctas.',
+            'usuario' => $mensaje,
         ]);
     }
 
@@ -296,6 +300,8 @@ class AuthController extends Controller
         $mensajesSalida = [
             '2fa_sin_activar' => 'Has salido sin activar la verificación en dos pasos.',
             '2fa_challenge_salir' => 'Has cerrado tu sesión sin completar la verificación 2FA.',
+            '2fa_limite_intentos' => 'Has alcanzado el límite de intentos 2FA. Espera 30 segundos e inténtalo de nuevo.',
+            '2fa_tiempo_expirado' => 'Tu sesión se cerró porque no completaste la verificación 2FA dentro del tiempo permitido',
         ];
 
         $motivo = (string) $request->input('motivo');
@@ -306,19 +312,6 @@ class AuthController extends Controller
 
         // Regresamos al login.
         return redirect()->route('login');
-    }
-
-    /**
-     * Clave del limitador de intentos: usuario normalizado + IP.
-     *
-     * Se normaliza el nombre en minúsculas para que variantes como
-     * «Admin», «ADMIN» o «admin» compartan el mismo contador.
-     */
-    private function claveLimitadorLogin(Request $request): string
-    {
-        return 'login:'
-            .Str::lower(trim((string) $request->input('usuario')))
-            .'|'.$request->ip();
     }
 
     /**
@@ -391,7 +384,7 @@ class AuthController extends Controller
 
                 // Comprobar si está vencido
                 try {
-                    $ultimaCarbon = \Illuminate\Support\Carbon::parse($ultima);
+                    $ultimaCarbon = Carbon::parse($ultima);
                     if ($ultimaCarbon->lte($limite)) {
                         DB::table('usuarios')
                             ->where('id', $usuarioId)
