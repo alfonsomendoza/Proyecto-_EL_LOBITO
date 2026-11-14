@@ -193,10 +193,10 @@ class UsuarioController extends Controller
             }
 
             // Validamos longitud mínima de la contraseña.
-            if (mb_strlen($password) < 6) {
+            if (mb_strlen($password) < 12) {
                 return response()->json([
                     'exito' => false,
-                    'error' => 'La contraseña debe tener al menos 6 caracteres.',
+                    'error' => 'La contraseña debe tener al menos 12 caracteres.',
                 ]);
             }
 
@@ -403,10 +403,10 @@ class UsuarioController extends Controller
             }
 
             // Longitud mínima (se aplica a la contraseña generada o manual).
-            if (mb_strlen($password) < 6) {
+            if (mb_strlen($password) < 12) {
                 return response()->json([
                     'exito' => false,
-                    'error' => 'La contraseña debe tener al menos 6 caracteres.',
+                    'error' => 'La contraseña debe tener al menos 12 caracteres.',
                 ]);
             }
 

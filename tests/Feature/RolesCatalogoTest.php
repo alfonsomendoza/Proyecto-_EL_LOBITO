@@ -722,7 +722,7 @@ class RolesCatalogoTest extends TestCase
                 'accion' => 'crear',
                 'nombre' => 'Nuevo Cajero',
                 'username' => 'nuevo_cajero',
-                'password' => 'secret123',
+                'password' => 'ClaveSegura123',
                 'rol_id' => $cajeroId,
             ])
             ->assertStatus(200)
@@ -738,7 +738,7 @@ class RolesCatalogoTest extends TestCase
                 'accion' => 'crear',
                 'nombre' => 'Nuevo Cajero',
                 'username' => 'nuevo_cajero',
-                'password' => 'secret123',
+                'password' => 'ClaveSegura123',
                 'rol_id' => $cajeroId,
             ])
             ->assertStatus(200)

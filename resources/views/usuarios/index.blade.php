@@ -423,8 +423,8 @@ function modalUsuario() {
                 Swal.showValidationMessage('Todos los campos son obligatorios');
                 return;
             }
-            if (val.password.length < 6) {
-                Swal.showValidationMessage('La contraseña debe tener al menos 6 caracteres');
+            if (val.password.length < 12) {
+                Swal.showValidationMessage('La contraseña debe tener al menos 12 caracteres');
                 return;
             }
 
@@ -621,7 +621,7 @@ function modalResetPass(usuarioId, nombreUsuario) {
 
                 <div id="panel-manual" style="display:none;">
                     <label style="font-weight:bold; display:block; margin-bottom: 5px;">Nueva contraseña:</label>
-                    <input id="reset-pass" type="password" class="swal2-input" placeholder="Mínimo 6 caracteres" style="width:100%; margin:0 0 12px; height:38px; box-sizing:border-box;">
+                    <input id="reset-pass" type="password" class="swal2-input" placeholder="Mínimo 12 caracteres" style="width:100%; margin:0 0 12px; height:38px; box-sizing:border-box;">
                     <label style="font-weight:bold; display:block; margin-bottom: 5px;">Confirmar contraseña:</label>
                     <input id="reset-confirm" type="password" class="swal2-input" placeholder="Repite la contraseña" style="width:100%; margin:0; height:38px; box-sizing:border-box;">
                     <div style="display:flex; gap:6px; margin-top:8px;">
@@ -710,8 +710,8 @@ function modalResetPass(usuarioId, nombreUsuario) {
                 conf = document.getElementById('reset-confirm').value;
             }
 
-            if (!pass || pass.length < 6) {
-                Swal.showValidationMessage('La contraseña debe tener al menos 6 caracteres');
+            if (!pass || pass.length < 12) {
+                Swal.showValidationMessage('La contraseña debe tener al menos 12 caracteres');
                 return false;
             }
             if (pass !== conf) {
